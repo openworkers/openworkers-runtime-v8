@@ -1,3 +1,10 @@
 {
-  "cSpell.words": ["actix", "oneshot", "openworkers"]
+  "cSpell.words": [
+    "actix",
+    "oneshot",
+    "openworkers",
+    "reqwest",
+    "rustls",
+    "serde"
+  ]
 }

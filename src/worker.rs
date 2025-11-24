@@ -62,6 +62,15 @@ impl Worker {
     ) -> Result<HttpResponse, String> {
         let req = &fetch_init.req;
 
+        // Create channel for response notification (like JSC)
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel::<String>();
+
+        // Store the sender in runtime so JS can use it
+        {
+            let mut tx_lock = self.runtime.fetch_response_tx.lock().unwrap();
+            *tx_lock = Some(response_tx);
+        }
+
         // Trigger fetch handler
         {
             let scope = &mut v8::HandleScope::new(&mut self.runtime.isolate);
@@ -105,7 +114,7 @@ impl Worker {
         // Strategy: Check frequently with minimal sleep for fast responses,
         // but support long-running async operations (up to 5 seconds)
         for iteration in 0..5000 {
-            // Process pending callbacks and microtasks
+            // Process pending cdansallbacks and microtasks
             self.runtime.process_callbacks();
 
             // Check if response is available

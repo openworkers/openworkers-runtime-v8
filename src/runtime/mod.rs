@@ -33,6 +33,8 @@ pub struct Runtime {
     pub callback_rx: mpsc::UnboundedReceiver<CallbackMessage>,
     pub(crate) fetch_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
     pub(crate) _next_callback_id: Arc<Mutex<CallbackId>>,
+    /// Channel for fetch response (set during fetch event execution)
+    pub(crate) fetch_response_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
 }
 
 impl Runtime {
@@ -53,6 +55,7 @@ impl Runtime {
 
         let fetch_callbacks = Arc::new(Mutex::new(HashMap::new()));
         let next_callback_id = Arc::new(Mutex::new(1));
+        let fetch_response_tx = Arc::new(Mutex::new(None));
 
         let mut isolate = v8::Isolate::new(Default::default());
 
@@ -82,6 +85,7 @@ impl Runtime {
             callback_rx,
             fetch_callbacks,
             _next_callback_id: next_callback_id,
+            fetch_response_tx,
         };
 
         (runtime, scheduler_rx, callback_tx)
