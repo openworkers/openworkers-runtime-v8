@@ -148,6 +148,13 @@ isolate.perform_microtask_checkpoint();
 
 This enables full async/await support.
 
+### V8 Platform Integration
+
+Properly uses V8 Platform APIs like Deno:
+- `v8::Platform::pump_message_loop()` - Process V8 internal tasks
+- `perform_microtask_checkpoint()` - Process Promises with TryCatch
+- Adaptive polling with early exit detection
+
 ### Adaptive Event Loop
 
 The worker uses adaptive sleep for optimal performance:

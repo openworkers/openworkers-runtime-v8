@@ -114,7 +114,7 @@ impl Worker {
         // Strategy: Check frequently with minimal sleep for fast responses,
         // but support long-running async operations (up to 5 seconds)
         for iteration in 0..5000 {
-            // Process pending cdansallbacks and microtasks
+            // Process pending callbacks and microtasks
             self.runtime.process_callbacks();
 
             // Check if response is available

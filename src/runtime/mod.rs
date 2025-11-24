@@ -35,6 +35,8 @@ pub struct Runtime {
     pub(crate) _next_callback_id: Arc<Mutex<CallbackId>>,
     /// Channel for fetch response (set during fetch event execution)
     pub(crate) fetch_response_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
+    /// V8 Platform (for pump_message_loop)
+    platform: &'static v8::SharedRef<v8::Platform>,
 }
 
 impl Runtime {
@@ -43,11 +45,15 @@ impl Runtime {
         mpsc::UnboundedReceiver<SchedulerMessage>,
         mpsc::UnboundedSender<CallbackMessage>,
     ) {
-        static INIT: std::sync::Once = std::sync::Once::new();
-        INIT.call_once(|| {
+        // Initialize V8 platform (once, globally) using OnceLock for safety
+        use std::sync::OnceLock;
+        static PLATFORM: OnceLock<v8::SharedRef<v8::Platform>> = OnceLock::new();
+
+        let platform = PLATFORM.get_or_init(|| {
             let platform = v8::new_default_platform(0, false).make_shared();
-            v8::V8::initialize_platform(platform);
+            v8::V8::initialize_platform(platform.clone());
             v8::V8::initialize();
+            platform
         });
 
         let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel();
@@ -86,18 +92,25 @@ impl Runtime {
             fetch_callbacks,
             _next_callback_id: next_callback_id,
             fetch_response_tx,
+            platform,
         };
 
         (runtime, scheduler_rx, callback_tx)
     }
 
     pub fn process_callbacks(&mut self) {
-        // Process pending callbacks (timers, fetch, etc.)
-        while let Ok(msg) = self.callback_rx.try_recv() {
-            let scope = &mut v8::HandleScope::new(&mut self.isolate);
-            let context = v8::Local::new(scope, &self.context);
-            let scope = &mut v8::ContextScope::new(scope, context);
+        let scope = &mut v8::HandleScope::new(&mut self.isolate);
+        let context = v8::Local::new(scope, &self.context);
+        let scope = &mut v8::ContextScope::new(scope, context);
 
+        // 1. Pump V8 Platform message loop (like deno_core)
+        // This processes foreground tasks posted by V8
+        while v8::Platform::pump_message_loop(self.platform, scope, false) {
+            // Keep pumping while there are messages
+        }
+
+        // 2. Process our custom callbacks (timers, fetch, etc.)
+        while let Ok(msg) = self.callback_rx.try_recv() {
             match msg {
                 CallbackMessage::ExecuteTimeout(callback_id)
                 | CallbackMessage::ExecuteInterval(callback_id) => {
@@ -144,9 +157,22 @@ impl Runtime {
             }
         }
 
-        // CRITICAL: Process microtasks (Promises, async/await)
-        // This is needed for Promises to resolve!
-        self.isolate.perform_microtask_checkpoint();
+        // 3. Process microtasks (Promises, async/await) - like deno_core
+        // Use TryCatch to handle any exceptions during microtask processing
+        let tc_scope = &mut v8::TryCatch::new(scope);
+        tc_scope.perform_microtask_checkpoint();
+
+        // Check for exceptions during microtask processing
+        if let Some(exception) = tc_scope.exception() {
+            let exception_string = exception
+                .to_string(tc_scope)
+                .map(|s| s.to_rust_string_lossy(tc_scope))
+                .unwrap_or_else(|| "Unknown exception".to_string());
+            eprintln!(
+                "Exception during microtask processing: {}",
+                exception_string
+            );
+        }
     }
 
     pub fn evaluate(&mut self, script: &str) -> Result<(), String> {
