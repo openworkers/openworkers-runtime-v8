@@ -1,0 +1,218 @@
+use crate::compat::{Script, TerminationReason};
+use crate::runtime::{Runtime, run_event_loop};
+use crate::task::{HttpResponse, Task};
+use bytes::Bytes;
+use rusty_v8 as v8;
+
+pub struct Worker {
+    pub(crate) runtime: Runtime,
+    event_loop_handle: tokio::task::JoinHandle<()>,
+}
+
+impl Worker {
+    /// Process pending callbacks (timers, etc.)
+    pub fn process_callbacks(&mut self) {
+        self.runtime.process_callbacks();
+    }
+
+    pub async fn new(
+        script: Script,
+        _log_tx: Option<std::sync::mpsc::Sender<crate::compat::LogEvent>>,
+        _limits: Option<crate::compat::RuntimeLimits>,
+    ) -> Result<Self, String> {
+        let (mut runtime, scheduler_rx, callback_tx) = Runtime::new();
+
+        // Setup addEventListener
+        setup_event_listener(&mut runtime)?;
+
+        // Evaluate user script
+        runtime.evaluate(&script.code)?;
+
+        // Start event loop in background
+        let event_loop_handle = tokio::spawn(async move {
+            run_event_loop(scheduler_rx, callback_tx).await;
+        });
+
+        Ok(Self {
+            runtime,
+            event_loop_handle,
+        })
+    }
+
+    pub async fn exec(&mut self, mut task: Task) -> Result<TerminationReason, String> {
+        match task {
+            Task::Fetch(ref mut init) => {
+                let fetch_init = init.take().ok_or("FetchInit already consumed")?;
+                match self.trigger_fetch_event(fetch_init).await {
+                    Ok(_) => Ok(TerminationReason::Success),
+                    Err(_) => Ok(TerminationReason::Exception),
+                }
+            }
+            Task::Scheduled(ref mut init) => {
+                let scheduled_init = init.take().ok_or("ScheduledInit already consumed")?;
+                self.trigger_scheduled_event(scheduled_init).await?;
+                Ok(TerminationReason::Success)
+            }
+        }
+    }
+
+    async fn trigger_fetch_event(
+        &mut self,
+        fetch_init: crate::task::FetchInit,
+    ) -> Result<HttpResponse, String> {
+        let req = &fetch_init.req;
+
+        // Trigger fetch handler in a separate scope
+        {
+            let scope = &mut v8::HandleScope::new(&mut self.runtime.isolate);
+            let context = v8::Local::new(scope, &self.runtime.context);
+            let scope = &mut v8::ContextScope::new(scope, context);
+
+            // Create request object
+            let request_obj = v8::Object::new(scope);
+
+            let url_key = v8::String::new(scope, "url").unwrap();
+            let url_val = v8::String::new(scope, &req.url).unwrap();
+            request_obj.set(scope, url_key.into(), url_val.into());
+
+            let method_key = v8::String::new(scope, "method").unwrap();
+            let method_val = v8::String::new(scope, &req.method).unwrap();
+            request_obj.set(scope, method_key.into(), method_val.into());
+
+            // Add headers
+            let headers_obj = v8::Object::new(scope);
+            for (key, value) in &req.headers {
+                let k = v8::String::new(scope, key).unwrap();
+                let v = v8::String::new(scope, value).unwrap();
+                headers_obj.set(scope, k.into(), v.into());
+            }
+            let headers_key = v8::String::new(scope, "headers").unwrap();
+            request_obj.set(scope, headers_key.into(), headers_obj.into());
+
+            // Trigger fetch handler
+            let global = context.global(scope);
+            let trigger_key = v8::String::new(scope, "__triggerFetch").unwrap();
+
+            if let Some(trigger_val) = global.get(scope, trigger_key.into())
+                && trigger_val.is_function() {
+                    let trigger_fn = unsafe { v8::Local::<v8::Function>::cast(trigger_val) };
+                    trigger_fn.call(scope, global.into(), &[request_obj.into()]);
+                }
+        } // Scope ends here
+
+        // Process any pending callbacks (timers, etc.)
+        self.runtime.process_callbacks();
+
+        // Get response
+        let scope = &mut v8::HandleScope::new(&mut self.runtime.isolate);
+        let context = v8::Local::new(scope, &self.runtime.context);
+        let scope = &mut v8::ContextScope::new(scope, context);
+        let global = context.global(scope);
+
+        let resp_key = v8::String::new(scope, "__lastResponse").unwrap();
+        let resp_val = global.get(scope, resp_key.into()).ok_or("No response")?;
+
+        if let Some(resp_obj) = resp_val.to_object(scope) {
+            let status_key = v8::String::new(scope, "status").unwrap();
+            let status = resp_obj
+                .get(scope, status_key.into())
+                .and_then(|v| v.uint32_value(scope))
+                .unwrap_or(200) as u16;
+
+            let body_key = v8::String::new(scope, "body").unwrap();
+            let body = resp_obj
+                .get(scope, body_key.into())
+                .and_then(|v| v.to_string(scope))
+                .map(|s| s.to_rust_string_lossy(scope))
+                .unwrap_or_default();
+
+            // Extract headers
+            let mut headers = vec![];
+            let headers_key = v8::String::new(scope, "headers").unwrap();
+            if let Some(headers_val) = resp_obj.get(scope, headers_key.into())
+                && let Some(headers_obj) = headers_val.to_object(scope)
+                    && let Some(props) = headers_obj.get_own_property_names(scope) {
+                        for i in 0..props.length() {
+                            if let Some(key_val) = props.get_index(scope, i)
+                                && let Some(key_str) = key_val.to_string(scope) {
+                                    let key = key_str.to_rust_string_lossy(scope);
+                                    if let Some(val) = headers_obj.get(scope, key_val)
+                                        && let Some(val_str) = val.to_string(scope) {
+                                            let value = val_str.to_rust_string_lossy(scope);
+                                            headers.push((key, value));
+                                        }
+                                }
+                        }
+                    }
+
+            let response = HttpResponse {
+                status,
+                headers,
+                body: Some(Bytes::from(body)),
+            };
+
+            let _ = fetch_init.res_tx.send(response.clone());
+            return Ok(response);
+        }
+
+        Err("Invalid response object".to_string())
+    }
+
+    async fn trigger_scheduled_event(
+        &mut self,
+        scheduled_init: crate::task::ScheduledInit,
+    ) -> Result<(), String> {
+        {
+            let scope = &mut v8::HandleScope::new(&mut self.runtime.isolate);
+            let context = v8::Local::new(scope, &self.runtime.context);
+            let scope = &mut v8::ContextScope::new(scope, context);
+
+            // Trigger scheduled handler
+            let global = context.global(scope);
+            let handler_key = v8::String::new(scope, "__scheduledHandler").unwrap();
+
+            if let Some(handler_val) = global.get(scope, handler_key.into())
+                && handler_val.is_function() {
+                    let handler_fn = unsafe { v8::Local::<v8::Function>::cast(handler_val) };
+
+                    // Create event object
+                    let event_obj = v8::Object::new(scope);
+                    let time_key = v8::String::new(scope, "scheduledTime").unwrap();
+                    let time_val = v8::Number::new(scope, scheduled_init.time as f64);
+                    event_obj.set(scope, time_key.into(), time_val.into());
+
+                    handler_fn.call(scope, global.into(), &[event_obj.into()]);
+                }
+        }
+
+        // Process callbacks
+        self.runtime.process_callbacks();
+
+        let _ = scheduled_init.res_tx.send(());
+        Ok(())
+    }
+}
+
+fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
+    let code = r#"
+        globalThis.addEventListener = function(type, handler) {
+            if (type === 'fetch') {
+                globalThis.__fetchHandler = handler;
+                globalThis.__triggerFetch = function(request) {
+                    const event = {
+                        request: request,
+                        respondWith: function(response) {
+                            this._response = response;
+                        }
+                    };
+                    handler(event);
+                    globalThis.__lastResponse = event._response || new Response('No response');
+                };
+            } else if (type === 'scheduled') {
+                globalThis.__scheduledHandler = handler;
+            }
+        };
+    "#;
+
+    runtime.evaluate(code)
+}
