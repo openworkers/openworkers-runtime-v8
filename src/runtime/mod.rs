@@ -32,8 +32,7 @@ pub struct Runtime {
     pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     pub callback_rx: mpsc::UnboundedReceiver<CallbackMessage>,
     pub(crate) fetch_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
-    pub(crate) next_callback_id: Arc<Mutex<CallbackId>>,
-    pub(crate) fetch_response_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
+    pub(crate) _next_callback_id: Arc<Mutex<CallbackId>>,
 }
 
 impl Runtime {
@@ -54,7 +53,6 @@ impl Runtime {
 
         let fetch_callbacks = Arc::new(Mutex::new(HashMap::new()));
         let next_callback_id = Arc::new(Mutex::new(1));
-        let fetch_response_tx = Arc::new(Mutex::new(None));
 
         let mut isolate = v8::Isolate::new(Default::default());
 
@@ -83,14 +81,14 @@ impl Runtime {
             scheduler_tx,
             callback_rx,
             fetch_callbacks,
-            next_callback_id,
-            fetch_response_tx,
+            _next_callback_id: next_callback_id,
         };
 
         (runtime, scheduler_rx, callback_tx)
     }
 
     pub fn process_callbacks(&mut self) {
+        // Process pending callbacks (timers, fetch, etc.)
         while let Ok(msg) = self.callback_rx.try_recv() {
             let scope = &mut v8::HandleScope::new(&mut self.isolate);
             let context = v8::Local::new(scope, &self.context);
@@ -104,12 +102,12 @@ impl Runtime {
                     let execute_timer_key = v8::String::new(scope, "__executeTimer").unwrap();
 
                     if let Some(execute_fn_val) = global.get(scope, execute_timer_key.into())
-                        && execute_fn_val.is_function() {
-                            let execute_fn =
-                                unsafe { v8::Local::<v8::Function>::cast(execute_fn_val) };
-                            let id_val = v8::Number::new(scope, callback_id as f64);
-                            execute_fn.call(scope, global.into(), &[id_val.into()]);
-                        }
+                        && execute_fn_val.is_function()
+                    {
+                        let execute_fn = unsafe { v8::Local::<v8::Function>::cast(execute_fn_val) };
+                        let id_val = v8::Number::new(scope, callback_id as f64);
+                        execute_fn.call(scope, global.into(), &[id_val.into()]);
+                    }
                 }
                 CallbackMessage::FetchSuccess(callback_id, response) => {
                     let callback_opt = {
@@ -120,11 +118,11 @@ impl Runtime {
                     if let Some(callback_global) = callback_opt
                         && let Ok(response_obj) =
                             fetch::response::create_response_object(scope, response)
-                        {
-                            let callback = v8::Local::new(scope, &callback_global);
-                            let recv = v8::undefined(scope);
-                            callback.call(scope, recv.into(), &[response_obj.into()]);
-                        }
+                    {
+                        let callback = v8::Local::new(scope, &callback_global);
+                        let recv = v8::undefined(scope);
+                        callback.call(scope, recv.into(), &[response_obj.into()]);
+                    }
                 }
                 CallbackMessage::FetchError(callback_id, error_msg) => {
                     let callback_opt = {
@@ -141,6 +139,10 @@ impl Runtime {
                 }
             }
         }
+
+        // CRITICAL: Process microtasks (Promises, async/await)
+        // This is needed for Promises to resolve!
+        self.isolate.perform_microtask_checkpoint();
     }
 
     pub fn evaluate(&mut self, script: &str) -> Result<(), String> {

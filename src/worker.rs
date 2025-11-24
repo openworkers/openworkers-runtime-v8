@@ -6,7 +6,7 @@ use rusty_v8 as v8;
 
 pub struct Worker {
     pub(crate) runtime: Runtime,
-    event_loop_handle: tokio::task::JoinHandle<()>,
+    _event_loop_handle: tokio::task::JoinHandle<()>,
 }
 
 impl Worker {
@@ -35,7 +35,7 @@ impl Worker {
 
         Ok(Self {
             runtime,
-            event_loop_handle,
+            _event_loop_handle: event_loop_handle,
         })
     }
 
@@ -62,7 +62,7 @@ impl Worker {
     ) -> Result<HttpResponse, String> {
         let req = &fetch_init.req;
 
-        // Trigger fetch handler in a separate scope
+        // Trigger fetch handler
         {
             let scope = &mut v8::HandleScope::new(&mut self.runtime.isolate);
             let context = v8::Local::new(scope, &self.runtime.context);
@@ -94,23 +94,67 @@ impl Worker {
             let trigger_key = v8::String::new(scope, "__triggerFetch").unwrap();
 
             if let Some(trigger_val) = global.get(scope, trigger_key.into())
-                && trigger_val.is_function() {
-                    let trigger_fn = unsafe { v8::Local::<v8::Function>::cast(trigger_val) };
-                    trigger_fn.call(scope, global.into(), &[request_obj.into()]);
+                && trigger_val.is_function()
+            {
+                let trigger_fn = unsafe { v8::Local::<v8::Function>::cast(trigger_val) };
+                trigger_fn.call(scope, global.into(), &[request_obj.into()]);
+            }
+        }
+
+        // Process callbacks to allow async operations (Promises, timers, fetch) to complete
+        // Strategy: Check frequently with minimal sleep for fast responses,
+        // but support long-running async operations (up to 5 seconds)
+        for iteration in 0..5000 {
+            // Process pending callbacks and microtasks
+            self.runtime.process_callbacks();
+
+            // Check if response is available
+            let scope = &mut v8::HandleScope::new(&mut self.runtime.isolate);
+            let context = v8::Local::new(scope, &self.runtime.context);
+            let scope = &mut v8::ContextScope::new(scope, context);
+            let global = context.global(scope);
+
+            let resp_key = v8::String::new(scope, "__lastResponse").unwrap();
+            if let Some(resp_val) = global.get(scope, resp_key.into()) {
+                // Check if it's a valid Response object (not undefined, not a Promise)
+                if !resp_val.is_undefined() && !resp_val.is_null() {
+                    if let Some(resp_obj) = resp_val.to_object(scope) {
+                        // Check if it has a 'status' property (indicates it's a Response, not a Promise)
+                        let status_key = v8::String::new(scope, "status").unwrap();
+                        if resp_obj.get(scope, status_key.into()).is_some() {
+                            // Response is ready!
+                            break;
+                        }
+                    }
                 }
-        } // Scope ends here
+            }
 
-        // Process any pending callbacks (timers, etc.)
-        self.runtime.process_callbacks();
+            // Adaptive sleep: fast for first checks, slower later
+            // This allows fast responses (<1ms) while supporting slow operations
+            let sleep_duration = if iteration < 10 {
+                // First 10 iterations: no sleep (for immediate sync responses)
+                tokio::time::Duration::from_micros(1)
+            } else if iteration < 100 {
+                // Next 90 iterations: 1ms sleep (for fast async < 100ms)
+                tokio::time::Duration::from_millis(1)
+            } else {
+                // After 100ms: 10ms sleep (for slow operations)
+                tokio::time::Duration::from_millis(10)
+            };
 
-        // Get response
+            tokio::time::sleep(sleep_duration).await;
+        }
+
+        // Now read the response from global __lastResponse
         let scope = &mut v8::HandleScope::new(&mut self.runtime.isolate);
         let context = v8::Local::new(scope, &self.runtime.context);
         let scope = &mut v8::ContextScope::new(scope, context);
         let global = context.global(scope);
 
         let resp_key = v8::String::new(scope, "__lastResponse").unwrap();
-        let resp_val = global.get(scope, resp_key.into()).ok_or("No response")?;
+        let resp_val = global
+            .get(scope, resp_key.into())
+            .ok_or("No response set")?;
 
         if let Some(resp_obj) = resp_val.to_object(scope) {
             let status_key = v8::String::new(scope, "status").unwrap();
@@ -131,19 +175,22 @@ impl Worker {
             let headers_key = v8::String::new(scope, "headers").unwrap();
             if let Some(headers_val) = resp_obj.get(scope, headers_key.into())
                 && let Some(headers_obj) = headers_val.to_object(scope)
-                    && let Some(props) = headers_obj.get_own_property_names(scope) {
-                        for i in 0..props.length() {
-                            if let Some(key_val) = props.get_index(scope, i)
-                                && let Some(key_str) = key_val.to_string(scope) {
-                                    let key = key_str.to_rust_string_lossy(scope);
-                                    if let Some(val) = headers_obj.get(scope, key_val)
-                                        && let Some(val_str) = val.to_string(scope) {
-                                            let value = val_str.to_rust_string_lossy(scope);
-                                            headers.push((key, value));
-                                        }
-                                }
+                && let Some(props) = headers_obj.get_own_property_names(scope)
+            {
+                for i in 0..props.length() {
+                    if let Some(key_val) = props.get_index(scope, i)
+                        && let Some(key_str) = key_val.to_string(scope)
+                    {
+                        let key = key_str.to_rust_string_lossy(scope);
+                        if let Some(val) = headers_obj.get(scope, key_val)
+                            && let Some(val_str) = val.to_string(scope)
+                        {
+                            let value = val_str.to_rust_string_lossy(scope);
+                            headers.push((key, value));
                         }
                     }
+                }
+            }
 
             let response = HttpResponse {
                 status,
@@ -172,17 +219,18 @@ impl Worker {
             let handler_key = v8::String::new(scope, "__scheduledHandler").unwrap();
 
             if let Some(handler_val) = global.get(scope, handler_key.into())
-                && handler_val.is_function() {
-                    let handler_fn = unsafe { v8::Local::<v8::Function>::cast(handler_val) };
+                && handler_val.is_function()
+            {
+                let handler_fn = unsafe { v8::Local::<v8::Function>::cast(handler_val) };
 
-                    // Create event object
-                    let event_obj = v8::Object::new(scope);
-                    let time_key = v8::String::new(scope, "scheduledTime").unwrap();
-                    let time_val = v8::Number::new(scope, scheduled_init.time as f64);
-                    event_obj.set(scope, time_key.into(), time_val.into());
+                // Create event object
+                let event_obj = v8::Object::new(scope);
+                let time_key = v8::String::new(scope, "scheduledTime").unwrap();
+                let time_val = v8::Number::new(scope, scheduled_init.time as f64);
+                event_obj.set(scope, time_key.into(), time_val.into());
 
-                    handler_fn.call(scope, global.into(), &[event_obj.into()]);
-                }
+                handler_fn.call(scope, global.into(), &[event_obj.into()]);
+            }
         }
 
         // Process callbacks
@@ -201,12 +249,36 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
                 globalThis.__triggerFetch = function(request) {
                     const event = {
                         request: request,
-                        respondWith: function(response) {
-                            this._response = response;
+                        respondWith: function(responseOrPromise) {
+                            // Handle both direct Response and Promise<Response>
+                            if (responseOrPromise && typeof responseOrPromise.then === 'function') {
+                                // It's a Promise, wait for it to resolve
+                                responseOrPromise
+                                    .then(response => {
+                                        globalThis.__lastResponse = response;
+                                    })
+                                    .catch(error => {
+                                        console.error('[respondWith] Promise rejected:', error);
+                                        globalThis.__lastResponse = new Response(
+                                            'Promise rejected: ' + (error.message || error),
+                                            { status: 500 }
+                                        );
+                                    });
+                            } else {
+                                // Direct Response object
+                                globalThis.__lastResponse = responseOrPromise;
+                            }
                         }
                     };
-                    handler(event);
-                    globalThis.__lastResponse = event._response || new Response('No response');
+
+                    // Call handler synchronously
+                    try {
+                        handler(event);
+                    } catch (error) {
+                        console.error('[addEventListener] Error in fetch handler:', error);
+                        // Set error response
+                        globalThis.__lastResponse = new Response('Handler exception: ' + (error.message || error), { status: 500 });
+                    }
                 };
             } else if (type === 'scheduled') {
                 globalThis.__scheduledHandler = handler;

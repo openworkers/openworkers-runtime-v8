@@ -18,10 +18,11 @@ pub fn setup_console(scope: &mut v8::HandleScope) {
         mut _retval: v8::ReturnValue,
     ) {
         if args.length() > 0
-            && let Some(msg_str) = args.get(0).to_string(scope) {
-                let msg = msg_str.to_rust_string_lossy(scope);
-                println!("{}", msg);
-            }
+            && let Some(msg_str) = args.get(0).to_string(scope)
+        {
+            let msg = msg_str.to_rust_string_lossy(scope);
+            println!("{}", msg);
+        }
     }
 
     let global = scope.get_current_context().global(scope);
@@ -159,14 +160,15 @@ fn schedule_timeout_callback(
 
         if args.length() >= 2
             && let Some(id_val) = args.get(0).to_uint32(scope)
-                && let Some(delay_val) = args.get(1).to_uint32(scope) {
-                    let id = id_val.value() as u64;
-                    let delay = delay_val.value() as u64;
+            && let Some(delay_val) = args.get(1).to_uint32(scope)
+        {
+            let id = id_val.value() as u64;
+            let delay = delay_val.value() as u64;
 
-                    let _ = state
-                        .scheduler_tx
-                        .send(SchedulerMessage::ScheduleTimeout(id, delay));
-                }
+            let _ = state
+                .scheduler_tx
+                .send(SchedulerMessage::ScheduleTimeout(id, delay));
+        }
     }
 }
 
@@ -187,14 +189,15 @@ fn schedule_interval_callback(
 
         if args.length() >= 2
             && let Some(id_val) = args.get(0).to_uint32(scope)
-                && let Some(interval_val) = args.get(1).to_uint32(scope) {
-                    let id = id_val.value() as u64;
-                    let interval = interval_val.value() as u64;
+            && let Some(interval_val) = args.get(1).to_uint32(scope)
+        {
+            let id = id_val.value() as u64;
+            let interval = interval_val.value() as u64;
 
-                    let _ = state
-                        .scheduler_tx
-                        .send(SchedulerMessage::ScheduleInterval(id, interval));
-                }
+            let _ = state
+                .scheduler_tx
+                .send(SchedulerMessage::ScheduleInterval(id, interval));
+        }
     }
 }
 
@@ -214,29 +217,182 @@ fn clear_timer_callback(
         let state = unsafe { &*state_ptr };
 
         if args.length() >= 1
-            && let Some(id_val) = args.get(0).to_uint32(scope) {
-                let id = id_val.value() as u64;
-                let _ = state.scheduler_tx.send(SchedulerMessage::ClearTimer(id));
-            }
+            && let Some(id_val) = args.get(0).to_uint32(scope)
+        {
+            let id = id_val.value() as u64;
+            let _ = state.scheduler_tx.send(SchedulerMessage::ClearTimer(id));
+        }
     }
+}
+
+// Shared state for fetch callbacks
+#[derive(Clone)]
+pub struct FetchState {
+    pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+    pub callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    pub next_id: Arc<Mutex<CallbackId>>,
 }
 
 pub fn setup_fetch(
     scope: &mut v8::HandleScope,
-    _scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    _callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
-    _next_id: Arc<Mutex<CallbackId>>,
+    scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+    callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    next_id: Arc<Mutex<CallbackId>>,
 ) {
-    // Stub for now - will implement later
+    let state = FetchState {
+        scheduler_tx,
+        callbacks,
+        next_id,
+    };
+
+    // Create External to hold our state
+    let state_ptr = Box::into_raw(Box::new(state)) as *mut std::ffi::c_void;
+    let external = v8::External::new(scope, state_ptr);
+
+    // Store state in global
+    let global = scope.get_current_context().global(scope);
+    let state_key = v8::String::new(scope, "__fetchState").unwrap();
+    global.set(scope, state_key.into(), external.into());
+
+    // Create native fetch function
+    let native_fetch_fn = v8::Function::new(scope, native_fetch_callback).unwrap();
+    let native_fetch_key = v8::String::new(scope, "__nativeFetch").unwrap();
+    global.set(scope, native_fetch_key.into(), native_fetch_fn.into());
+
+    // JavaScript fetch implementation using Promises
     let code = r#"
         globalThis.fetch = function(url, options) {
-            return Promise.reject(new Error('fetch() not yet implemented in V8 runtime'));
+            return new Promise((resolve, reject) => {
+                options = options || {};
+                const fetchOptions = {
+                    url: url,
+                    method: options.method || 'GET',
+                    headers: options.headers || {},
+                    body: options.body || null
+                };
+                __nativeFetch(fetchOptions, resolve, reject);
+            });
         };
     "#;
 
     let code_str = v8::String::new(scope, code).unwrap();
     let script = v8::Script::compile(scope, code_str, None).unwrap();
     script.run(scope).unwrap();
+}
+
+// Native callback for fetch
+fn native_fetch_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut _retval: v8::ReturnValue,
+) {
+    let global = scope.get_current_context().global(scope);
+    let state_key = v8::String::new(scope, "__fetchState").unwrap();
+    let state_val = global.get(scope, state_key.into()).unwrap();
+
+    if !state_val.is_external() {
+        return;
+    }
+
+    let external = unsafe { v8::Local::<v8::External>::cast(state_val) };
+    let state_ptr = external.value() as *mut FetchState;
+    let state = unsafe { &*state_ptr };
+
+    if args.length() < 3 {
+        return;
+    }
+
+    // Parse fetch options (arg 0)
+    let options = match args.get(0).to_object(scope) {
+        Some(obj) => obj,
+        None => return,
+    };
+
+    // Get URL
+    let url_key = v8::String::new(scope, "url").unwrap();
+    let url = match options
+        .get(scope, url_key.into())
+        .and_then(|v| v.to_string(scope))
+    {
+        Some(s) => s.to_rust_string_lossy(scope),
+        None => return,
+    };
+
+    // Get method
+    let method_key = v8::String::new(scope, "method").unwrap();
+    let method_str = options
+        .get(scope, method_key.into())
+        .and_then(|v| v.to_string(scope))
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_else(|| "GET".to_string());
+
+    let method =
+        super::fetch::HttpMethod::from_str(&method_str).unwrap_or(super::fetch::HttpMethod::Get);
+
+    // Get headers
+    let mut headers = std::collections::HashMap::new();
+    let headers_key = v8::String::new(scope, "headers").unwrap();
+    if let Some(headers_val) = options.get(scope, headers_key.into())
+        && let Some(headers_obj) = headers_val.to_object(scope)
+        && let Some(props) = headers_obj.get_own_property_names(scope)
+    {
+        for i in 0..props.length() {
+            if let Some(key_val) = props.get_index(scope, i)
+                && let Some(key_str) = key_val.to_string(scope)
+            {
+                let key = key_str.to_rust_string_lossy(scope);
+                if let Some(val) = headers_obj.get(scope, key_val)
+                    && let Some(val_str) = val.to_string(scope)
+                {
+                    let value = val_str.to_rust_string_lossy(scope);
+                    headers.insert(key, value);
+                }
+            }
+        }
+    }
+
+    // Get body
+    let body_key = v8::String::new(scope, "body").unwrap();
+    let body = options
+        .get(scope, body_key.into())
+        .filter(|v| !v.is_null() && !v.is_undefined())
+        .and_then(|v| v.to_string(scope))
+        .map(|s| s.to_rust_string_lossy(scope));
+
+    // Create FetchRequest
+    let request = super::fetch::FetchRequest {
+        url,
+        method,
+        headers,
+        body,
+    };
+
+    // Get resolve callback
+    let resolve_val = args.get(1);
+    if !resolve_val.is_function() {
+        return;
+    }
+    let resolve: v8::Local<v8::Function> = unsafe { v8::Local::cast(resolve_val) };
+    let resolve_global = v8::Global::new(scope, resolve);
+
+    // Generate callback ID
+    let callback_id = {
+        let mut next_id = state.next_id.lock().unwrap();
+        let id = *next_id;
+        *next_id += 1;
+        id
+    };
+
+    // Store callback
+    {
+        let mut callbacks = state.callbacks.lock().unwrap();
+        callbacks.insert(callback_id, resolve_global);
+    }
+
+    // Send fetch message to scheduler
+    let _ = state
+        .scheduler_tx
+        .send(SchedulerMessage::Fetch(callback_id, request));
 }
 
 pub fn setup_url(scope: &mut v8::HandleScope) {

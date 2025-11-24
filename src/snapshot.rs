@@ -1,4 +1,3 @@
-
 /// Snapshot output structure
 pub struct SnapshotOutput {
     pub output: Vec<u8>,
