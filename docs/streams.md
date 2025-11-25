@@ -400,23 +400,39 @@ Tests are in `tests/native_stream_test.rs`:
 | `test_native_stream_cancel` | Stream cancellation |
 | `test_native_stream_error` | Error propagation |
 
-## Next Steps (Phase 4)
+## Phase 4: Fetch Forward with Streaming ✅
 
-The bridge is ready to implement **Fetch Forward with Streaming**:
+Phase 4 is now complete! The `fetch()` API uses streaming by default:
 
 ```rust
-// execute_fetch_streaming() that:
-// 1. Creates a stream_id
+// execute_fetch_streaming() in src/runtime/fetch/request.rs:
+// 1. Creates a stream_id via StreamManager
 // 2. Spawns a task that reads HTTP response chunk by chunk
-// 3. Returns immediately with stream_id
+// 3. Returns immediately with metadata + stream_id
 // 4. JS can start reading before everything is downloaded
 ```
 
-This will enable:
+This enables:
 
 ```javascript
 addEventListener('fetch', async event => {
     // Direct forward without buffering
-    event.respondWith(fetch('https://api.example.com/large-file'));
+    event.respondWith(fetch('https://httpbin.workers.rocks/bytes/10000'));
 });
+
+// Or progressive streaming
+const response = await fetch('https://httpbin.workers.rocks/stream/10');
+const reader = response.body.getReader();
+while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    console.log('Received chunk:', value.length, 'bytes');
+}
 ```
+
+### Tests
+See `tests/fetch_streaming_test.rs` (using httpbin.workers.rocks for dogfooding):
+- `test_fetch_streaming_basic` - Basic fetch with streaming (`/get`)
+- `test_fetch_streaming_chunked` - Reading chunks from `/bytes/1024`
+- `test_fetch_progressive_stream` - Progressive streaming from `/stream/5`
+- `test_fetch_forward` - Direct forward scenario

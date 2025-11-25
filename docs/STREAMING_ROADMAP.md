@@ -65,8 +65,8 @@ let uint8_array = v8::Uint8Array::new(scope, body_buf, 0, response.body.len());
 
 ### Tests Phase 1
 ```javascript
-// Binary test
-const response = await fetch('https://httpbin.org/bytes/1000');
+// Binary test (using echo.workers.rocks)
+const response = await fetch('https://echo.workers.rocks/bytes/1000');
 const buffer = await response.arrayBuffer();
 console.assert(buffer.byteLength === 1000);
 ```
@@ -244,22 +244,23 @@ globalThis.fetch = function(url, options) {
 
 ### Tests Phase 4
 ```rust
-// tests/fetch_streaming_test.rs
-- test_fetch_streaming_basic    // Basic fetch with streaming body
-- test_fetch_streaming_chunked  // Reading body chunk by chunk
-- test_fetch_forward            // Direct forward scenario
+// tests/fetch_streaming_test.rs (using httpbin.workers.rocks for dogfooding)
+- test_fetch_streaming_basic      // Basic fetch with streaming body (/get)
+- test_fetch_streaming_chunked    // Reading body chunk by chunk (/bytes/1024)
+- test_fetch_progressive_stream   // Progressive streaming with delays (/stream/5)
+- test_fetch_forward              // Direct forward scenario (/get)
 ```
 
 ```javascript
 // Direct forward
 addEventListener('fetch', event => {
-    event.respondWith(fetch('https://api.example.com/data'));
+    event.respondWith(fetch('https://httpbin.workers.rocks/get'));
     // ✅ No buffer, direct streaming!
 });
 
 // Process by chunks
 addEventListener('fetch', async event => {
-    const response = await fetch('https://api.example.com/large-file');
+    const response = await fetch('https://httpbin.workers.rocks/bytes/10000');
     const reader = response.body.getReader();
 
     let total = 0;
@@ -270,6 +271,14 @@ addEventListener('fetch', async event => {
     }
 
     event.respondWith(new Response(`Received ${total} bytes`));
+});
+
+// Progressive streaming
+addEventListener('fetch', async event => {
+    const response = await fetch('https://httpbin.workers.rocks/stream/10');
+    // Stream arrives chunk by chunk with delays
+    const text = await response.text();
+    event.respondWith(new Response(text));
 });
 ```
 

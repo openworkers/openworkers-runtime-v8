@@ -161,9 +161,9 @@ async fn test_fetch_forward() {
         });
 
         async function handleRequest() {
-            // Try to fetch from httpbin (may fail, that's ok for test)
+            // Try to fetch from httpbin.workers.rocks (dogfooding!)
             try {
-                const response = await fetch('https://httpbin.org/get');
+                const response = await fetch('https://httpbin.workers.rocks/get');
                 return new Response('Fetch completed!', { status: 200 });
             } catch (error) {
                 return new Response('Fetch failed but handled: ' + error.message, { status: 200 });
