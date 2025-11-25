@@ -211,22 +211,48 @@ impl Worker {
                 });
 
             // Extract headers first (needed for both paths)
+            // Headers can be a Headers instance (with _map) or a plain object
             let mut headers = vec![];
             let headers_key = v8::String::new(scope, "headers").unwrap();
             if let Some(headers_val) = resp_obj.get(scope, headers_key.into())
                 && let Some(headers_obj) = headers_val.to_object(scope)
-                && let Some(props) = headers_obj.get_own_property_names(scope, Default::default())
             {
-                for i in 0..props.length() {
-                    if let Some(key_val) = props.get_index(scope, i)
-                        && let Some(key_str) = key_val.to_string(scope)
-                    {
-                        let key = key_str.to_rust_string_lossy(scope);
-                        if let Some(val) = headers_obj.get(scope, key_val)
-                            && let Some(val_str) = val.to_string(scope)
+                // Check if this is a Headers instance (has _map)
+                let map_key = v8::String::new(scope, "_map").unwrap();
+                if let Some(map_val) = headers_obj.get(scope, map_key.into())
+                    && let Ok(map_obj) = v8::Local::<v8::Map>::try_from(map_val)
+                {
+                    // Headers instance - iterate over _map
+                    let entries = map_obj.as_array(scope);
+                    let len = entries.length();
+                    let mut i = 0;
+                    while i < len {
+                        if let Some(key_val) = entries.get_index(scope, i)
+                            && let Some(val_val) = entries.get_index(scope, i + 1)
+                            && let Some(key_str) = key_val.to_string(scope)
+                            && let Some(val_str) = val_val.to_string(scope)
                         {
+                            let key = key_str.to_rust_string_lossy(scope);
                             let value = val_str.to_rust_string_lossy(scope);
                             headers.push((key, value));
+                        }
+                        i += 2; // Map.as_array returns [key, value, key, value, ...]
+                    }
+                } else if let Some(props) =
+                    headers_obj.get_own_property_names(scope, Default::default())
+                {
+                    // Plain object - use property iteration
+                    for i in 0..props.length() {
+                        if let Some(key_val) = props.get_index(scope, i)
+                            && let Some(key_str) = key_val.to_string(scope)
+                        {
+                            let key = key_str.to_rust_string_lossy(scope);
+                            if let Some(val) = headers_obj.get(scope, key_val)
+                                && let Some(val_str) = val.to_string(scope)
+                            {
+                                let value = val_str.to_rust_string_lossy(scope);
+                                headers.push((key, value));
+                            }
                         }
                     }
                 }

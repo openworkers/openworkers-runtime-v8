@@ -551,13 +551,121 @@ pub fn setup_url(scope: &mut v8::PinScope) {
     script.run(scope).unwrap();
 }
 
+pub fn setup_headers(scope: &mut v8::PinScope) {
+    let code = r#"
+        globalThis.Headers = class Headers {
+            constructor(init) {
+                this._map = new Map();
+
+                if (init) {
+                    if (init instanceof Headers) {
+                        // Copy from another Headers object
+                        for (const [key, value] of init) {
+                            this._map.set(key, value);
+                        }
+                    } else if (Array.isArray(init)) {
+                        // Array of [key, value] pairs
+                        for (const [key, value] of init) {
+                            this.append(key, value);
+                        }
+                    } else if (typeof init === 'object') {
+                        // Plain object
+                        for (const key of Object.keys(init)) {
+                            this.append(key, init[key]);
+                        }
+                    }
+                }
+            }
+
+            // Normalize header name (lowercase)
+            _normalizeKey(name) {
+                return String(name).toLowerCase();
+            }
+
+            append(name, value) {
+                const key = this._normalizeKey(name);
+                const strValue = String(value);
+                if (this._map.has(key)) {
+                    this._map.set(key, this._map.get(key) + ', ' + strValue);
+                } else {
+                    this._map.set(key, strValue);
+                }
+            }
+
+            delete(name) {
+                this._map.delete(this._normalizeKey(name));
+            }
+
+            get(name) {
+                const value = this._map.get(this._normalizeKey(name));
+                return value !== undefined ? value : null;
+            }
+
+            has(name) {
+                return this._map.has(this._normalizeKey(name));
+            }
+
+            set(name, value) {
+                this._map.set(this._normalizeKey(name), String(value));
+            }
+
+            // Iteration methods
+            *entries() {
+                yield* this._map.entries();
+            }
+
+            *keys() {
+                yield* this._map.keys();
+            }
+
+            *values() {
+                yield* this._map.values();
+            }
+
+            forEach(callback, thisArg) {
+                for (const [key, value] of this._map) {
+                    callback.call(thisArg, value, key, this);
+                }
+            }
+
+            // Make Headers iterable
+            [Symbol.iterator]() {
+                return this.entries();
+            }
+
+            // getSetCookie returns all Set-Cookie headers as array
+            getSetCookie() {
+                const cookies = [];
+                const value = this._map.get('set-cookie');
+                if (value) {
+                    // Split by ', ' but be careful with cookie values
+                    cookies.push(value);
+                }
+                return cookies;
+            }
+        };
+    "#;
+
+    let code_str = v8::String::new(scope, code).unwrap();
+    let script = v8::Script::compile(scope, code_str, None).unwrap();
+    script.run(scope).unwrap();
+}
+
 pub fn setup_response(scope: &mut v8::PinScope) {
     let code = r#"
         globalThis.Response = function(body, init) {
             init = init || {};
             this.status = init.status || 200;
-            this.headers = init.headers || {};
+            this.statusText = init.statusText || '';
+            this.ok = this.status >= 200 && this.status < 300;
             this.bodyUsed = false;
+
+            // Convert headers to Headers instance
+            if (init.headers instanceof Headers) {
+                this.headers = init.headers;
+            } else {
+                this.headers = new Headers(init.headers);
+            }
             this._nativeStreamId = null;  // Will be set if body is a native stream
 
             // Support different body types

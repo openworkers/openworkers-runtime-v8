@@ -48,7 +48,11 @@ pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
         // Setup URL API (pre-compiled in snapshot - pure JS)
         crate::runtime::bindings::setup_url(scope);
 
+        // Setup Headers API (pre-compiled in snapshot - pure JS)
+        crate::runtime::bindings::setup_headers(scope);
+
         // Setup Response constructor (pre-compiled in snapshot - pure JS)
+        // Note: Response depends on Headers, so Headers must be setup first
         crate::runtime::bindings::setup_response(scope);
 
         // Set this context as the default context for the snapshot

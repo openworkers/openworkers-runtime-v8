@@ -58,7 +58,7 @@ async fn benchmark_hmac() {
     let response = rx.await.unwrap();
     let body = response.body.as_bytes().unwrap();
     let ops_per_sec: u64 = std::str::from_utf8(body).unwrap().parse().unwrap();
-    
+
     println!("HMAC-SHA256:  {:>8} ops/sec", ops_per_sec);
 }
 
@@ -114,7 +114,7 @@ async fn benchmark_ecdsa() {
     let parts: Vec<&str> = std::str::from_utf8(body).unwrap().split(',').collect();
     let sign_ops: u64 = parts[0].parse().unwrap();
     let verify_ops: u64 = parts[1].parse().unwrap();
-    
+
     println!("ECDSA P-256 sign:   {:>5} ops/sec", sign_ops);
     println!("ECDSA P-256 verify: {:>5} ops/sec", verify_ops);
 }
@@ -151,7 +151,7 @@ async fn benchmark_sha256() {
     let response = rx.await.unwrap();
     let body = response.body.as_bytes().unwrap();
     let ops_per_sec: u64 = std::str::from_utf8(body).unwrap().parse().unwrap();
-    
+
     println!("SHA-256:      {:>8} ops/sec", ops_per_sec);
 }
 

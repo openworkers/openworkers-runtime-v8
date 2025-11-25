@@ -126,6 +126,7 @@ impl Runtime {
                 text_encoding::setup_text_encoding(scope);
                 streams::setup_readable_stream(scope);
                 bindings::setup_url(scope);
+                bindings::setup_headers(scope);
                 bindings::setup_response(scope);
             }
 
