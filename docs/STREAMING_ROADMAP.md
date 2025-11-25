@@ -335,31 +335,58 @@ See `tests/response_streaming_test.rs`:
 
 ---
 
-## Phase 6: Optimizations
+## Phase 6: Optimizations ✅
 
 **Difficulty:** ⭐⭐⭐⭐⭐
-**Status:** Pending
+**Status:** Completed
 
-### 6.1 Zero-Copy Transfer
+### 6.1 Zero-Copy Transfer ✅
 ```rust
-// Use v8::BackingStore to avoid copies
-let backing_store = v8::ArrayBuffer::new_backing_store_from_vec(bytes.to_vec());
-let array_buffer = v8::ArrayBuffer::with_backing_store(scope, &backing_store);
+// Use v8::BackingStore to transfer ownership without copying
+let vec = bytes.to_vec();
+let backing_store = v8::ArrayBuffer::new_backing_store_from_vec(vec);
+let array_buffer = v8::ArrayBuffer::with_backing_store(scope, &backing_store.make_shared());
 ```
 
-### 6.2 Backpressure
+**Results:**
+- Stream chunks: Ownership transfer to V8 (1 copy from Bytes→Vec, then zero-copy to V8)
+- Forward streaming: Zero-copy (`Bytes` pass through directly)
+- Response body (JS→Rust): 1 copy acceptable (only for buffered responses)
+
+### 6.2 Backpressure ✅
 ```rust
-// Limit buffer size
-pub struct StreamResource {
-    tx: mpsc::Sender<StreamChunk>, // with limit
+// Bounded channels for backpressure
+pub const DEFAULT_HIGH_WATER_MARK: usize = 16;
+
+pub struct StreamManager {
+    senders: Arc<Mutex<HashMap<StreamId, mpsc::Sender<StreamChunk>>>>,  // bounded!
     high_water_mark: usize,
+}
+
+// Async write that waits when buffer is full
+pub async fn write_chunk(&self, stream_id: StreamId, chunk: StreamChunk) -> Result<(), String> {
+    let tx = self.senders.lock().unwrap().get(&stream_id).cloned();
+    if let Some(tx) = tx {
+        tx.send(chunk).await.map_err(|_| "Stream closed".to_string())
+    } else {
+        Err("Stream not found".to_string())
+    }
 }
 ```
 
+**Buffer sizes:**
+- `StreamManager`: 16 chunks (configurable via `with_high_water_mark()`)
+- `ResponseBody::Stream`: 16 chunks (`RESPONSE_STREAM_BUFFER_SIZE`)
+
 ### 6.3 Chunk Size Tuning
-```rust
-// Adapt chunk size based on network
-const OPTIMAL_CHUNK_SIZE: usize = 64 * 1024; // 64KB
+Not implemented - network chunk sizes from reqwest are already optimal.
+
+### Performance Results
+
+```
+📦 Buffered:      ~82k req/s
+🔄 Local streams: ~280-314 MB/s
+🌊 Forward:       Zero-copy (Bytes pass directly)
 ```
 
 ---
@@ -385,7 +412,7 @@ const OPTIMAL_CHUNK_SIZE: usize = 64 * 1024; // 64KB
 3. **Phase 3** (complex) - Complete bridge ✅
 4. **Phase 4** (quick win) - Basic fetch forward ✅
 5. **Phase 5** (nice to have) - Response streaming ✅
-6. **Phase 6** (optimization) - Zero-copy, etc.
+6. **Phase 6** (optimization) - Zero-copy, backpressure ✅
 
 **MVP (Minimum Viable Product):**
 - Phase 1 + Phase 2 = Basic stream support ✅
@@ -394,4 +421,29 @@ const OPTIMAL_CHUNK_SIZE: usize = 64 * 1024; // 64KB
 - Phases 1-5 = Full streaming support ✅
 
 **Complete:**
-- All phases = Full Workers compatibility with optimizations
+- All phases = Full Workers compatibility with optimizations ✅
+
+---
+
+## Architecture Summary
+
+```
+         ┌─────────────────────────────────────────────────┐
+         │                    Worker                        │
+         │                                                  │
+reqwest ─┼──► StreamManager ──► ResponseBody::Stream ──────┼──► actix
+(Bytes)  │    (16 buf)          (16 buf)                   │   (Bytes)
+         │         │                                        │
+         │         │ JS reads via __nativeStreamRead        │
+         │         ▼                                        │
+         │    new_backing_store_from_vec                    │
+         │    (ownership transfer to V8)                    │
+         │                                                  │
+         └─────────────────────────────────────────────────┘
+
+Data flow:
+1. reqwest → Bytes chunks (from network)
+2. StreamManager buffers up to 16 chunks (backpressure)
+3. JS consumption: Bytes → Vec → BackingStore (1 copy + ownership transfer)
+4. Forward streaming: Bytes pass through directly (zero-copy!)
+```

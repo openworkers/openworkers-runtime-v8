@@ -267,19 +267,16 @@ impl Runtime {
                                 let done_val = v8::Boolean::new(scope, false);
                                 result_obj.set(scope, done_key.into(), done_val.into());
 
-                                // Create Uint8Array from bytes
-                                let len = bytes.len();
-                                let array_buffer = v8::ArrayBuffer::new(scope, len);
-                                let backing_store = array_buffer.get_backing_store();
-                                if len > 0 {
-                                    unsafe {
-                                        std::ptr::copy_nonoverlapping(
-                                            bytes.as_ptr(),
-                                            backing_store.data().unwrap().as_ptr() as *mut u8,
-                                            len,
-                                        );
-                                    }
-                                }
+                                // Create Uint8Array from bytes using backing store transfer
+                                // This converts Bytes -> Vec (1 copy) then transfers ownership to V8
+                                let vec = bytes.to_vec();
+                                let len = vec.len();
+                                let backing_store =
+                                    v8::ArrayBuffer::new_backing_store_from_vec(vec);
+                                let array_buffer = v8::ArrayBuffer::with_backing_store(
+                                    scope,
+                                    &backing_store.make_shared(),
+                                );
                                 let uint8_array =
                                     v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
 
