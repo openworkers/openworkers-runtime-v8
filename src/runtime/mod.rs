@@ -1,11 +1,11 @@
 pub mod bindings;
 pub mod fetch;
 
-use rusty_v8 as v8;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
+use v8;
 
 pub use fetch::{FetchRequest, FetchResponse};
 
@@ -66,9 +66,11 @@ impl Runtime {
         let mut isolate = v8::Isolate::new(Default::default());
 
         let context = {
-            let scope = &mut v8::HandleScope::new(&mut isolate);
-            let context = v8::Context::new(scope);
-            let scope = &mut v8::ContextScope::new(scope, context);
+            use std::pin::pin;
+            let scope = pin!(v8::HandleScope::new(&mut isolate));
+            let mut scope = scope.init();
+            let context = v8::Context::new(&scope, Default::default());
+            let scope = &mut v8::ContextScope::new(&mut scope, context);
 
             bindings::setup_console(scope);
             bindings::setup_timers(scope, scheduler_tx.clone());
@@ -81,7 +83,7 @@ impl Runtime {
             bindings::setup_url(scope);
             bindings::setup_response(scope);
 
-            v8::Global::new(scope, context)
+            v8::Global::new(scope.as_ref(), context)
         };
 
         let runtime = Self {
@@ -99,12 +101,14 @@ impl Runtime {
     }
 
     pub fn process_callbacks(&mut self) {
-        let scope = &mut v8::HandleScope::new(&mut self.isolate);
-        let context = v8::Local::new(scope, &self.context);
-        let scope = &mut v8::ContextScope::new(scope, context);
+        use std::pin::pin;
+        let scope = pin!(v8::HandleScope::new(&mut self.isolate));
+        let mut scope = scope.init();
+        let context = v8::Local::new(&scope, &self.context);
+        let scope = &mut v8::ContextScope::new(&mut scope, context);
 
         // 1. Pump V8 Platform message loop (like deno_core)
-        // This processes foreground tasks posted by V8
+        // This processes V8's internal task queue (e.g., Atomics.waitAsync, WebAssembly compilation)
         while v8::Platform::pump_message_loop(self.platform, scope, false) {
             // Keep pumping while there are messages
         }
@@ -121,7 +125,8 @@ impl Runtime {
                     if let Some(execute_fn_val) = global.get(scope, execute_timer_key.into())
                         && execute_fn_val.is_function()
                     {
-                        let execute_fn = unsafe { v8::Local::<v8::Function>::cast(execute_fn_val) };
+                        let execute_fn: v8::Local<v8::Function> =
+                            execute_fn_val.try_into().unwrap();
                         let id_val = v8::Number::new(scope, callback_id as f64);
                         execute_fn.call(scope, global.into(), &[id_val.into()]);
                     }
@@ -159,14 +164,15 @@ impl Runtime {
 
         // 3. Process microtasks (Promises, async/await) - like deno_core
         // Use TryCatch to handle any exceptions during microtask processing
-        let tc_scope = &mut v8::TryCatch::new(scope);
+        let tc_scope = pin!(v8::TryCatch::new(scope));
+        let mut tc_scope = tc_scope.init();
         tc_scope.perform_microtask_checkpoint();
 
         // Check for exceptions during microtask processing
         if let Some(exception) = tc_scope.exception() {
             let exception_string = exception
-                .to_string(tc_scope)
-                .map(|s| s.to_rust_string_lossy(tc_scope))
+                .to_string(&tc_scope)
+                .map(|s| s.to_rust_string_lossy(&*tc_scope))
                 .unwrap_or_else(|| "Unknown exception".to_string());
             eprintln!(
                 "Exception during microtask processing: {}",
@@ -176,9 +182,11 @@ impl Runtime {
     }
 
     pub fn evaluate(&mut self, script: &str) -> Result<(), String> {
-        let scope = &mut v8::HandleScope::new(&mut self.isolate);
-        let context = v8::Local::new(scope, &self.context);
-        let scope = &mut v8::ContextScope::new(scope, context);
+        use std::pin::pin;
+        let scope = pin!(v8::HandleScope::new(&mut self.isolate));
+        let mut scope = scope.init();
+        let context = v8::Local::new(&scope, &self.context);
+        let scope = &mut v8::ContextScope::new(&mut scope, context);
 
         let code = v8::String::new(scope, script).ok_or("Failed to create script")?;
         let script_obj =

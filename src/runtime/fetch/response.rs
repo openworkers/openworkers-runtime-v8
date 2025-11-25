@@ -1,8 +1,8 @@
 use super::FetchResponse;
-use rusty_v8 as v8;
+use v8;
 
 pub fn create_response_object<'s>(
-    scope: &mut v8::HandleScope<'s>,
+    scope: &mut v8::PinScope<'s, '_>,
     response: FetchResponse,
 ) -> Result<v8::Local<'s, v8::Object>, String> {
     let obj = v8::Object::new(scope);
@@ -38,7 +38,7 @@ pub fn create_response_object<'s>(
     let text_factory = text_script.run(scope).unwrap();
 
     if text_factory.is_function() {
-        let text_factory_fn = unsafe { v8::Local::<v8::Function>::cast(text_factory) };
+        let text_factory_fn: v8::Local<v8::Function> = text_factory.try_into().unwrap();
         let body_for_text = v8::String::new(scope, &response.body).unwrap();
         if let Some(text_fn) = text_factory_fn.call(scope, text_factory, &[body_for_text.into()]) {
             let text_key = v8::String::new(scope, "text").unwrap();

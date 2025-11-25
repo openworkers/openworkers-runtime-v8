@@ -2,7 +2,7 @@ use crate::compat::{Script, TerminationReason};
 use crate::runtime::{Runtime, run_event_loop};
 use crate::task::{HttpResponse, Task};
 use bytes::Bytes;
-use rusty_v8 as v8;
+use v8;
 
 pub struct Worker {
     pub(crate) runtime: Runtime,
@@ -63,7 +63,7 @@ impl Worker {
         let req = &fetch_init.req;
 
         // Create channel for response notification (like JSC)
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel::<String>();
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel::<String>();
 
         // Store the sender in runtime so JS can use it
         {
@@ -73,9 +73,11 @@ impl Worker {
 
         // Trigger fetch handler
         {
-            let scope = &mut v8::HandleScope::new(&mut self.runtime.isolate);
-            let context = v8::Local::new(scope, &self.runtime.context);
-            let scope = &mut v8::ContextScope::new(scope, context);
+            use std::pin::pin;
+            let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
+            let mut scope = scope.init();
+            let context = v8::Local::new(&scope, &self.runtime.context);
+            let scope = &mut v8::ContextScope::new(&mut scope, context);
 
             // Create request object
             let request_obj = v8::Object::new(scope);
@@ -105,7 +107,7 @@ impl Worker {
             if let Some(trigger_val) = global.get(scope, trigger_key.into())
                 && trigger_val.is_function()
             {
-                let trigger_fn = unsafe { v8::Local::<v8::Function>::cast(trigger_val) };
+                let trigger_fn: v8::Local<v8::Function> = trigger_val.try_into().unwrap();
                 trigger_fn.call(scope, global.into(), &[request_obj.into()]);
             }
         }
@@ -118,9 +120,11 @@ impl Worker {
             self.runtime.process_callbacks();
 
             // Check if response is available
-            let scope = &mut v8::HandleScope::new(&mut self.runtime.isolate);
-            let context = v8::Local::new(scope, &self.runtime.context);
-            let scope = &mut v8::ContextScope::new(scope, context);
+            use std::pin::pin;
+            let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
+            let mut scope = scope.init();
+            let context = v8::Local::new(&scope, &self.runtime.context);
+            let scope = &mut v8::ContextScope::new(&mut scope, context);
             let global = context.global(scope);
 
             let resp_key = v8::String::new(scope, "__lastResponse").unwrap();
@@ -155,9 +159,11 @@ impl Worker {
         }
 
         // Now read the response from global __lastResponse
-        let scope = &mut v8::HandleScope::new(&mut self.runtime.isolate);
-        let context = v8::Local::new(scope, &self.runtime.context);
-        let scope = &mut v8::ContextScope::new(scope, context);
+        use std::pin::pin;
+        let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
+        let mut scope = scope.init();
+        let context = v8::Local::new(&scope, &self.runtime.context);
+        let scope = &mut v8::ContextScope::new(&mut scope, context);
         let global = context.global(scope);
 
         let resp_key = v8::String::new(scope, "__lastResponse").unwrap();
@@ -184,7 +190,7 @@ impl Worker {
             let headers_key = v8::String::new(scope, "headers").unwrap();
             if let Some(headers_val) = resp_obj.get(scope, headers_key.into())
                 && let Some(headers_obj) = headers_val.to_object(scope)
-                && let Some(props) = headers_obj.get_own_property_names(scope)
+                && let Some(props) = headers_obj.get_own_property_names(scope, Default::default())
             {
                 for i in 0..props.length() {
                     if let Some(key_val) = props.get_index(scope, i)
@@ -219,9 +225,11 @@ impl Worker {
         scheduled_init: crate::task::ScheduledInit,
     ) -> Result<(), String> {
         {
-            let scope = &mut v8::HandleScope::new(&mut self.runtime.isolate);
-            let context = v8::Local::new(scope, &self.runtime.context);
-            let scope = &mut v8::ContextScope::new(scope, context);
+            use std::pin::pin;
+            let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
+            let mut scope = scope.init();
+            let context = v8::Local::new(&scope, &self.runtime.context);
+            let scope = &mut v8::ContextScope::new(&mut scope, context);
 
             // Trigger scheduled handler
             let global = context.global(scope);
@@ -230,7 +238,7 @@ impl Worker {
             if let Some(handler_val) = global.get(scope, handler_key.into())
                 && handler_val.is_function()
             {
-                let handler_fn = unsafe { v8::Local::<v8::Function>::cast(handler_val) };
+                let handler_fn: v8::Local<v8::Function> = handler_val.try_into().unwrap();
 
                 // Create event object
                 let event_obj = v8::Object::new(scope);
