@@ -68,7 +68,7 @@ pub struct FetchResponse {
     pub status: u16,
     pub status_text: String,
     pub headers: HashMap<String, String>,
-    pub body: String,
+    pub body: bytes::Bytes, // Changed from String to Bytes for binary support
 }
 
 impl FetchResponse {

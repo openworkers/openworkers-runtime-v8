@@ -1,5 +1,6 @@
 pub mod bindings;
 pub mod fetch;
+pub mod text_encoding;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

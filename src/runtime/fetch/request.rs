@@ -46,8 +46,9 @@ pub async fn execute_fetch(request: FetchRequest) -> Result<super::FetchResponse
         }
     }
 
+    // Read body as bytes (supports binary data)
     let body = response
-        .text()
+        .bytes()
         .await
         .map_err(|e| format!("Failed to read body: {}", e))?;
 

@@ -1,7 +1,6 @@
 use crate::compat::{Script, TerminationReason};
 use crate::runtime::{Runtime, run_event_loop};
 use crate::task::{HttpResponse, Task};
-use bytes::Bytes;
 use v8;
 
 pub struct Worker {
@@ -178,12 +177,32 @@ impl Worker {
                 .and_then(|v| v.uint32_value(scope))
                 .unwrap_or(200) as u16;
 
+            // Extract body (now as Uint8Array/ArrayBuffer)
             let body_key = v8::String::new(scope, "body").unwrap();
-            let body = resp_obj
-                .get(scope, body_key.into())
-                .and_then(|v| v.to_string(scope))
-                .map(|s| s.to_rust_string_lossy(scope))
-                .unwrap_or_default();
+            let body_bytes = if let Some(body_val) = resp_obj.get(scope, body_key.into()) {
+                if let Ok(uint8_array) = v8::Local::<v8::Uint8Array>::try_from(body_val) {
+                    // Body is Uint8Array - extract bytes
+                    let len = uint8_array.byte_length();
+                    let mut bytes = vec![0u8; len];
+                    uint8_array.copy_contents(&mut bytes);
+                    bytes::Bytes::from(bytes)
+                } else if let Ok(array_buffer) = v8::Local::<v8::ArrayBuffer>::try_from(body_val) {
+                    // Body is ArrayBuffer - extract bytes
+                    let backing_store = array_buffer.get_backing_store();
+                    let len = backing_store.byte_length();
+                    let data = backing_store.data().unwrap();
+                    let bytes =
+                        unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, len) };
+                    bytes::Bytes::copy_from_slice(bytes)
+                } else if let Some(string) = body_val.to_string(scope) {
+                    // Body is String - convert to bytes
+                    bytes::Bytes::from(string.to_rust_string_lossy(scope).into_bytes())
+                } else {
+                    bytes::Bytes::new()
+                }
+            } else {
+                bytes::Bytes::new()
+            };
 
             // Extract headers
             let mut headers = vec![];
@@ -210,7 +229,7 @@ impl Worker {
             let response = HttpResponse {
                 status,
                 headers,
-                body: Some(Bytes::from(body)),
+                body: Some(body_bytes),
             };
 
             let _ = fetch_init.res_tx.send(response.clone());

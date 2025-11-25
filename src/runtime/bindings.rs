@@ -419,11 +419,36 @@ pub fn setup_response(scope: &mut v8::PinScope) {
     let code = r#"
         globalThis.Response = function(body, init) {
             init = init || {};
-            this.body = String(body || '');
             this.status = init.status || 200;
             this.headers = init.headers || {};
+
+            // Support different body types
+            if (body instanceof Uint8Array || body instanceof ArrayBuffer) {
+                // Binary data - keep as-is
+                this.body = body instanceof Uint8Array ? body : new Uint8Array(body);
+            } else if (body === null || body === undefined) {
+                this.body = new Uint8Array(0);
+            } else {
+                // String or other - convert to Uint8Array
+                const encoder = new TextEncoder();
+                this.body = encoder.encode(String(body));
+            }
+
+            // text() method - decode bytes to string
             this.text = async function() {
-                return this.body;
+                const decoder = new TextDecoder();
+                return decoder.decode(this.body);
+            };
+
+            // arrayBuffer() method - return underlying buffer
+            this.arrayBuffer = async function() {
+                return this.body.buffer;
+            };
+
+            // json() method - decode and parse
+            this.json = async function() {
+                const text = await this.text();
+                return JSON.parse(text);
             };
         };
     "#;

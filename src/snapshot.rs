@@ -35,9 +35,12 @@ pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
         let context = v8::Context::new(&scope, Default::default());
         let scope = &mut v8::ContextScope::new(&mut scope, context);
 
-        // Note: setup_console is NOT included in snapshot because it uses
-        // native functions (v8::Function::new) which require external references.
-        // It will be setup at runtime instead.
+        // Note: setup_console, setup_timers, setup_fetch are NOT included in snapshot
+        // because they use native functions (v8::Function::new) which require external references.
+        // They will be setup at runtime instead.
+
+        // Setup TextEncoder/TextDecoder (pre-compiled in snapshot - pure JS)
+        crate::runtime::text_encoding::setup_text_encoding(scope);
 
         // Setup URL API (pre-compiled in snapshot - pure JS)
         crate::runtime::bindings::setup_url(scope);
