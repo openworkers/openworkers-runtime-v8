@@ -60,6 +60,7 @@ async fn test_native_stream_bridge() {
     for chunk in &chunks {
         stream_manager
             .write_chunk(stream_id, StreamChunk::Data(Bytes::from(*chunk)))
+            .await
             .expect("Failed to write chunk");
 
         // Process callbacks to deliver the chunk to JS
@@ -70,6 +71,7 @@ async fn test_native_stream_bridge() {
     // Close the stream
     stream_manager
         .write_chunk(stream_id, StreamChunk::Done)
+        .await
         .expect("Failed to close stream");
 
     // Process remaining callbacks
@@ -161,6 +163,7 @@ async fn test_native_stream_cancel() {
     // Write one chunk
     stream_manager
         .write_chunk(stream_id, StreamChunk::Data(Bytes::from("first")))
+        .await
         .expect("Failed to write chunk");
 
     // Process callbacks
@@ -222,6 +225,7 @@ async fn test_native_stream_error() {
             stream_id,
             StreamChunk::Error("Test error from Rust".to_string()),
         )
+        .await
         .expect("Failed to send error");
 
     // Process callbacks

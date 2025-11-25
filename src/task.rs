@@ -11,12 +11,16 @@ pub struct HttpRequest {
     pub body: Option<Bytes>,
 }
 
+/// Default buffer size for streaming responses (matches StreamManager)
+pub const RESPONSE_STREAM_BUFFER_SIZE: usize = 16;
+
 /// Response body - either complete bytes or a stream of chunks
 pub enum ResponseBody {
     /// Complete body (already buffered)
     Bytes(Bytes),
     /// Streaming body - receiver yields chunks as they become available
-    Stream(mpsc::UnboundedReceiver<Result<Bytes, String>>),
+    /// Uses bounded channel for backpressure support
+    Stream(mpsc::Receiver<Result<Bytes, String>>),
 }
 
 impl std::fmt::Debug for ResponseBody {
@@ -85,7 +89,7 @@ impl From<HttpResponse> for actix_web::HttpResponse {
     fn from(res: HttpResponse) -> Self {
         use actix_web::body::BodyStream;
         use futures::StreamExt;
-        use tokio_stream::wrappers::UnboundedReceiverStream;
+        use tokio_stream::wrappers::ReceiverStream;
 
         let mut builder = actix_web::HttpResponse::build(
             actix_web::http::StatusCode::from_u16(res.status)
@@ -105,8 +109,10 @@ impl From<HttpResponse> for actix_web::HttpResponse {
                 }
             }
             ResponseBody::Stream(rx) => {
-                // Convert mpsc receiver to a stream of actix-compatible chunks
-                let stream = UnboundedReceiverStream::new(rx).map(|result| {
+                // Convert bounded mpsc receiver to a stream of actix-compatible chunks
+                // Backpressure is automatic: when actix can't send fast enough,
+                // the channel fills up and upstream producers will wait
+                let stream = ReceiverStream::new(rx).map(|result| {
                     result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
                 });
                 builder.body(BodyStream::new(stream))

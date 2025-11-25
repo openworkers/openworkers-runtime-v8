@@ -234,19 +234,22 @@ impl Worker {
 
             // Determine body type: streaming or buffered
             let body = if let Some(stream_id) = native_stream_id {
-                // Native stream forward - create channel to forward chunks from StreamManager
+                // Native stream forward - create bounded channel for backpressure
                 use crate::runtime::stream_manager::StreamChunk;
+                use crate::task::RESPONSE_STREAM_BUFFER_SIZE;
 
-                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                let (tx, rx) = tokio::sync::mpsc::channel(RESPONSE_STREAM_BUFFER_SIZE);
                 let stream_manager = self.runtime.stream_manager.clone();
 
                 // Spawn task to read from stream and forward to channel
+                // Backpressure: if channel is full, this task waits (slowing upstream)
                 tokio::spawn(async move {
                     loop {
                         match stream_manager.read_chunk(stream_id).await {
                             Ok(chunk) => match chunk {
                                 StreamChunk::Data(bytes) => {
-                                    if tx.send(Ok(bytes)).is_err() {
+                                    // send() is async and waits if buffer is full
+                                    if tx.send(Ok(bytes)).await.is_err() {
                                         break;
                                     }
                                 }
@@ -254,12 +257,12 @@ impl Worker {
                                     break;
                                 }
                                 StreamChunk::Error(e) => {
-                                    let _ = tx.send(Err(e));
+                                    let _ = tx.send(Err(e)).await;
                                     break;
                                 }
                             },
                             Err(e) => {
-                                let _ = tx.send(Err(e));
+                                let _ = tx.send(Err(e)).await;
                                 break;
                             }
                         }

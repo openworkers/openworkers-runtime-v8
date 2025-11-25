@@ -138,7 +138,7 @@ pub async fn execute_fetch_streaming(
     // Create stream for body chunks
     let stream_id = stream_manager.create_stream(request.url.clone());
 
-    // Spawn task to stream body chunks
+    // Spawn task to stream body chunks (with backpressure support)
     let manager = stream_manager.clone();
     tokio::spawn(async move {
         let mut stream = response.bytes_stream();
@@ -146,8 +146,10 @@ pub async fn execute_fetch_streaming(
         while let Some(chunk_result) = stream.next().await {
             match chunk_result {
                 Ok(chunk) => {
+                    // write_chunk is async and will wait if buffer is full (backpressure)
                     if manager
                         .write_chunk(stream_id, StreamChunk::Data(chunk))
+                        .await
                         .is_err()
                     {
                         // Stream was closed/cancelled
@@ -155,14 +157,16 @@ pub async fn execute_fetch_streaming(
                     }
                 }
                 Err(e) => {
-                    let _ = manager.write_chunk(stream_id, StreamChunk::Error(e.to_string()));
+                    let _ = manager
+                        .write_chunk(stream_id, StreamChunk::Error(e.to_string()))
+                        .await;
                     return;
                 }
             }
         }
 
         // Signal end of stream
-        let _ = manager.write_chunk(stream_id, StreamChunk::Done);
+        let _ = manager.write_chunk(stream_id, StreamChunk::Done).await;
     });
 
     Ok((
