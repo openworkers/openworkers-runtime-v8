@@ -63,7 +63,25 @@ impl Runtime {
         let next_callback_id = Arc::new(Mutex::new(1));
         let fetch_response_tx = Arc::new(Mutex::new(None));
 
-        let mut isolate = v8::Isolate::new(Default::default());
+        // Load snapshot once and cache it in static memory
+        static SNAPSHOT: OnceLock<Option<&'static [u8]>> = OnceLock::new();
+
+        let snapshot_ref = SNAPSHOT.get_or_init(|| {
+            const RUNTIME_SNAPSHOT_PATH: &str = env!("RUNTIME_SNAPSHOT_PATH");
+            std::fs::read(RUNTIME_SNAPSHOT_PATH)
+                .ok()
+                .map(|bytes| Box::leak(bytes.into_boxed_slice()) as &'static [u8])
+        });
+
+        // Create isolate with or without snapshot
+        let mut isolate = if let Some(snapshot_data) = snapshot_ref {
+            let params = v8::CreateParams::default().snapshot_blob((*snapshot_data).into());
+            v8::Isolate::new(params)
+        } else {
+            v8::Isolate::new(Default::default())
+        };
+
+        let use_snapshot = snapshot_ref.is_some();
 
         let context = {
             use std::pin::pin;
@@ -72,6 +90,7 @@ impl Runtime {
             let context = v8::Context::new(&scope, Default::default());
             let scope = &mut v8::ContextScope::new(&mut scope, context);
 
+            // Always setup native bindings (not in snapshot)
             bindings::setup_console(scope);
             bindings::setup_timers(scope, scheduler_tx.clone());
             bindings::setup_fetch(
@@ -80,8 +99,12 @@ impl Runtime {
                 fetch_callbacks.clone(),
                 next_callback_id.clone(),
             );
-            bindings::setup_url(scope);
-            bindings::setup_response(scope);
+
+            // Only setup URL and Response if no snapshot (they're in the snapshot)
+            if !use_snapshot {
+                bindings::setup_url(scope);
+                bindings::setup_response(scope);
+            }
 
             v8::Global::new(scope.as_ref(), context)
         };

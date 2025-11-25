@@ -1,0 +1,2 @@
+[env]
+RUNTIME_SNAPSHOT_PATH = { value = "/tmp/openworkers-runtime-v8-snapshot.bin", relative = false }
