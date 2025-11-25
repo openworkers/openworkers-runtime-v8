@@ -98,30 +98,69 @@ impl Worker {
             let mut scope = scope.init();
             let context = v8::Local::new(&scope, &self.runtime.context);
             let scope = &mut v8::ContextScope::new(&mut scope, context);
+            let global = context.global(scope);
 
-            // Create request object
-            let request_obj = v8::Object::new(scope);
+            // Get Request constructor
+            let request_key = v8::String::new(scope, "Request").unwrap();
+            let request_constructor = global
+                .get(scope, request_key.into())
+                .and_then(|v| v8::Local::<v8::Function>::try_from(v).ok());
 
-            let url_key = v8::String::new(scope, "url").unwrap();
-            let url_val = v8::String::new(scope, &req.url).unwrap();
-            request_obj.set(scope, url_key.into(), url_val.into());
+            let request_obj = if let Some(request_ctor) = request_constructor {
+                // Create init object with method, headers, body
+                let init_obj = v8::Object::new(scope);
 
-            let method_key = v8::String::new(scope, "method").unwrap();
-            let method_val = v8::String::new(scope, &req.method).unwrap();
-            request_obj.set(scope, method_key.into(), method_val.into());
+                let method_key = v8::String::new(scope, "method").unwrap();
+                let method_val = v8::String::new(scope, &req.method).unwrap();
+                init_obj.set(scope, method_key.into(), method_val.into());
 
-            // Add headers
-            let headers_obj = v8::Object::new(scope);
-            for (key, value) in &req.headers {
-                let k = v8::String::new(scope, key).unwrap();
-                let v = v8::String::new(scope, value).unwrap();
-                headers_obj.set(scope, k.into(), v.into());
-            }
-            let headers_key = v8::String::new(scope, "headers").unwrap();
-            request_obj.set(scope, headers_key.into(), headers_obj.into());
+                // Create headers object for init
+                let headers_obj = v8::Object::new(scope);
+                for (key, value) in &req.headers {
+                    let k = v8::String::new(scope, key).unwrap();
+                    let v = v8::String::new(scope, value).unwrap();
+                    headers_obj.set(scope, k.into(), v.into());
+                }
+                let headers_key = v8::String::new(scope, "headers").unwrap();
+                init_obj.set(scope, headers_key.into(), headers_obj.into());
+
+                // Add body if present (convert Bytes to string)
+                if let Some(body_bytes) = &req.body {
+                    if let Ok(body_str) = std::str::from_utf8(body_bytes) {
+                        let body_key = v8::String::new(scope, "body").unwrap();
+                        let body_val = v8::String::new(scope, body_str).unwrap();
+                        init_obj.set(scope, body_key.into(), body_val.into());
+                    }
+                }
+
+                // Call new Request(url, init)
+                let url_val = v8::String::new(scope, &req.url).unwrap();
+                request_ctor
+                    .new_instance(scope, &[url_val.into(), init_obj.into()])
+                    .unwrap_or_else(|| v8::Object::new(scope))
+            } else {
+                // Fallback to plain object if Request not available
+                let obj = v8::Object::new(scope);
+                let url_key = v8::String::new(scope, "url").unwrap();
+                let url_val = v8::String::new(scope, &req.url).unwrap();
+                obj.set(scope, url_key.into(), url_val.into());
+
+                let method_key = v8::String::new(scope, "method").unwrap();
+                let method_val = v8::String::new(scope, &req.method).unwrap();
+                obj.set(scope, method_key.into(), method_val.into());
+
+                let headers_obj = v8::Object::new(scope);
+                for (key, value) in &req.headers {
+                    let k = v8::String::new(scope, key).unwrap();
+                    let v = v8::String::new(scope, value).unwrap();
+                    headers_obj.set(scope, k.into(), v.into());
+                }
+                let headers_key = v8::String::new(scope, "headers").unwrap();
+                obj.set(scope, headers_key.into(), headers_obj.into());
+                obj
+            };
 
             // Trigger fetch handler
-            let global = context.global(scope);
             let trigger_key = v8::String::new(scope, "__triggerFetch").unwrap();
 
             if let Some(trigger_val) = global.get(scope, trigger_key.into())
