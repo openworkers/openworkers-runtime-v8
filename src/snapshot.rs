@@ -45,6 +45,9 @@ pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
         // Setup ReadableStream API (pre-compiled in snapshot - pure JS)
         crate::runtime::streams::setup_readable_stream(scope);
 
+        // Setup AbortController/AbortSignal - pure JS
+        crate::runtime::bindings::setup_abort_controller(scope);
+
         // Setup structuredClone - pure JS
         crate::runtime::bindings::setup_structured_clone(scope);
 

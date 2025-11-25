@@ -528,6 +528,84 @@ pub fn setup_fetch(
     script.run(scope).unwrap();
 }
 
+pub fn setup_abort_controller(scope: &mut v8::PinScope) {
+    let code = r#"
+        globalThis.AbortSignal = class AbortSignal {
+            constructor() {
+                this.aborted = false;
+                this.reason = undefined;
+                this._listeners = [];
+            }
+
+            addEventListener(type, listener) {
+                if (type === 'abort') {
+                    this._listeners.push(listener);
+                }
+            }
+
+            removeEventListener(type, listener) {
+                if (type === 'abort') {
+                    this._listeners = this._listeners.filter(l => l !== listener);
+                }
+            }
+
+            throwIfAborted() {
+                if (this.aborted) {
+                    throw this.reason;
+                }
+            }
+
+            _abort(reason) {
+                if (this.aborted) return;
+                this.aborted = true;
+                this.reason = reason;
+                const event = { type: 'abort', target: this };
+                for (const listener of this._listeners) {
+                    try { listener(event); } catch (e) { console.error(e); }
+                }
+            }
+
+            static abort(reason) {
+                const signal = new AbortSignal();
+                signal._abort(reason || new DOMException('Aborted', 'AbortError'));
+                return signal;
+            }
+
+            static timeout(ms) {
+                const signal = new AbortSignal();
+                setTimeout(() => {
+                    signal._abort(new DOMException('Timeout', 'TimeoutError'));
+                }, ms);
+                return signal;
+            }
+        };
+
+        globalThis.AbortController = class AbortController {
+            constructor() {
+                this.signal = new AbortSignal();
+            }
+
+            abort(reason) {
+                this.signal._abort(reason || new DOMException('Aborted', 'AbortError'));
+            }
+        };
+
+        // DOMException if not defined
+        if (typeof DOMException === 'undefined') {
+            globalThis.DOMException = class DOMException extends Error {
+                constructor(message, name) {
+                    super(message);
+                    this.name = name || 'Error';
+                }
+            };
+        }
+    "#;
+
+    let code_str = v8::String::new(scope, code).unwrap();
+    let script = v8::Script::compile(scope, code_str, None).unwrap();
+    script.run(scope).unwrap();
+}
+
 pub fn setup_structured_clone(scope: &mut v8::PinScope) {
     let code = r#"
         globalThis.structuredClone = function(value, options) {
