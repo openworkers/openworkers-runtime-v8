@@ -160,10 +160,10 @@ Key components:
 
 ---
 
-## Phase 4: Fetch Forward with Streaming
+## Phase 4: Fetch Forward with Streaming ✅
 
 **Difficulty:** ⭐⭐⭐☆☆
-**Status:** Pending
+**Status:** Completed
 
 ### Objectives
 - Fetch returns a Response with body = ReadableStream
@@ -172,7 +172,13 @@ Key components:
 
 ### Implementation
 
-#### 4.1 Modify execute_fetch to return a stream_id
+Key components:
+- `execute_fetch_streaming()` (`src/runtime/fetch/request.rs`)
+- `FetchResponseMeta` (`src/runtime/fetch/mod.rs`)
+- `__nativeFetchStreaming` (`src/runtime/bindings.rs`)
+- Updated `fetch()` JS wrapper to use streaming by default
+
+#### 4.1 execute_fetch_streaming function
 ```rust
 pub async fn execute_fetch_streaming(
     request: FetchRequest,
@@ -214,13 +220,22 @@ pub async fn execute_fetch_streaming(
 ```javascript
 globalThis.fetch = function(url, options) {
     return new Promise((resolve, reject) => {
-        __nativeFetchStreaming(url, options, (streamId, status, headers) => {
-            // Create Response with stream
-            const stream = __createNativeStream(streamId);
+        const fetchOptions = {
+            url: url,
+            method: options?.method || 'GET',
+            headers: options?.headers || {},
+            body: options?.body || null
+        };
+
+        __nativeFetchStreaming(fetchOptions, (meta) => {
+            // meta = {status, statusText, headers, streamId}
+            const stream = __createNativeStream(meta.streamId);
             const response = new Response(stream, {
-                status: status,
-                headers: headers
+                status: meta.status,
+                headers: meta.headers
             });
+            response.ok = meta.status >= 200 && meta.status < 300;
+            response.statusText = meta.statusText;
             resolve(response);
         }, reject);
     });
@@ -228,6 +243,13 @@ globalThis.fetch = function(url, options) {
 ```
 
 ### Tests Phase 4
+```rust
+// tests/fetch_streaming_test.rs
+- test_fetch_streaming_basic    // Basic fetch with streaming body
+- test_fetch_streaming_chunked  // Reading body chunk by chunk
+- test_fetch_forward            // Direct forward scenario
+```
+
 ```javascript
 // Direct forward
 addEventListener('fetch', event => {
@@ -333,7 +355,7 @@ const OPTIMAL_CHUNK_SIZE: usize = 64 * 1024; // 64KB
 1. **Phase 1** (critical) - Bytes support ✅
 2. **Phase 2** (important) - ReadableStream JS ✅
 3. **Phase 3** (complex) - Complete bridge ✅
-4. **Phase 4** (quick win) - Basic fetch forward
+4. **Phase 4** (quick win) - Basic fetch forward ✅
 5. **Phase 5** (nice to have) - Response streaming
 6. **Phase 6** (optimization) - Zero-copy, etc.
 
@@ -341,7 +363,7 @@ const OPTIMAL_CHUNK_SIZE: usize = 64 * 1024; // 64KB
 - Phase 1 + Phase 2 = Basic stream support ✅
 
 **Production-Ready:**
-- Phases 1-4 = Efficient fetch forward
+- Phases 1-4 = Efficient fetch forward ✅
 
 **Complete:**
 - All phases = Full Workers compatibility

@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use v8;
 
-pub use fetch::{FetchRequest, FetchResponse};
+pub use fetch::{FetchRequest, FetchResponse, FetchResponseMeta};
 
 pub type CallbackId = u64;
 
@@ -19,9 +19,9 @@ pub enum SchedulerMessage {
     ScheduleInterval(CallbackId, u64),
     ClearTimer(CallbackId),
     Fetch(CallbackId, FetchRequest),
-    FetchStreaming(CallbackId, FetchRequest, stream_manager::StreamId), // Fetch with streaming
+    FetchStreaming(CallbackId, FetchRequest), // Fetch with streaming (stream created internally)
     StreamRead(CallbackId, stream_manager::StreamId), // Read next chunk from stream
-    StreamCancel(stream_manager::StreamId),           // Cancel/close a stream
+    StreamCancel(stream_manager::StreamId),   // Cancel/close a stream
     Shutdown,
 }
 
@@ -30,7 +30,7 @@ pub enum CallbackMessage {
     ExecuteInterval(CallbackId),
     FetchSuccess(CallbackId, FetchResponse),
     FetchError(CallbackId, String),
-    FetchStreamingSuccess(CallbackId, FetchResponse, stream_manager::StreamId), // Fetch with stream ID
+    FetchStreamingSuccess(CallbackId, FetchResponseMeta, stream_manager::StreamId), // Fetch metadata + stream ID
     StreamChunk(CallbackId, stream_manager::StreamChunk), // Stream chunk ready
 }
 
@@ -205,25 +205,46 @@ impl Runtime {
                         callback.call(scope, recv.into(), &[error.into()]);
                     }
                 }
-                CallbackMessage::FetchStreamingSuccess(callback_id, response, stream_id) => {
-                    // Fetch with streaming - create Response with native stream
+                CallbackMessage::FetchStreamingSuccess(callback_id, meta, stream_id) => {
+                    // Fetch with streaming - call JS callback with metadata and stream_id
                     let callback_opt = {
                         let mut cbs = self.fetch_callbacks.lock().unwrap();
                         cbs.remove(&callback_id)
                     };
 
                     if let Some(callback_global) = callback_opt {
-                        // Create response object with streaming support
-                        if let Ok(response_obj) =
-                            fetch::response::create_response_object(scope, response)
-                        {
-                            let callback = v8::Local::new(scope, &callback_global);
-                            let recv = v8::undefined(scope);
-                            callback.call(scope, recv.into(), &[response_obj.into()]);
+                        // Create metadata object for JS
+                        let meta_obj = v8::Object::new(scope);
+
+                        // status
+                        let status_key = v8::String::new(scope, "status").unwrap();
+                        let status_val = v8::Number::new(scope, meta.status as f64);
+                        meta_obj.set(scope, status_key.into(), status_val.into());
+
+                        // statusText
+                        let status_text_key = v8::String::new(scope, "statusText").unwrap();
+                        let status_text_val = v8::String::new(scope, &meta.status_text).unwrap();
+                        meta_obj.set(scope, status_text_key.into(), status_text_val.into());
+
+                        // headers as object
+                        let headers_obj = v8::Object::new(scope);
+                        for (key, value) in &meta.headers {
+                            let k = v8::String::new(scope, key).unwrap();
+                            let v = v8::String::new(scope, value).unwrap();
+                            headers_obj.set(scope, k.into(), v.into());
                         }
+                        let headers_key = v8::String::new(scope, "headers").unwrap();
+                        meta_obj.set(scope, headers_key.into(), headers_obj.into());
+
+                        // streamId
+                        let stream_id_key = v8::String::new(scope, "streamId").unwrap();
+                        let stream_id_val = v8::Number::new(scope, stream_id as f64);
+                        meta_obj.set(scope, stream_id_key.into(), stream_id_val.into());
+
+                        let callback = v8::Local::new(scope, &callback_global);
+                        let recv = v8::undefined(scope);
+                        callback.call(scope, recv.into(), &[meta_obj.into()]);
                     }
-                    // Note: stream_id will be used when we fully implement streaming fetch
-                    let _ = stream_id;
                 }
                 CallbackMessage::StreamChunk(callback_id, chunk) => {
                     // Stream read result - call the JavaScript callback with the chunk
@@ -368,14 +389,15 @@ pub async fn run_event_loop(
                     }
                 });
             }
-            SchedulerMessage::FetchStreaming(promise_id, request, stream_id) => {
+            SchedulerMessage::FetchStreaming(promise_id, request) => {
                 // Fetch with real-time streaming
                 let callback_tx = callback_tx.clone();
+                let manager = stream_manager.clone();
                 tokio::spawn(async move {
-                    match fetch::request::execute_fetch(request).await {
-                        Ok(response) => {
+                    match fetch::request::execute_fetch_streaming(request, manager).await {
+                        Ok((meta, stream_id)) => {
                             let _ = callback_tx.send(CallbackMessage::FetchStreamingSuccess(
-                                promise_id, response, stream_id,
+                                promise_id, meta, stream_id,
                             ));
                         }
                         Err(e) => {

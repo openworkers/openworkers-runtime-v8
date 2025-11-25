@@ -371,7 +371,131 @@ pub fn setup_fetch(
     let native_fetch_key = v8::String::new(scope, "__nativeFetch").unwrap();
     global.set(scope, native_fetch_key.into(), native_fetch_fn.into());
 
-    // JavaScript fetch implementation using Promises
+    // Create __nativeFetchStreaming for streaming fetch
+    let native_fetch_streaming_fn = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope,
+         args: v8::FunctionCallbackArguments,
+         mut _retval: v8::ReturnValue| {
+            let global = scope.get_current_context().global(scope);
+            let state_key = v8::String::new(scope, "__fetchState").unwrap();
+            let state_val = global.get(scope, state_key.into()).unwrap();
+
+            if !state_val.is_external() {
+                return;
+            }
+
+            let external: v8::Local<v8::External> = state_val.try_into().unwrap();
+            let state_ptr = external.value() as *mut FetchState;
+            let state = unsafe { &*state_ptr };
+
+            if args.length() < 3 {
+                return;
+            }
+
+            // Parse fetch options (arg 0)
+            let options = match args.get(0).to_object(scope) {
+                Some(obj) => obj,
+                None => return,
+            };
+
+            // Get URL
+            let url_key = v8::String::new(scope, "url").unwrap();
+            let url = match options
+                .get(scope, url_key.into())
+                .and_then(|v| v.to_string(scope))
+            {
+                Some(s) => s.to_rust_string_lossy(scope),
+                None => return,
+            };
+
+            // Get method
+            let method_key = v8::String::new(scope, "method").unwrap();
+            let method_str = options
+                .get(scope, method_key.into())
+                .and_then(|v| v.to_string(scope))
+                .map(|s| s.to_rust_string_lossy(scope))
+                .unwrap_or_else(|| "GET".to_string());
+
+            let method = super::fetch::HttpMethod::from_str(&method_str)
+                .unwrap_or(super::fetch::HttpMethod::Get);
+
+            // Get headers
+            let mut headers = std::collections::HashMap::new();
+            let headers_key = v8::String::new(scope, "headers").unwrap();
+            if let Some(headers_val) = options.get(scope, headers_key.into())
+                && let Some(headers_obj) = headers_val.to_object(scope)
+                && let Some(props) = headers_obj.get_own_property_names(scope, Default::default())
+            {
+                for i in 0..props.length() {
+                    if let Some(key_val) = props.get_index(scope, i)
+                        && let Some(key_str) = key_val.to_string(scope)
+                    {
+                        let key = key_str.to_rust_string_lossy(scope);
+                        if let Some(val) = headers_obj.get(scope, key_val)
+                            && let Some(val_str) = val.to_string(scope)
+                        {
+                            let value = val_str.to_rust_string_lossy(scope);
+                            headers.insert(key, value);
+                        }
+                    }
+                }
+            }
+
+            // Get body
+            let body_key = v8::String::new(scope, "body").unwrap();
+            let body = options
+                .get(scope, body_key.into())
+                .filter(|v| !v.is_null() && !v.is_undefined())
+                .and_then(|v| v.to_string(scope))
+                .map(|s| s.to_rust_string_lossy(scope));
+
+            // Create FetchRequest
+            let request = super::fetch::FetchRequest {
+                url,
+                method,
+                headers,
+                body,
+            };
+
+            // Get resolve callback
+            let resolve_val = args.get(1);
+            if !resolve_val.is_function() {
+                return;
+            }
+            let resolve: v8::Local<v8::Function> = resolve_val.try_into().unwrap();
+            let resolve_global = v8::Global::new(scope.as_ref(), resolve);
+
+            // Generate callback ID
+            let callback_id = {
+                let mut next_id = state.next_id.lock().unwrap();
+                let id = *next_id;
+                *next_id += 1;
+                id
+            };
+
+            // Store callback
+            {
+                let mut callbacks = state.callbacks.lock().unwrap();
+                callbacks.insert(callback_id, resolve_global);
+            }
+
+            // Send FetchStreaming message to scheduler
+            let _ = state
+                .scheduler_tx
+                .send(SchedulerMessage::FetchStreaming(callback_id, request));
+        },
+    )
+    .unwrap();
+
+    let native_fetch_streaming_key = v8::String::new(scope, "__nativeFetchStreaming").unwrap();
+    global.set(
+        scope,
+        native_fetch_streaming_key.into(),
+        native_fetch_streaming_fn.into(),
+    );
+
+    // JavaScript fetch implementation using Promises with streaming support
     let code = r#"
         globalThis.fetch = function(url, options) {
             return new Promise((resolve, reject) => {
@@ -382,7 +506,19 @@ pub fn setup_fetch(
                     headers: options.headers || {},
                     body: options.body || null
                 };
-                __nativeFetch(fetchOptions, resolve, reject);
+
+                // Use streaming fetch
+                __nativeFetchStreaming(fetchOptions, (meta) => {
+                    // meta = {status, statusText, headers, streamId}
+                    const stream = __createNativeStream(meta.streamId);
+                    const response = new Response(stream, {
+                        status: meta.status,
+                        headers: meta.headers
+                    });
+                    response.ok = meta.status >= 200 && meta.status < 300;
+                    response.statusText = meta.statusText;
+                    resolve(response);
+                }, reject);
             });
         };
     "#;

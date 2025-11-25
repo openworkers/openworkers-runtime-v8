@@ -77,3 +77,11 @@ impl FetchResponse {
         self.status >= 200 && self.status < 300
     }
 }
+
+/// Fetch response metadata (for streaming - body comes via stream)
+#[derive(Debug, Clone)]
+pub struct FetchResponseMeta {
+    pub status: u16,
+    pub status_text: String,
+    pub headers: HashMap<String, String>,
+}
