@@ -41,6 +41,22 @@ Complex Scenario:  avg=743µs, throughput=1346 req/s
 
 **V8 has the fastest exec() time** (15µs), making it ideal for high-throughput scenarios.
 
+### Worker Benchmark
+
+| Benchmark | V8 | JSC | Boa |
+|-----------|---:|----:|----:|
+| Worker/new | **781 µs** | 998 µs | 1.04 ms |
+| exec_simple_response | **1.05 ms** | 1.87 ms | 1.90 ms |
+| exec_json_response | **1.07 ms** | 2.14 ms | 2.11 ms |
+
+### Streaming Performance
+
+| Metric | V8 | JSC | Boa |
+|--------|---:|----:|----:|
+| Buffered req/s | **71,555** | 18,480 | 4,975 |
+| Local stream 100KB | **86-129 MB/s** | 60-71 MB/s | 0.2 MB/s |
+| Fetch forward | ✅ zero-copy | ✅ zero-copy | ❌ buffered |
+
 ## Installation
 
 ```toml
