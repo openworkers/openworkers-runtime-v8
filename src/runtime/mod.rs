@@ -1,4 +1,5 @@
 pub mod bindings;
+pub mod crypto;
 pub mod fetch;
 pub mod stream_manager;
 pub mod streams;
@@ -118,6 +119,7 @@ impl Runtime {
                 stream_callbacks.clone(),
                 next_callback_id.clone(),
             );
+            crypto::setup_crypto(scope);
 
             // Only setup pure JS APIs if no snapshot (they're in the snapshot)
             if !use_snapshot {
