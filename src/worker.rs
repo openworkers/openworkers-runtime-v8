@@ -118,7 +118,7 @@ impl Worker {
             // Process pending callbacks and microtasks
             self.runtime.process_callbacks();
 
-            // Check if response is available
+            // Check if response is available and body has been read
             use std::pin::pin;
             let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
             let mut scope = scope.init();
@@ -129,12 +129,12 @@ impl Worker {
             let resp_key = v8::String::new(scope, "__lastResponse").unwrap();
             if let Some(resp_val) = global.get(scope, resp_key.into()) {
                 // Check if it's a valid Response object (not undefined, not a Promise)
-                if !resp_val.is_undefined() && !resp_val.is_null() {
+                if !resp_val.is_undefined() && !resp_val.is_null() && !resp_val.is_promise() {
                     if let Some(resp_obj) = resp_val.to_object(scope) {
                         // Check if it has a 'status' property (indicates it's a Response, not a Promise)
                         let status_key = v8::String::new(scope, "status").unwrap();
                         if resp_obj.get(scope, status_key.into()).is_some() {
-                            // Response is ready!
+                            // Response is ready! (body is in the ReadableStream queue)
                             break;
                         }
                     }
@@ -177,26 +177,19 @@ impl Worker {
                 .and_then(|v| v.uint32_value(scope))
                 .unwrap_or(200) as u16;
 
-            // Extract body (now as Uint8Array/ArrayBuffer)
-            let body_key = v8::String::new(scope, "body").unwrap();
-            let body_bytes = if let Some(body_val) = resp_obj.get(scope, body_key.into()) {
-                if let Ok(uint8_array) = v8::Local::<v8::Uint8Array>::try_from(body_val) {
-                    // Body is Uint8Array - extract bytes
+            // Extract body using the internal _getRawBody() method
+            let get_raw_body_key = v8::String::new(scope, "_getRawBody").unwrap();
+            let body_bytes = if let Some(get_raw_body_val) =
+                resp_obj.get(scope, get_raw_body_key.into())
+                && let Ok(get_raw_body_fn) = v8::Local::<v8::Function>::try_from(get_raw_body_val)
+            {
+                if let Some(result_val) = get_raw_body_fn.call(scope, resp_obj.into(), &[])
+                    && let Ok(uint8_array) = v8::Local::<v8::Uint8Array>::try_from(result_val)
+                {
                     let len = uint8_array.byte_length();
-                    let mut bytes = vec![0u8; len];
-                    uint8_array.copy_contents(&mut bytes);
-                    bytes::Bytes::from(bytes)
-                } else if let Ok(array_buffer) = v8::Local::<v8::ArrayBuffer>::try_from(body_val) {
-                    // Body is ArrayBuffer - extract bytes
-                    let backing_store = array_buffer.get_backing_store();
-                    let len = backing_store.byte_length();
-                    let data = backing_store.data().unwrap();
-                    let bytes =
-                        unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, len) };
-                    bytes::Bytes::copy_from_slice(bytes)
-                } else if let Some(string) = body_val.to_string(scope) {
-                    // Body is String - convert to bytes
-                    bytes::Bytes::from(string.to_rust_string_lossy(scope).into_bytes())
+                    let mut bytes_vec = vec![0u8; len];
+                    uint8_array.copy_contents(&mut bytes_vec);
+                    bytes::Bytes::from(bytes_vec)
                 } else {
                     bytes::Bytes::new()
                 }

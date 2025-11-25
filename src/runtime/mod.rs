@@ -1,5 +1,6 @@
 pub mod bindings;
 pub mod fetch;
+pub mod streams;
 pub mod text_encoding;
 
 use std::collections::HashMap;
@@ -101,8 +102,10 @@ impl Runtime {
                 next_callback_id.clone(),
             );
 
-            // Only setup URL and Response if no snapshot (they're in the snapshot)
+            // Only setup pure JS APIs if no snapshot (they're in the snapshot)
             if !use_snapshot {
+                text_encoding::setup_text_encoding(scope);
+                streams::setup_readable_stream(scope);
                 bindings::setup_url(scope);
                 bindings::setup_response(scope);
             }

@@ -421,34 +421,150 @@ pub fn setup_response(scope: &mut v8::PinScope) {
             init = init || {};
             this.status = init.status || 200;
             this.headers = init.headers || {};
+            this.bodyUsed = false;
 
             // Support different body types
-            if (body instanceof Uint8Array || body instanceof ArrayBuffer) {
-                // Binary data - keep as-is
-                this.body = body instanceof Uint8Array ? body : new Uint8Array(body);
+            if (body instanceof ReadableStream) {
+                // Already a stream - use it directly
+                this.body = body;
+            } else if (body instanceof Uint8Array || body instanceof ArrayBuffer) {
+                // Binary data - wrap in a stream
+                const bytes = body instanceof Uint8Array ? body : new Uint8Array(body);
+                this.body = new ReadableStream({
+                    start(controller) {
+                        controller.enqueue(bytes);
+                        controller.close();
+                    }
+                });
             } else if (body === null || body === undefined) {
-                this.body = new Uint8Array(0);
+                // Empty body
+                this.body = new ReadableStream({
+                    start(controller) {
+                        controller.close();
+                    }
+                });
             } else {
-                // String or other - convert to Uint8Array
+                // String or other - convert to bytes and wrap in stream
                 const encoder = new TextEncoder();
-                this.body = encoder.encode(String(body));
+                const bytes = encoder.encode(String(body));
+                this.body = new ReadableStream({
+                    start(controller) {
+                        controller.enqueue(bytes);
+                        controller.close();
+                    }
+                });
             }
 
-            // text() method - decode bytes to string
+            // text() method - read stream and decode to string
             this.text = async function() {
+                if (this.bodyUsed) {
+                    throw new TypeError('Body has already been consumed');
+                }
+                this.bodyUsed = true;
+
+                const reader = this.body.getReader();
+                const chunks = [];
+
+                try {
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        chunks.push(value);
+                    }
+                } finally {
+                    reader.releaseLock();
+                }
+
+                // Concatenate all chunks
+                const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+                const result = new Uint8Array(totalLength);
+                let offset = 0;
+                for (const chunk of chunks) {
+                    result.set(chunk, offset);
+                    offset += chunk.length;
+                }
+
                 const decoder = new TextDecoder();
-                return decoder.decode(this.body);
+                return decoder.decode(result);
             };
 
-            // arrayBuffer() method - return underlying buffer
+            // arrayBuffer() method - read stream and return buffer
             this.arrayBuffer = async function() {
-                return this.body.buffer;
+                if (this.bodyUsed) {
+                    throw new TypeError('Body has already been consumed');
+                }
+                this.bodyUsed = true;
+
+                const reader = this.body.getReader();
+                const chunks = [];
+
+                try {
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        chunks.push(value);
+                    }
+                } finally {
+                    reader.releaseLock();
+                }
+
+                // Concatenate all chunks
+                const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+                const result = new Uint8Array(totalLength);
+                let offset = 0;
+                for (const chunk of chunks) {
+                    result.set(chunk, offset);
+                    offset += chunk.length;
+                }
+
+                return result.buffer;
             };
 
             // json() method - decode and parse
             this.json = async function() {
                 const text = await this.text();
                 return JSON.parse(text);
+            };
+
+            // Internal method to synchronously get raw body bytes
+            // Used by the Rust runtime to extract response body
+            this._getRawBody = function() {
+                if (!this.body || !this.body._controller) {
+                    return new Uint8Array(0);
+                }
+
+                const queue = this.body._controller._queue;
+                if (!queue || queue.length === 0) {
+                    return new Uint8Array(0);
+                }
+
+                // Concatenate all chunks in the queue
+                const chunks = [];
+                for (const item of queue) {
+                    if (item.type === 'chunk' && item.value) {
+                        chunks.push(item.value);
+                    }
+                }
+
+                if (chunks.length === 0) {
+                    return new Uint8Array(0);
+                }
+
+                // Single chunk - return directly
+                if (chunks.length === 1) {
+                    return chunks[0];
+                }
+
+                // Multiple chunks - concatenate
+                const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+                const result = new Uint8Array(totalLength);
+                let offset = 0;
+                for (const chunk of chunks) {
+                    result.set(chunk, offset);
+                    offset += chunk.length;
+                }
+
+                return result;
             };
         };
     "#;

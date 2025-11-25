@@ -42,6 +42,9 @@ pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
         // Setup TextEncoder/TextDecoder (pre-compiled in snapshot - pure JS)
         crate::runtime::text_encoding::setup_text_encoding(scope);
 
+        // Setup ReadableStream API (pre-compiled in snapshot - pure JS)
+        crate::runtime::streams::setup_readable_stream(scope);
+
         // Setup URL API (pre-compiled in snapshot - pure JS)
         crate::runtime::bindings::setup_url(scope);
 
