@@ -14,9 +14,12 @@ pub fn setup_text_encoding(scope: &mut v8::PinScope) {
                 const str = String(input || '');
                 const bytes = [];
 
-                // Simple UTF-8 encoding
+                // UTF-8 encoding with proper surrogate pair handling
                 for (let i = 0; i < str.length; i++) {
-                    const code = str.charCodeAt(i);
+                    let code = str.codePointAt(i);
+
+                    // Skip low surrogate (already processed with high surrogate)
+                    if (code > 0xFFFF) i++;
 
                     if (code < 0x80) {
                         bytes.push(code);
@@ -75,13 +78,13 @@ pub fn setup_text_encoding(scope: &mut v8::PinScope) {
                         const code = ((byte1 & 0x0F) << 12) | ((byte2 & 0x3F) << 6) | (byte3 & 0x3F);
                         chars.push(String.fromCharCode(code));
                     } else if ((byte1 & 0xF8) === 0xF0) {
-                        // 4-byte character
+                        // 4-byte character (emojis, etc.)
                         const byte2 = bytes[i++];
                         const byte3 = bytes[i++];
                         const byte4 = bytes[i++];
                         const code = ((byte1 & 0x07) << 18) | ((byte2 & 0x3F) << 12) |
                                     ((byte3 & 0x3F) << 6) | (byte4 & 0x3F);
-                        chars.push(String.fromCharCode(code));
+                        chars.push(String.fromCodePoint(code));
                     } else {
                         // Invalid UTF-8, skip
                         chars.push('\uFFFD'); // Replacement character
