@@ -307,7 +307,7 @@ impl Worker {
             return Ok(HttpResponse {
                 status,
                 headers: vec![],
-                body: ResponseBody::Bytes(bytes::Bytes::new()),
+                body: ResponseBody::None,
             });
         }
 

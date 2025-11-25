@@ -14,8 +14,10 @@ pub struct HttpRequest {
 /// Default buffer size for streaming responses (matches StreamManager)
 pub const RESPONSE_STREAM_BUFFER_SIZE: usize = 16;
 
-/// Response body - either complete bytes or a stream of chunks
+/// Response body - either complete bytes, a stream, or empty
 pub enum ResponseBody {
+    /// No body
+    None,
     /// Complete body (already buffered)
     Bytes(Bytes),
     /// Streaming body - receiver yields chunks as they become available
@@ -26,6 +28,7 @@ pub enum ResponseBody {
 impl std::fmt::Debug for ResponseBody {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ResponseBody::None => write!(f, "None"),
             ResponseBody::Bytes(b) => write!(f, "Bytes({} bytes)", b.len()),
             ResponseBody::Stream(_) => write!(f, "Stream(...)"),
         }
@@ -33,12 +36,17 @@ impl std::fmt::Debug for ResponseBody {
 }
 
 impl ResponseBody {
-    /// Get bytes if this is a Bytes variant, None if it's a Stream
+    /// Get bytes if this is a Bytes variant, None otherwise
     pub fn as_bytes(&self) -> Option<&Bytes> {
         match self {
             ResponseBody::Bytes(b) => Some(b),
-            ResponseBody::Stream(_) => None,
+            _ => None,
         }
+    }
+
+    /// Check if this is an empty response
+    pub fn is_none(&self) -> bool {
+        matches!(self, ResponseBody::None)
     }
 
     /// Check if this is a streaming response
@@ -101,6 +109,7 @@ impl From<HttpResponse> for actix_web::HttpResponse {
         }
 
         match res.body {
+            ResponseBody::None => builder.finish(),
             ResponseBody::Bytes(body) => {
                 if body.is_empty() {
                     builder.finish()
