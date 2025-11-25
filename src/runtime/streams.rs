@@ -179,7 +179,25 @@ pub fn setup_readable_stream(scope: &mut v8::PinScope) {
                     return Promise.resolve({ done: true, value: undefined });
                 }
 
-                // Create pending read request
+                // If underlying source has pull(), call it to get more data
+                const underlyingSource = this._stream._underlyingSource;
+                if (underlyingSource && underlyingSource.pull) {
+                    // Create pending read request first
+                    return new Promise((resolve, reject) => {
+                        this._readRequests.push({ resolve, reject });
+
+                        // Call pull to request more data
+                        // pull() should enqueue data or close/error the stream
+                        const pullPromise = underlyingSource.pull(controller);
+                        if (pullPromise && typeof pullPromise.then === 'function') {
+                            pullPromise.catch(e => {
+                                controller.error(e);
+                            });
+                        }
+                    });
+                }
+
+                // No pull(), create pending read request
                 return new Promise((resolve, reject) => {
                     this._readRequests.push({ resolve, reject });
                 });

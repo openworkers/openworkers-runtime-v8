@@ -14,6 +14,24 @@ impl Worker {
         self.runtime.process_callbacks();
     }
 
+    /// Get the stream manager for creating/managing native streams
+    pub fn stream_manager(&self) -> std::sync::Arc<crate::runtime::stream_manager::StreamManager> {
+        self.runtime.stream_manager.clone()
+    }
+
+    /// Evaluate JavaScript code (for testing/advanced use)
+    pub fn evaluate(&mut self, code: &str) -> Result<(), String> {
+        self.runtime.evaluate(code)
+    }
+
+    /// Get access to the V8 isolate and context (for advanced testing)
+    pub fn with_runtime<F, R>(&mut self, f: F) -> R
+    where
+        F: FnOnce(&mut Runtime) -> R,
+    {
+        f(&mut self.runtime)
+    }
+
     pub async fn new(
         script: Script,
         _log_tx: Option<std::sync::mpsc::Sender<crate::compat::LogEvent>>,
@@ -27,9 +45,12 @@ impl Worker {
         // Evaluate user script
         runtime.evaluate(&script.code)?;
 
+        // Get stream_manager for event loop
+        let stream_manager = runtime.stream_manager.clone();
+
         // Start event loop in background
         let event_loop_handle = tokio::spawn(async move {
-            run_event_loop(scheduler_rx, callback_tx).await;
+            run_event_loop(scheduler_rx, callback_tx, stream_manager).await;
         });
 
         Ok(Self {

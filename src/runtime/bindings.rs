@@ -573,3 +573,159 @@ pub fn setup_response(scope: &mut v8::PinScope) {
     let script = v8::Script::compile(scope, code_str, None).unwrap();
     script.run(scope).unwrap();
 }
+
+/// Shared state for stream read callbacks (same pattern as FetchState)
+#[derive(Clone)]
+pub struct StreamState {
+    pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+    pub callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    pub next_id: Arc<Mutex<CallbackId>>,
+}
+
+/// Setup native streaming operations
+/// These ops allow JavaScript to read chunks from Rust streams
+pub fn setup_stream_ops(
+    scope: &mut v8::PinScope,
+    scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+    stream_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    next_callback_id: Arc<Mutex<CallbackId>>,
+) {
+    let state = StreamState {
+        scheduler_tx,
+        callbacks: stream_callbacks,
+        next_id: next_callback_id,
+    };
+
+    // Create External to hold our state
+    let state_ptr = Box::into_raw(Box::new(state)) as *mut std::ffi::c_void;
+    let external = v8::External::new(scope, state_ptr);
+
+    let global = scope.get_current_context().global(scope);
+    let state_key = v8::String::new(scope, "__streamState").unwrap();
+    global.set(scope, state_key.into(), external.into());
+
+    // Create __nativeStreamRead(stream_id, resolve_callback)
+    // Uses the same callback pattern as fetch for consistency
+    let stream_read_fn = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope,
+         args: v8::FunctionCallbackArguments,
+         mut _retval: v8::ReturnValue| {
+            let global = scope.get_current_context().global(scope);
+            let state_key = v8::String::new(scope, "__streamState").unwrap();
+            let state_val = global.get(scope, state_key.into()).unwrap();
+
+            if !state_val.is_external() {
+                return;
+            }
+
+            let external: v8::Local<v8::External> = state_val.try_into().unwrap();
+            let state_ptr = external.value() as *mut StreamState;
+            let state = unsafe { &*state_ptr };
+
+            // Get stream_id (arg 0)
+            let stream_id = if let Some(id_val) = args.get(0).to_uint32(scope) {
+                id_val.value() as u64
+            } else {
+                return;
+            };
+
+            // Get resolve callback (arg 1)
+            let resolve_val = args.get(1);
+            if !resolve_val.is_function() {
+                return;
+            }
+            let resolve: v8::Local<v8::Function> = resolve_val.try_into().unwrap();
+            let resolve_global = v8::Global::new(scope.as_ref(), resolve);
+
+            // Generate callback ID
+            let callback_id = {
+                let mut next_id = state.next_id.lock().unwrap();
+                let id = *next_id;
+                *next_id += 1;
+                id
+            };
+
+            // Store callback
+            {
+                let mut callbacks = state.callbacks.lock().unwrap();
+                callbacks.insert(callback_id, resolve_global);
+            }
+
+            // Send StreamRead message to scheduler
+            let _ = state
+                .scheduler_tx
+                .send(SchedulerMessage::StreamRead(callback_id, stream_id));
+        },
+    )
+    .unwrap();
+
+    let stream_read_key = v8::String::new(scope, "__nativeStreamRead").unwrap();
+    global.set(scope, stream_read_key.into(), stream_read_fn.into());
+
+    // Create __nativeStreamCancel(stream_id) - sends cancel message to scheduler
+    let stream_cancel_fn = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope,
+         args: v8::FunctionCallbackArguments,
+         mut _retval: v8::ReturnValue| {
+            let global = scope.get_current_context().global(scope);
+            let state_key = v8::String::new(scope, "__streamState").unwrap();
+            let state_val = global.get(scope, state_key.into()).unwrap();
+
+            if !state_val.is_external() {
+                return;
+            }
+
+            let external: v8::Local<v8::External> = state_val.try_into().unwrap();
+            let state_ptr = external.value() as *mut StreamState;
+            let state = unsafe { &*state_ptr };
+
+            // Get stream_id
+            let stream_id = if let Some(id_val) = args.get(0).to_uint32(scope) {
+                id_val.value() as u64
+            } else {
+                return;
+            };
+
+            // Send cancel message
+            let _ = state
+                .scheduler_tx
+                .send(SchedulerMessage::StreamCancel(stream_id));
+        },
+    )
+    .unwrap();
+
+    let stream_cancel_key = v8::String::new(scope, "__nativeStreamCancel").unwrap();
+    global.set(scope, stream_cancel_key.into(), stream_cancel_fn.into());
+
+    // JavaScript helper: createNativeStream(streamId) -> ReadableStream
+    // Creates a ReadableStream that pulls from Rust via __nativeStreamRead
+    let code = r#"
+        globalThis.__createNativeStream = function(streamId) {
+            return new ReadableStream({
+                async pull(controller) {
+                    return new Promise((resolve) => {
+                        __nativeStreamRead(streamId, (result) => {
+                            if (result.error) {
+                                controller.error(new Error(result.error));
+                            } else if (result.done) {
+                                controller.close();
+                            } else {
+                                controller.enqueue(result.value);
+                            }
+                            resolve();
+                        });
+                    });
+                },
+                cancel(reason) {
+                    __nativeStreamCancel(streamId);
+                }
+            });
+        };
+    "#;
+
+    let code_str = v8::String::new(scope, code).unwrap();
+    let script = v8::Script::compile(scope, code_str, None).unwrap();
+    script.run(scope).unwrap();
+}

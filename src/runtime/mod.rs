@@ -1,5 +1,6 @@
 pub mod bindings;
 pub mod fetch;
+pub mod stream_manager;
 pub mod streams;
 pub mod text_encoding;
 
@@ -18,6 +19,9 @@ pub enum SchedulerMessage {
     ScheduleInterval(CallbackId, u64),
     ClearTimer(CallbackId),
     Fetch(CallbackId, FetchRequest),
+    FetchStreaming(CallbackId, FetchRequest, stream_manager::StreamId), // Fetch with streaming
+    StreamRead(CallbackId, stream_manager::StreamId), // Read next chunk from stream
+    StreamCancel(stream_manager::StreamId),           // Cancel/close a stream
     Shutdown,
 }
 
@@ -26,6 +30,8 @@ pub enum CallbackMessage {
     ExecuteInterval(CallbackId),
     FetchSuccess(CallbackId, FetchResponse),
     FetchError(CallbackId, String),
+    FetchStreamingSuccess(CallbackId, FetchResponse, stream_manager::StreamId), // Fetch with stream ID
+    StreamChunk(CallbackId, stream_manager::StreamChunk), // Stream chunk ready
 }
 
 pub struct Runtime {
@@ -34,11 +40,14 @@ pub struct Runtime {
     pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     pub callback_rx: mpsc::UnboundedReceiver<CallbackMessage>,
     pub(crate) fetch_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    pub(crate) stream_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
     pub(crate) _next_callback_id: Arc<Mutex<CallbackId>>,
     /// Channel for fetch response (set during fetch event execution)
     pub(crate) fetch_response_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
     /// V8 Platform (for pump_message_loop)
     platform: &'static v8::SharedRef<v8::Platform>,
+    /// Stream manager for native streaming
+    pub(crate) stream_manager: Arc<stream_manager::StreamManager>,
 }
 
 impl Runtime {
@@ -62,8 +71,10 @@ impl Runtime {
         let (callback_tx, callback_rx) = mpsc::unbounded_channel();
 
         let fetch_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let stream_callbacks = Arc::new(Mutex::new(HashMap::new()));
         let next_callback_id = Arc::new(Mutex::new(1));
         let fetch_response_tx = Arc::new(Mutex::new(None));
+        let stream_manager = Arc::new(stream_manager::StreamManager::new());
 
         // Load snapshot once and cache it in static memory
         static SNAPSHOT: OnceLock<Option<&'static [u8]>> = OnceLock::new();
@@ -101,6 +112,12 @@ impl Runtime {
                 fetch_callbacks.clone(),
                 next_callback_id.clone(),
             );
+            bindings::setup_stream_ops(
+                scope,
+                scheduler_tx.clone(),
+                stream_callbacks.clone(),
+                next_callback_id.clone(),
+            );
 
             // Only setup pure JS APIs if no snapshot (they're in the snapshot)
             if !use_snapshot {
@@ -119,9 +136,11 @@ impl Runtime {
             scheduler_tx,
             callback_rx,
             fetch_callbacks,
+            stream_callbacks,
             _next_callback_id: next_callback_id,
             fetch_response_tx,
             platform,
+            stream_manager,
         };
 
         (runtime, scheduler_rx, callback_tx)
@@ -186,6 +205,83 @@ impl Runtime {
                         callback.call(scope, recv.into(), &[error.into()]);
                     }
                 }
+                CallbackMessage::FetchStreamingSuccess(callback_id, response, stream_id) => {
+                    // Fetch with streaming - create Response with native stream
+                    let callback_opt = {
+                        let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback_global) = callback_opt {
+                        // Create response object with streaming support
+                        if let Ok(response_obj) =
+                            fetch::response::create_response_object(scope, response)
+                        {
+                            let callback = v8::Local::new(scope, &callback_global);
+                            let recv = v8::undefined(scope);
+                            callback.call(scope, recv.into(), &[response_obj.into()]);
+                        }
+                    }
+                    // Note: stream_id will be used when we fully implement streaming fetch
+                    let _ = stream_id;
+                }
+                CallbackMessage::StreamChunk(callback_id, chunk) => {
+                    // Stream read result - call the JavaScript callback with the chunk
+                    let callback_opt = {
+                        let mut cbs = self.stream_callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback_global) = callback_opt {
+                        let callback = v8::Local::new(scope, &callback_global);
+                        let recv = v8::undefined(scope);
+
+                        // Create result object: {done: boolean, value?: Uint8Array, error?: string}
+                        let result_obj = v8::Object::new(scope);
+
+                        match chunk {
+                            stream_manager::StreamChunk::Data(bytes) => {
+                                // {done: false, value: Uint8Array}
+                                let done_key = v8::String::new(scope, "done").unwrap();
+                                let done_val = v8::Boolean::new(scope, false);
+                                result_obj.set(scope, done_key.into(), done_val.into());
+
+                                // Create Uint8Array from bytes
+                                let len = bytes.len();
+                                let array_buffer = v8::ArrayBuffer::new(scope, len);
+                                let backing_store = array_buffer.get_backing_store();
+                                if len > 0 {
+                                    unsafe {
+                                        std::ptr::copy_nonoverlapping(
+                                            bytes.as_ptr(),
+                                            backing_store.data().unwrap().as_ptr() as *mut u8,
+                                            len,
+                                        );
+                                    }
+                                }
+                                let uint8_array =
+                                    v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
+
+                                let value_key = v8::String::new(scope, "value").unwrap();
+                                result_obj.set(scope, value_key.into(), uint8_array.into());
+                            }
+                            stream_manager::StreamChunk::Done => {
+                                // {done: true}
+                                let done_key = v8::String::new(scope, "done").unwrap();
+                                let done_val = v8::Boolean::new(scope, true);
+                                result_obj.set(scope, done_key.into(), done_val.into());
+                            }
+                            stream_manager::StreamChunk::Error(err_msg) => {
+                                // {error: string}
+                                let error_key = v8::String::new(scope, "error").unwrap();
+                                let error_val = v8::String::new(scope, &err_msg).unwrap();
+                                result_obj.set(scope, error_key.into(), error_val.into());
+                            }
+                        }
+
+                        callback.call(scope, recv.into(), &[result_obj.into()]);
+                    }
+                }
             }
         }
 
@@ -227,6 +323,7 @@ impl Runtime {
 pub async fn run_event_loop(
     mut scheduler_rx: mpsc::UnboundedReceiver<SchedulerMessage>,
     callback_tx: mpsc::UnboundedSender<CallbackMessage>,
+    stream_manager: Arc<stream_manager::StreamManager>,
 ) {
     let mut running_tasks: HashMap<CallbackId, tokio::task::JoinHandle<()>> = HashMap::new();
 
@@ -270,6 +367,38 @@ pub async fn run_event_loop(
                         }
                     }
                 });
+            }
+            SchedulerMessage::FetchStreaming(promise_id, request, stream_id) => {
+                // Fetch with real-time streaming
+                let callback_tx = callback_tx.clone();
+                tokio::spawn(async move {
+                    match fetch::request::execute_fetch(request).await {
+                        Ok(response) => {
+                            let _ = callback_tx.send(CallbackMessage::FetchStreamingSuccess(
+                                promise_id, response, stream_id,
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = callback_tx.send(CallbackMessage::FetchError(promise_id, e));
+                        }
+                    }
+                });
+            }
+            SchedulerMessage::StreamRead(callback_id, stream_id) => {
+                // Read next chunk from a stream
+                let callback_tx = callback_tx.clone();
+                let manager = stream_manager.clone();
+                tokio::spawn(async move {
+                    let chunk = match manager.read_chunk(stream_id).await {
+                        Ok(chunk) => chunk,
+                        Err(e) => stream_manager::StreamChunk::Error(e),
+                    };
+                    let _ = callback_tx.send(CallbackMessage::StreamChunk(callback_id, chunk));
+                });
+            }
+            SchedulerMessage::StreamCancel(stream_id) => {
+                // Cancel/close a stream
+                stream_manager.close_stream(stream_id);
             }
             SchedulerMessage::ClearTimer(callback_id) => {
                 if let Some(handle) = running_tasks.remove(&callback_id) {
