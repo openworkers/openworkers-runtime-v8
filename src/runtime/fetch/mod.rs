@@ -69,6 +69,7 @@ pub struct FetchResponse {
     pub status_text: String,
     pub headers: HashMap<String, String>,
     pub body: bytes::Bytes, // Changed from String to Bytes for binary support
+    pub chunks: Vec<bytes::Bytes>, // For streaming: body split into chunks
 }
 
 impl FetchResponse {

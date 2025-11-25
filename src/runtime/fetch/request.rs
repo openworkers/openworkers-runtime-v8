@@ -1,6 +1,8 @@
 use super::{FetchRequest, HttpMethod};
+use bytes::Bytes;
+use futures::StreamExt;
 
-/// Execute HTTP request using reqwest
+/// Execute HTTP request using reqwest with streaming support
 pub async fn execute_fetch(request: FetchRequest) -> Result<super::FetchResponse, String> {
     let client = reqwest::Client::new();
 
@@ -46,16 +48,37 @@ pub async fn execute_fetch(request: FetchRequest) -> Result<super::FetchResponse
         }
     }
 
-    // Read body as bytes (supports binary data)
-    let body = response
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read body: {}", e))?;
+    // Read body as chunks (for streaming support)
+    let mut chunks = Vec::new();
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk_result) = stream.next().await {
+        match chunk_result {
+            Ok(chunk) => chunks.push(chunk),
+            Err(e) => return Err(format!("Failed to read chunk: {}", e)),
+        }
+    }
+
+    // Also provide full body for backward compatibility
+    let full_body = if chunks.is_empty() {
+        Bytes::new()
+    } else if chunks.len() == 1 {
+        chunks[0].clone()
+    } else {
+        // Concatenate chunks
+        let total_len = chunks.iter().map(|c| c.len()).sum();
+        let mut full = Vec::with_capacity(total_len);
+        for chunk in &chunks {
+            full.extend_from_slice(chunk);
+        }
+        Bytes::from(full)
+    };
 
     Ok(super::FetchResponse {
         status,
         status_text,
         headers,
-        body,
+        body: full_body,
+        chunks,
     })
 }

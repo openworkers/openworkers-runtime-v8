@@ -5,33 +5,87 @@ pub fn create_response_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     response: FetchResponse,
 ) -> Result<v8::Local<'s, v8::Object>, String> {
-    let obj = v8::Object::new(scope);
+    // Create Response by calling the global Response constructor with streaming chunks
+    let global = scope.get_current_context().global(scope);
+    let response_ctor_key = v8::String::new(scope, "Response").unwrap();
+    let response_ctor = global
+        .get(scope, response_ctor_key.into())
+        .and_then(|v| v8::Local::<v8::Function>::try_from(v).ok())
+        .ok_or("Response constructor not found")?;
+
+    // Create a ReadableStream with chunks
+    let stream_code = if response.chunks.is_empty() {
+        // Empty body
+        format!(
+            r#"
+            new ReadableStream({{
+                start(controller) {{
+                    controller.close();
+                }}
+            }})
+        "#
+        )
+    } else if response.chunks.len() == 1 {
+        // Single chunk - inline the bytes
+        let bytes_array = response.chunks[0]
+            .iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"
+            new ReadableStream({{
+                start(controller) {{
+                    controller.enqueue(new Uint8Array([{}]));
+                    controller.close();
+                }}
+            }})
+        "#,
+            bytes_array
+        )
+    } else {
+        // Multiple chunks - we'll create them in JS
+        let chunks_code = response
+            .chunks
+            .iter()
+            .map(|chunk| {
+                let bytes_array = chunk
+                    .iter()
+                    .map(|b| b.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("new Uint8Array([{}])", bytes_array)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+
+        format!(
+            r#"
+            new ReadableStream({{
+                start(controller) {{
+                    const chunks = [{}];
+                    for (const chunk of chunks) {{
+                        controller.enqueue(chunk);
+                    }}
+                    controller.close();
+                }}
+            }})
+        "#,
+            chunks_code
+        )
+    };
+
+    let stream_code_str = v8::String::new(scope, &stream_code).unwrap();
+    let stream_script = v8::Script::compile(scope, stream_code_str, None).unwrap();
+    let stream_val = stream_script.run(scope).unwrap();
+
+    // Create init object with status and headers
+    let init_obj = v8::Object::new(scope);
 
     // Set status
     let status_key = v8::String::new(scope, "status").unwrap();
     let status_val = v8::Number::new(scope, response.status as f64);
-    obj.set(scope, status_key.into(), status_val.into());
-
-    // Set body as Uint8Array (binary support)
-    let body_key = v8::String::new(scope, "body").unwrap();
-
-    // Create ArrayBuffer from bytes
-    let array_buffer = v8::ArrayBuffer::new(scope, response.body.len());
-    {
-        let backing_store = array_buffer.get_backing_store();
-        let data = backing_store.data().unwrap();
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                response.body.as_ptr(),
-                data.as_ptr() as *mut u8,
-                response.body.len(),
-            );
-        }
-    }
-
-    // Create Uint8Array view
-    let uint8_array = v8::Uint8Array::new(scope, array_buffer, 0, response.body.len()).unwrap();
-    obj.set(scope, body_key.into(), uint8_array.into());
+    init_obj.set(scope, status_key.into(), status_val.into());
 
     // Set headers
     let headers_key = v8::String::new(scope, "headers").unwrap();
@@ -41,48 +95,15 @@ pub fn create_response_object<'s>(
         let v = v8::String::new(scope, value).unwrap();
         headers_obj.set(scope, k.into(), v.into());
     }
-    obj.set(scope, headers_key.into(), headers_obj.into());
+    init_obj.set(scope, headers_key.into(), headers_obj.into());
 
-    // Add text() method that decodes Uint8Array to string
-    let text_code = r#"
-        (function(bodyBytes) {
-            return async function() {
-                const decoder = new TextDecoder();
-                return decoder.decode(bodyBytes);
-            };
-        })
-    "#;
-    let text_code_str = v8::String::new(scope, text_code).unwrap();
-    let text_script = v8::Script::compile(scope, text_code_str, None).unwrap();
-    let text_factory = text_script.run(scope).unwrap();
+    // Call Response constructor: new Response(stream, init)
+    let recv = v8::undefined(scope);
+    let result = response_ctor
+        .call(scope, recv.into(), &[stream_val, init_obj.into()])
+        .ok_or("Failed to create Response")?;
 
-    if text_factory.is_function() {
-        let text_factory_fn: v8::Local<v8::Function> = text_factory.try_into().unwrap();
-        if let Some(text_fn) = text_factory_fn.call(scope, text_factory, &[uint8_array.into()]) {
-            let text_key = v8::String::new(scope, "text").unwrap();
-            obj.set(scope, text_key.into(), text_fn);
-        }
-    }
+    let response_obj = result.to_object(scope).ok_or("Response is not an object")?;
 
-    // Add arrayBuffer() method
-    let array_buffer_code = r#"
-        (function(bodyBytes) {
-            return async function() {
-                return bodyBytes.buffer;
-            };
-        })
-    "#;
-    let ab_code_str = v8::String::new(scope, array_buffer_code).unwrap();
-    let ab_script = v8::Script::compile(scope, ab_code_str, None).unwrap();
-    let ab_factory = ab_script.run(scope).unwrap();
-
-    if ab_factory.is_function() {
-        let ab_factory_fn: v8::Local<v8::Function> = ab_factory.try_into().unwrap();
-        if let Some(ab_fn) = ab_factory_fn.call(scope, ab_factory, &[uint8_array.into()]) {
-            let ab_key = v8::String::new(scope, "arrayBuffer").unwrap();
-            obj.set(scope, ab_key.into(), ab_fn);
-        }
-    }
-
-    Ok(obj)
+    Ok(response_obj)
 }
