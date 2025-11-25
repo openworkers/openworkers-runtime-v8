@@ -125,6 +125,7 @@ impl Runtime {
             if !use_snapshot {
                 text_encoding::setup_text_encoding(scope);
                 streams::setup_readable_stream(scope);
+                bindings::setup_base64(scope);
                 bindings::setup_url(scope);
                 bindings::setup_headers(scope);
                 bindings::setup_request(scope);
