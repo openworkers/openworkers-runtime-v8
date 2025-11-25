@@ -24,7 +24,7 @@ async fn main() {
 
     let response = rx.await.unwrap();
     println!("Status: {}", response.status);
-    if let Some(body) = response.body {
-        println!("Body: {}", String::from_utf8_lossy(&body));
+    if let Some(body) = response.body.as_bytes() {
+        println!("Body: {}", String::from_utf8_lossy(body));
     }
 }

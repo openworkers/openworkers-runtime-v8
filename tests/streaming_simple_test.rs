@@ -41,7 +41,7 @@ async fn test_response_with_stream_chunks() {
     let response = rx.await.unwrap();
     assert_eq!(response.status, 200);
 
-    let body_text = String::from_utf8_lossy(response.body.as_ref().unwrap());
+    let body_text = String::from_utf8_lossy(response.body.as_bytes().unwrap());
     assert_eq!(body_text, "Hello");
 }
 
@@ -82,7 +82,7 @@ async fn test_stream_consumed_by_text() {
     assert!(result.is_ok());
     let response = rx.await.unwrap();
 
-    let body_text = String::from_utf8_lossy(response.body.as_ref().unwrap());
+    let body_text = String::from_utf8_lossy(response.body.as_bytes().unwrap());
     assert_eq!(body_text, "Got: Test");
 }
 
@@ -124,6 +124,6 @@ async fn test_body_used_flag() {
     assert!(result.is_ok());
     let response = rx.await.unwrap();
 
-    let body_text = String::from_utf8_lossy(response.body.as_ref().unwrap());
+    let body_text = String::from_utf8_lossy(response.body.as_bytes().unwrap());
     assert_eq!(body_text, "Error caught: true");
 }

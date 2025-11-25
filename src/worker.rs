@@ -1,6 +1,6 @@
 use crate::compat::{Script, TerminationReason};
 use crate::runtime::{Runtime, run_event_loop};
-use crate::task::{HttpResponse, Task};
+use crate::task::{HttpResponse, ResponseBody, Task};
 use v8;
 
 pub struct Worker {
@@ -198,27 +198,19 @@ impl Worker {
                 .and_then(|v| v.uint32_value(scope))
                 .unwrap_or(200) as u16;
 
-            // Extract body using the internal _getRawBody() method
-            let get_raw_body_key = v8::String::new(scope, "_getRawBody").unwrap();
-            let body_bytes = if let Some(get_raw_body_val) =
-                resp_obj.get(scope, get_raw_body_key.into())
-                && let Ok(get_raw_body_fn) = v8::Local::<v8::Function>::try_from(get_raw_body_val)
-            {
-                if let Some(result_val) = get_raw_body_fn.call(scope, resp_obj.into(), &[])
-                    && let Ok(uint8_array) = v8::Local::<v8::Uint8Array>::try_from(result_val)
-                {
-                    let len = uint8_array.byte_length();
-                    let mut bytes_vec = vec![0u8; len];
-                    uint8_array.copy_contents(&mut bytes_vec);
-                    bytes::Bytes::from(bytes_vec)
-                } else {
-                    bytes::Bytes::new()
-                }
-            } else {
-                bytes::Bytes::new()
-            };
+            // Check if response has _nativeStreamId (it's a native stream forward)
+            let native_stream_id_key = v8::String::new(scope, "_nativeStreamId").unwrap();
+            let native_stream_id = resp_obj
+                .get(scope, native_stream_id_key.into())
+                .and_then(|v| {
+                    if v.is_null() || v.is_undefined() {
+                        None
+                    } else {
+                        v.uint32_value(scope).map(|n| n as u64)
+                    }
+                });
 
-            // Extract headers
+            // Extract headers first (needed for both paths)
             let mut headers = vec![];
             let headers_key = v8::String::new(scope, "headers").unwrap();
             if let Some(headers_val) = resp_obj.get(scope, headers_key.into())
@@ -240,14 +232,80 @@ impl Worker {
                 }
             }
 
+            // Determine body type: streaming or buffered
+            let body = if let Some(stream_id) = native_stream_id {
+                // Native stream forward - create channel to forward chunks from StreamManager
+                use crate::runtime::stream_manager::StreamChunk;
+
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+                let stream_manager = self.runtime.stream_manager.clone();
+
+                // Spawn task to read from stream and forward to channel
+                tokio::spawn(async move {
+                    loop {
+                        match stream_manager.read_chunk(stream_id).await {
+                            Ok(chunk) => match chunk {
+                                StreamChunk::Data(bytes) => {
+                                    if tx.send(Ok(bytes)).is_err() {
+                                        break;
+                                    }
+                                }
+                                StreamChunk::Done => {
+                                    break;
+                                }
+                                StreamChunk::Error(e) => {
+                                    let _ = tx.send(Err(e));
+                                    break;
+                                }
+                            },
+                            Err(e) => {
+                                let _ = tx.send(Err(e));
+                                break;
+                            }
+                        }
+                    }
+                });
+
+                ResponseBody::Stream(rx)
+            } else {
+                // Buffered body - use _getRawBody()
+                let get_raw_body_key = v8::String::new(scope, "_getRawBody").unwrap();
+                let body_bytes = if let Some(get_raw_body_val) =
+                    resp_obj.get(scope, get_raw_body_key.into())
+                    && let Ok(get_raw_body_fn) =
+                        v8::Local::<v8::Function>::try_from(get_raw_body_val)
+                {
+                    if let Some(result_val) = get_raw_body_fn.call(scope, resp_obj.into(), &[])
+                        && let Ok(uint8_array) = v8::Local::<v8::Uint8Array>::try_from(result_val)
+                    {
+                        let len = uint8_array.byte_length();
+                        let mut bytes_vec = vec![0u8; len];
+                        uint8_array.copy_contents(&mut bytes_vec);
+                        bytes::Bytes::from(bytes_vec)
+                    } else {
+                        bytes::Bytes::new()
+                    }
+                } else {
+                    bytes::Bytes::new()
+                };
+
+                ResponseBody::Bytes(body_bytes)
+            };
+
             let response = HttpResponse {
                 status,
                 headers,
-                body: Some(body_bytes),
+                body,
             };
 
-            let _ = fetch_init.res_tx.send(response.clone());
-            return Ok(response);
+            let _ = fetch_init.res_tx.send(response);
+
+            // Return success indicator (body already sent via channel)
+            return Ok(HttpResponse {
+                status,
+                headers: vec![],
+                body: ResponseBody::Bytes(bytes::Bytes::new()),
+            });
         }
 
         Err("Invalid response object".to_string())

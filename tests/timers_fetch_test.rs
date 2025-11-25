@@ -148,7 +148,7 @@ async fn test_async_response() {
 
     assert_eq!(response.status, 200);
     assert_eq!(
-        String::from_utf8_lossy(response.body.as_ref().unwrap()),
+        String::from_utf8_lossy(response.body.as_bytes().unwrap()),
         "Async response!"
     );
 }
@@ -194,7 +194,7 @@ async fn test_fetch_forward() {
     // Try to get response with timeout
     if let Ok(Ok(response)) = tokio::time::timeout(tokio::time::Duration::from_secs(10), rx).await {
         assert_eq!(response.status, 200);
-        let body = String::from_utf8_lossy(response.body.as_ref().unwrap());
+        let body = String::from_utf8_lossy(response.body.as_bytes().unwrap());
         // Either fetch succeeded or was handled
         assert!(body.contains("Fetch completed") || body.contains("Fetch failed but handled"));
     }
@@ -232,7 +232,7 @@ async fn test_promise_rejection_handling() {
         .unwrap();
 
     assert_eq!(response.status, 500);
-    let body = String::from_utf8_lossy(response.body.as_ref().unwrap());
+    let body = String::from_utf8_lossy(response.body.as_bytes().unwrap());
     assert!(body.contains("Error handled: Test error"));
 }
 
@@ -273,7 +273,7 @@ async fn test_multiple_async_operations() {
 
     assert_eq!(response.status, 200);
     assert_eq!(
-        String::from_utf8_lossy(response.body.as_ref().unwrap()),
+        String::from_utf8_lossy(response.body.as_bytes().unwrap()),
         "All async ops completed!"
     );
 }

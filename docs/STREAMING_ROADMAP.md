@@ -284,19 +284,31 @@ addEventListener('fetch', async event => {
 
 ---
 
-## Phase 5: Response.body Streaming
+## Phase 5: Response.body Streaming ✅
 
 **Difficulty:** ⭐⭐⭐☆☆
-**Status:** Pending
+**Status:** Completed
 
 ### Objectives
-- Worker can return a Response with a stream
-- Support progressive content generation
+- Worker can return a Response with a streaming body
+- Fetch forward works with direct stream passthrough
+- Support `ResponseBody::Stream` for efficient HTTP response streaming
 
 ### Implementation
 
+Key changes:
+- `ResponseBody` enum: `Bytes(Bytes)` | `Stream(mpsc::UnboundedReceiver<Result<Bytes, String>>)`
+- `_nativeStreamId` property on ReadableStream and Response to track native streams
+- Worker detects native stream responses and returns `ResponseBody::Stream`
+- Actix conversion uses `BodyStream` for streaming responses
+
 ```javascript
-// Generate content progressively
+// Fetch forward - direct stream passthrough (zero-buffer!)
+addEventListener('fetch', event => {
+    event.respondWith(fetch('https://httpbin.workers.rocks/bytes/10000'));
+});
+
+// Generate content progressively (JS-side streaming)
 addEventListener('fetch', event => {
     const stream = new ReadableStream({
         async start(controller) {
@@ -313,6 +325,13 @@ addEventListener('fetch', event => {
     }));
 });
 ```
+
+### Tests
+See `tests/response_streaming_test.rs`:
+- `test_fetch_forward_streaming` - Fetch forward returns streaming body
+- `test_buffered_response_still_bytes` - String responses stay buffered
+- `test_streaming_response_chunked` - Chunked reading from stream endpoint
+- `test_processed_fetch_response` - Processed fetch returns buffered response
 
 ---
 
@@ -365,14 +384,14 @@ const OPTIMAL_CHUNK_SIZE: usize = 64 * 1024; // 64KB
 2. **Phase 2** (important) - ReadableStream JS ✅
 3. **Phase 3** (complex) - Complete bridge ✅
 4. **Phase 4** (quick win) - Basic fetch forward ✅
-5. **Phase 5** (nice to have) - Response streaming
+5. **Phase 5** (nice to have) - Response streaming ✅
 6. **Phase 6** (optimization) - Zero-copy, etc.
 
 **MVP (Minimum Viable Product):**
 - Phase 1 + Phase 2 = Basic stream support ✅
 
 **Production-Ready:**
-- Phases 1-4 = Efficient fetch forward ✅
+- Phases 1-5 = Full streaming support ✅
 
 **Complete:**
-- All phases = Full Workers compatibility
+- All phases = Full Workers compatibility with optimizations

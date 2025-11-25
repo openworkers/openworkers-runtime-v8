@@ -558,11 +558,16 @@ pub fn setup_response(scope: &mut v8::PinScope) {
             this.status = init.status || 200;
             this.headers = init.headers || {};
             this.bodyUsed = false;
+            this._nativeStreamId = null;  // Will be set if body is a native stream
 
             // Support different body types
             if (body instanceof ReadableStream) {
                 // Already a stream - use it directly
                 this.body = body;
+                // Check if this is a native stream (from fetch)
+                if (body._nativeStreamId !== undefined) {
+                    this._nativeStreamId = body._nativeStreamId;
+                }
             } else if (body instanceof Uint8Array || body instanceof ArrayBuffer) {
                 // Binary data - wrap in a stream
                 const bytes = body instanceof Uint8Array ? body : new Uint8Array(body);
@@ -837,9 +842,10 @@ pub fn setup_stream_ops(
 
     // JavaScript helper: createNativeStream(streamId) -> ReadableStream
     // Creates a ReadableStream that pulls from Rust via __nativeStreamRead
+    // The stream is marked with _nativeStreamId so we can detect it later
     let code = r#"
         globalThis.__createNativeStream = function(streamId) {
-            return new ReadableStream({
+            const stream = new ReadableStream({
                 async pull(controller) {
                     return new Promise((resolve) => {
                         __nativeStreamRead(streamId, (result) => {
@@ -858,6 +864,9 @@ pub fn setup_stream_ops(
                     __nativeStreamCancel(streamId);
                 }
             });
+            // Mark this stream as a native stream so we can forward it directly
+            stream._nativeStreamId = streamId;
+            return stream;
         };
     "#;
 

@@ -27,7 +27,7 @@ async fn test_simple_response() {
     let response = rx.await.unwrap();
     assert_eq!(response.status, 200);
     assert_eq!(
-        String::from_utf8_lossy(response.body.as_ref().unwrap()),
+        String::from_utf8_lossy(response.body.as_bytes().unwrap()),
         "Hello World"
     );
 }
@@ -56,7 +56,7 @@ async fn test_custom_status() {
     let response = rx.await.unwrap();
     assert_eq!(response.status, 404);
     assert_eq!(
-        String::from_utf8_lossy(response.body.as_ref().unwrap()),
+        String::from_utf8_lossy(response.body.as_bytes().unwrap()),
         "Not Found"
     );
 }
