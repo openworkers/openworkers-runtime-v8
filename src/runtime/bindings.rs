@@ -685,20 +685,164 @@ pub fn setup_base64(scope: &mut v8::PinScope) {
     script.run(scope).unwrap();
 }
 
+pub fn setup_url_search_params(scope: &mut v8::PinScope) {
+    let code = r#"
+        globalThis.URLSearchParams = class URLSearchParams {
+            constructor(init) {
+                this._entries = [];
+
+                if (!init) return;
+
+                if (typeof init === 'string') {
+                    // Parse query string
+                    const str = init.startsWith('?') ? init.slice(1) : init;
+                    if (str) {
+                        for (const pair of str.split('&')) {
+                            const [key, value = ''] = pair.split('=').map(decodeURIComponent);
+                            this._entries.push([key, value]);
+                        }
+                    }
+                } else if (init instanceof URLSearchParams) {
+                    this._entries = [...init._entries];
+                } else if (Array.isArray(init)) {
+                    for (const [key, value] of init) {
+                        this._entries.push([String(key), String(value)]);
+                    }
+                } else if (typeof init === 'object') {
+                    for (const key of Object.keys(init)) {
+                        this._entries.push([key, String(init[key])]);
+                    }
+                }
+            }
+
+            append(name, value) {
+                this._entries.push([String(name), String(value)]);
+            }
+
+            delete(name) {
+                this._entries = this._entries.filter(([k]) => k !== name);
+            }
+
+            get(name) {
+                const entry = this._entries.find(([k]) => k === name);
+                return entry ? entry[1] : null;
+            }
+
+            getAll(name) {
+                return this._entries.filter(([k]) => k === name).map(([, v]) => v);
+            }
+
+            has(name) {
+                return this._entries.some(([k]) => k === name);
+            }
+
+            set(name, value) {
+                const strName = String(name);
+                const strValue = String(value);
+                let found = false;
+                this._entries = this._entries.filter(([k]) => {
+                    if (k === strName) {
+                        if (!found) {
+                            found = true;
+                            return true;
+                        }
+                        return false;
+                    }
+                    return true;
+                });
+                if (found) {
+                    const idx = this._entries.findIndex(([k]) => k === strName);
+                    this._entries[idx][1] = strValue;
+                } else {
+                    this._entries.push([strName, strValue]);
+                }
+            }
+
+            sort() {
+                this._entries.sort((a, b) => a[0].localeCompare(b[0]));
+            }
+
+            toString() {
+                return this._entries
+                    .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v))
+                    .join('&');
+            }
+
+            *entries() {
+                yield* this._entries;
+            }
+
+            *keys() {
+                for (const [k] of this._entries) yield k;
+            }
+
+            *values() {
+                for (const [, v] of this._entries) yield v;
+            }
+
+            forEach(callback, thisArg) {
+                for (const [key, value] of this._entries) {
+                    callback.call(thisArg, value, key, this);
+                }
+            }
+
+            [Symbol.iterator]() {
+                return this.entries();
+            }
+
+            get size() {
+                return this._entries.length;
+            }
+        };
+    "#;
+
+    let code_str = v8::String::new(scope, code).unwrap();
+    let script = v8::Script::compile(scope, code_str, None).unwrap();
+    script.run(scope).unwrap();
+}
+
 pub fn setup_url(scope: &mut v8::PinScope) {
     let code = r#"
         globalThis.URL = class URL {
-            constructor(url) {
-                this.href = url;
-                const parts = url.match(/^(https?):\/\/([^\/]+)(\/.*)?$/);
-                if (parts) {
-                    this.protocol = parts[1] + ':';
-                    this.hostname = parts[2].split(':')[0];
-                    this.host = parts[2];
-                    this.pathname = parts[3] || '/';
-                } else {
-                    this.pathname = '/';
+            constructor(url, base) {
+                if (base) {
+                    // Handle relative URLs
+                    const baseUrl = typeof base === 'string' ? base : base.href;
+                    if (url.startsWith('/')) {
+                        const match = baseUrl.match(/^(https?:\/\/[^\/]+)/);
+                        url = match ? match[1] + url : url;
+                    } else if (!url.match(/^https?:\/\//)) {
+                        url = baseUrl.replace(/\/[^\/]*$/, '/') + url;
+                    }
                 }
+
+                this.href = url;
+                const match = url.match(/^(https?):\/\/([^\/\?#]+)(\/[^\?#]*)?(\?[^#]*)?(#.*)?$/);
+                if (match) {
+                    this.protocol = match[1] + ':';
+                    this.host = match[2];
+                    this.hostname = match[2].split(':')[0];
+                    this.port = match[2].includes(':') ? match[2].split(':')[1] : '';
+                    this.pathname = match[3] || '/';
+                    this.search = match[4] || '';
+                    this.hash = match[5] || '';
+                    this.origin = this.protocol + '//' + this.host;
+                    this.searchParams = new URLSearchParams(this.search);
+                } else {
+                    this.protocol = '';
+                    this.host = '';
+                    this.hostname = '';
+                    this.port = '';
+                    this.pathname = url;
+                    this.search = '';
+                    this.hash = '';
+                    this.origin = '';
+                    this.searchParams = new URLSearchParams();
+                }
+            }
+
+            toString() {
+                return this.href;
             }
         };
     "#;

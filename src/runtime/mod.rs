@@ -127,6 +127,7 @@ impl Runtime {
                 streams::setup_readable_stream(scope);
                 bindings::setup_structured_clone(scope);
                 bindings::setup_base64(scope);
+                bindings::setup_url_search_params(scope);
                 bindings::setup_url(scope);
                 bindings::setup_headers(scope);
                 bindings::setup_request(scope);
