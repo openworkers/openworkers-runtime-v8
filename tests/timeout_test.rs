@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
+#[ntest::timeout(3000)] // 3s max - test should complete in ~500ms
 async fn test_wall_clock_timeout_infinite_loop() {
     // Set a short wall-clock timeout (500ms)
     let limits = RuntimeLimits {
@@ -50,6 +51,7 @@ async fn test_wall_clock_timeout_infinite_loop() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
+#[ntest::timeout(3000)] // 3s max - test should complete in ~500ms
 async fn test_wall_clock_timeout_async_loop() {
     // Set a short wall-clock timeout (500ms)
     let limits = RuntimeLimits {
@@ -197,6 +199,7 @@ mod cpu_tests {
     use super::*;
 
     #[tokio::test]
+    #[ntest::timeout(3000)] // 3s max - test should complete in ~500ms
     async fn test_cpu_time_limit_infinite_loop() {
         // Set CPU time limit of 500ms
         let limits = RuntimeLimits {
@@ -241,6 +244,7 @@ mod cpu_tests {
     }
 
     #[tokio::test]
+    #[ntest::timeout(3000)] // 3s max - test should complete in ~500ms
     async fn test_cpu_time_limit_expensive_regex() {
         // Set CPU time limit of 500ms
         let limits = RuntimeLimits {
@@ -284,6 +288,7 @@ mod cpu_tests {
     }
 
     #[tokio::test]
+    #[ntest::timeout(3000)] // 3s max - test should complete in ~1s
     async fn test_cpu_time_not_charged_during_sleep() {
         // Set CPU time limit of 100ms (very short)
         // but wall clock timeout of 2000ms
@@ -330,6 +335,7 @@ mod cpu_tests {
     }
 
     #[tokio::test]
+    #[ntest::timeout(3000)] // 3s max - test should complete in ~200ms
     async fn test_cpu_limit_priority_over_wall_clock() {
         // Both limits set, CPU is hit first
         let limits = RuntimeLimits {

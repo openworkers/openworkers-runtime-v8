@@ -77,7 +77,8 @@ impl Worker {
         let result = match task {
             Task::Fetch(ref mut init) => {
                 let fetch_init = init.take().ok_or("FetchInit already consumed")?;
-                self.trigger_fetch_event(fetch_init).await
+                self.trigger_fetch_event(fetch_init, &wall_guard, &cpu_guard)
+                    .await
             }
             Task::Scheduled(ref mut init) => {
                 let scheduled_init = init.take().ok_or("ScheduledInit already consumed")?;
@@ -144,6 +145,8 @@ impl Worker {
     async fn trigger_fetch_event(
         &mut self,
         fetch_init: crate::task::FetchInit,
+        wall_guard: &TimeoutGuard,
+        cpu_guard: &Option<CpuEnforcer>,
     ) -> Result<HttpResponse, String> {
         let req = &fetch_init.req;
 
@@ -232,7 +235,12 @@ impl Worker {
                 && trigger_val.is_function()
             {
                 let trigger_fn: v8::Local<v8::Function> = trigger_val.try_into().unwrap();
-                trigger_fn.call(scope, global.into(), &[request_obj.into()]);
+                let result = trigger_fn.call(scope, global.into(), &[request_obj.into()]);
+
+                // If call returned None, V8 was terminated (CPU/wall-clock timeout)
+                if result.is_none() {
+                    return Err("Execution terminated".to_string());
+                }
             }
         }
 
@@ -240,6 +248,17 @@ impl Worker {
         // Strategy: Check frequently with minimal sleep for fast responses,
         // but support long-running async operations (up to 5 seconds)
         for iteration in 0..5000 {
+            // Check if execution was terminated (CPU/wall-clock timeout)
+            if self.runtime.isolate.is_execution_terminating()
+                || wall_guard.was_triggered()
+                || cpu_guard
+                    .as_ref()
+                    .map(|g| g.was_terminated())
+                    .unwrap_or(false)
+            {
+                return Err("Execution terminated".to_string());
+            }
+
             // Process pending callbacks and microtasks
             self.runtime.process_callbacks();
 
