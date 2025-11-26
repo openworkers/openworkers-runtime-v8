@@ -28,8 +28,10 @@
 
 mod array_buffer_allocator;
 mod cpu_enforcer;
+mod cpu_timer;
 mod timeout_guard;
 
 pub use array_buffer_allocator::CustomAllocator;
 pub use cpu_enforcer::CpuEnforcer;
+pub use cpu_timer::{CpuTimer, get_thread_cpu_time};
 pub use timeout_guard::TimeoutGuard;
