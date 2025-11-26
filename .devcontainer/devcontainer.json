@@ -1,0 +1,25 @@
+{
+  "name": "Codespaces For OpenWorkers Dev Container",
+  "dockerFile": "Dockerfile",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "cschleiden.vscode-github-actions",
+        "ms-vsliveshare.vsliveshare",
+        "rust-lang.rust-analyzer",
+        "serayuzgur.crates",
+        "streetsidesoftware.code-spell-checker",
+        "vadimcn.vscode-lldb",
+        "tamasfe.even-better-toml"
+      ],
+      "settings": {
+        "editor.formatOnSave": true,
+        "terminal.integrated.shell.linux": "/usr/bin/zsh",
+        "files.exclude": {
+          "**/CODE_OF_CONDUCT.md": true,
+          "**/LICENSE": true
+        }
+      }
+    }
+  }
+}
