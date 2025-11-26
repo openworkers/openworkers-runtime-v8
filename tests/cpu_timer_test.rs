@@ -1,5 +1,5 @@
 use openworkers_runtime_v8::security::{CpuTimer, get_thread_cpu_time};
-use openworkers_runtime_v8::{HttpRequest, RuntimeLimits, Script, Task, TerminationReason, Worker};
+use openworkers_runtime_v8::{HttpRequest, RuntimeLimits, Script, Task, Worker};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -86,11 +86,11 @@ async fn test_exec_cpu_time_measurement() {
     let timer = CpuTimer::start();
 
     let (task, rx) = Task::fetch(req);
-    let result = worker.exec(task).await.unwrap();
+    let result = worker.exec(task).await;
 
     let cpu_time = timer.elapsed();
 
-    assert_eq!(result, TerminationReason::Success);
+    assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
 
     // Verify response
     let response = rx.await.unwrap();
@@ -137,11 +137,11 @@ async fn test_exec_cpu_time_excludes_async_wait() {
     let timer = CpuTimer::start();
 
     let (task, rx) = Task::fetch(req);
-    let result = worker.exec(task).await.unwrap();
+    let result = worker.exec(task).await;
 
     let cpu_time = timer.elapsed();
 
-    assert_eq!(result, TerminationReason::Success);
+    assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
 
     let response = rx.await.unwrap();
     assert_eq!(response.status, 200);

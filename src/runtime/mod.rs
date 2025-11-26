@@ -12,8 +12,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use v8;
 
-use crate::compat::RuntimeLimits;
 use crate::security::CustomAllocator;
+use openworkers_core::RuntimeLimits;
 
 pub use fetch::{FetchRequest, FetchResponse, FetchResponseMeta};
 

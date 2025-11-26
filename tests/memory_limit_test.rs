@@ -36,13 +36,13 @@ async fn test_memory_limit_arraybuffer_allocation() {
     };
 
     let (task, _rx) = Task::fetch(req);
-    let result = worker.exec(task).await.unwrap();
+    let result = worker.exec(task).await;
 
     // exec() should return MemoryLimit termination reason
     assert_eq!(
         result,
-        TerminationReason::MemoryLimit,
-        "Expected TerminationReason::MemoryLimit, got: {:?}",
+        Err(TerminationReason::MemoryLimit),
+        "Expected Err(TerminationReason::MemoryLimit), got: {:?}",
         result
     );
 }
@@ -81,13 +81,13 @@ async fn test_memory_limit_uint8array_allocation() {
     };
 
     let (task, _rx) = Task::fetch(req);
-    let result = worker.exec(task).await.unwrap();
+    let result = worker.exec(task).await;
 
     // exec() should return MemoryLimit termination reason
     assert_eq!(
         result,
-        TerminationReason::MemoryLimit,
-        "Expected TerminationReason::MemoryLimit, got: {:?}",
+        Err(TerminationReason::MemoryLimit),
+        "Expected Err(TerminationReason::MemoryLimit), got: {:?}",
         result
     );
 }
@@ -132,13 +132,13 @@ async fn test_memory_limit_incremental_allocation() {
     };
 
     let (task, _rx) = Task::fetch(req);
-    let result = worker.exec(task).await.unwrap();
+    let result = worker.exec(task).await;
 
     // exec() should return MemoryLimit termination reason
     assert_eq!(
         result,
-        TerminationReason::MemoryLimit,
-        "Expected TerminationReason::MemoryLimit, got: {:?}",
+        Err(TerminationReason::MemoryLimit),
+        "Expected Err(TerminationReason::MemoryLimit), got: {:?}",
         result
     );
 }
@@ -179,15 +179,10 @@ async fn test_memory_within_limit() {
     };
 
     let (task, rx) = Task::fetch(req);
-    let result = worker.exec(task).await.unwrap();
+    let result = worker.exec(task).await;
 
-    // exec() should return Success - no memory limit hit
-    assert_eq!(
-        result,
-        TerminationReason::Success,
-        "Expected TerminationReason::Success, got: {:?}",
-        result
-    );
+    // exec() should return Ok - no memory limit hit
+    assert!(result.is_ok(), "Expected Ok(), got: {:?}", result);
 
     // Also verify the response is correct
     let response = rx.await.unwrap();

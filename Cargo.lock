@@ -1564,8 +1564,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
+name = "openworkers-core"
+version = "0.4.0"
+source = "git+https://github.com/openworkers/openworkers-core?tag=v0.4.0#4d98c2540f5255e73738e55f5afcdf213a4833a6"
+dependencies = [
+ "actix-web",
+ "bytes",
+ "serde",
+ "tokio",
+ "tokio-stream",
+]
+
+[[package]]
 name = "openworkers-runtime-v8"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "actix-web",
  "bytes",
@@ -1575,6 +1587,7 @@ dependencies = [
  "libc",
  "log",
  "ntest",
+ "openworkers-core",
  "reqwest",
  "ring",
  "serde",

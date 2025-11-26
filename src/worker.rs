@@ -1,13 +1,16 @@
-use crate::compat::{Script, TerminationReason};
 use crate::runtime::{Runtime, run_event_loop};
 use crate::security::{CpuEnforcer, TimeoutGuard};
-use crate::task::{HttpResponse, ResponseBody, Task};
-use std::sync::atomic::Ordering;
+use openworkers_core::{
+    HttpResponse, LogSender, ResponseBody, RuntimeLimits, Script, Task, TerminationReason,
+};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use v8;
 
 pub struct Worker {
     pub(crate) runtime: Runtime,
     _event_loop_handle: tokio::task::JoinHandle<()>,
+    aborted: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -33,19 +36,28 @@ impl Worker {
     {
         f(&mut self.runtime)
     }
+}
 
+impl Worker {
     pub async fn new(
         script: Script,
-        _log_tx: Option<std::sync::mpsc::Sender<crate::compat::LogEvent>>,
-        limits: Option<crate::compat::RuntimeLimits>,
-    ) -> Result<Self, String> {
+        _log_tx: Option<LogSender>,
+        limits: Option<RuntimeLimits>,
+    ) -> Result<Self, TerminationReason> {
         let (mut runtime, scheduler_rx, callback_tx) = Runtime::new(limits);
 
         // Setup addEventListener
-        setup_event_listener(&mut runtime)?;
+        setup_event_listener(&mut runtime).map_err(|e| {
+            TerminationReason::InitializationError(format!(
+                "Failed to setup addEventListener: {}",
+                e
+            ))
+        })?;
 
         // Evaluate user script
-        runtime.evaluate(&script.code)?;
+        runtime.evaluate(&script.code).map_err(|e| {
+            TerminationReason::Exception(format!("Script evaluation failed: {}", e))
+        })?;
 
         // Get stream_manager for event loop
         let stream_manager = runtime.stream_manager.clone();
@@ -58,10 +70,23 @@ impl Worker {
         Ok(Self {
             runtime,
             _event_loop_handle: event_loop_handle,
+            aborted: Arc::new(AtomicBool::new(false)),
         })
     }
 
-    pub async fn exec(&mut self, mut task: Task) -> Result<TerminationReason, String> {
+    /// Abort the worker execution
+    pub fn abort(&mut self) {
+        self.aborted.store(true, Ordering::SeqCst);
+        // V8 has terminate_execution which we can call
+        self.runtime.isolate.terminate_execution();
+    }
+
+    pub async fn exec(&mut self, mut task: Task) -> Result<(), TerminationReason> {
+        // Check if aborted before starting
+        if self.aborted.load(Ordering::SeqCst) {
+            return Err(TerminationReason::Aborted);
+        }
+
         // Get limits from runtime
         let limits = &self.runtime.limits;
         let isolate_handle = self.runtime.isolate.thread_safe_handle();
@@ -76,12 +101,16 @@ impl Worker {
         // Execute the task
         let result = match task {
             Task::Fetch(ref mut init) => {
-                let fetch_init = init.take().ok_or("FetchInit already consumed")?;
+                let fetch_init = init.take().ok_or(TerminationReason::Other(
+                    "FetchInit already consumed".to_string(),
+                ))?;
                 self.trigger_fetch_event(fetch_init, &wall_guard, &cpu_guard)
                     .await
             }
             Task::Scheduled(ref mut init) => {
-                let scheduled_init = init.take().ok_or("ScheduledInit already consumed")?;
+                let scheduled_init = init.take().ok_or(TerminationReason::Other(
+                    "ScheduledInit already consumed".to_string(),
+                ))?;
                 self.trigger_scheduled_event(scheduled_init)
                     .await
                     .map(|_| HttpResponse {
@@ -93,58 +122,61 @@ impl Worker {
         };
 
         // Determine termination reason by checking guards (in priority order)
-        let termination_reason = self.determine_termination_reason(
-            result.is_ok(),
+        self.check_termination_reason(
+            result,
             cpu_guard
                 .as_ref()
                 .map(|g| g.was_terminated())
                 .unwrap_or(false),
             wall_guard.was_triggered(),
-        );
-
+        )
         // Guards are dropped here, cancelling any pending watchdogs
-        Ok(termination_reason)
     }
 
-    /// Determine the termination reason based on execution result and guard states.
+    /// Check termination reason based on execution result and guard states.
     ///
     /// Priority order:
     /// 1. CPU time limit (most specific - actual computation exceeded)
     /// 2. Wall-clock timeout (execution took too long)
     /// 3. Memory limit (ArrayBuffer allocation failed)
-    /// 4. Exception (JS error)
-    /// 5. Success
-    fn determine_termination_reason(
+    /// 4. Aborted (via abort() call)
+    /// 5. Exception (JS error)
+    /// 6. Success
+    fn check_termination_reason(
         &self,
-        success: bool,
+        result: Result<HttpResponse, String>,
         cpu_limit_hit: bool,
         wall_timeout_hit: bool,
-    ) -> TerminationReason {
+    ) -> Result<(), TerminationReason> {
         // Check guards first (they caused termination)
         if cpu_limit_hit {
-            return TerminationReason::CpuTimeLimit;
+            return Err(TerminationReason::CpuTimeLimit);
         }
 
         if wall_timeout_hit {
-            return TerminationReason::WallClockTimeout;
+            return Err(TerminationReason::WallClockTimeout);
         }
 
         // Check memory limit flag
         if self.runtime.memory_limit_hit.load(Ordering::SeqCst) {
-            return TerminationReason::MemoryLimit;
+            return Err(TerminationReason::MemoryLimit);
+        }
+
+        // Check if aborted
+        if self.aborted.load(Ordering::SeqCst) {
+            return Err(TerminationReason::Aborted);
         }
 
         // Finally check execution result
-        if success {
-            TerminationReason::Success
-        } else {
-            TerminationReason::Exception
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) => Err(TerminationReason::Exception(e)),
         }
     }
 
     async fn trigger_fetch_event(
         &mut self,
-        fetch_init: crate::task::FetchInit,
+        fetch_init: openworkers_core::FetchInit,
         wall_guard: &TimeoutGuard,
         cpu_guard: &Option<CpuEnforcer>,
     ) -> Result<HttpResponse, String> {
@@ -385,7 +417,7 @@ impl Worker {
             let body = if let Some(stream_id) = native_stream_id {
                 // Native stream forward - create bounded channel for backpressure
                 use crate::runtime::stream_manager::StreamChunk;
-                use crate::task::RESPONSE_STREAM_BUFFER_SIZE;
+                const RESPONSE_STREAM_BUFFER_SIZE: usize = 16;
 
                 let (tx, rx) = tokio::sync::mpsc::channel(RESPONSE_STREAM_BUFFER_SIZE);
                 let stream_manager = self.runtime.stream_manager.clone();
@@ -465,7 +497,7 @@ impl Worker {
 
     async fn trigger_scheduled_event(
         &mut self,
-        scheduled_init: crate::task::ScheduledInit,
+        scheduled_init: openworkers_core::ScheduledInit,
     ) -> Result<(), String> {
         {
             use std::pin::pin;
@@ -547,4 +579,22 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
     "#;
 
     runtime.evaluate(code)
+}
+
+impl openworkers_core::Worker for Worker {
+    async fn new(
+        script: Script,
+        log_tx: Option<LogSender>,
+        limits: Option<RuntimeLimits>,
+    ) -> Result<Self, TerminationReason> {
+        Worker::new(script, log_tx, limits).await
+    }
+
+    async fn exec(&mut self, task: Task) -> Result<(), TerminationReason> {
+        Worker::exec(self, task).await
+    }
+
+    fn abort(&mut self) {
+        Worker::abort(self)
+    }
 }

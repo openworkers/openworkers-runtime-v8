@@ -1,4 +1,4 @@
-use openworkers_runtime_v8::{HttpRequest, Script, Task, TerminationReason, Worker};
+use openworkers_runtime_v8::{HttpRequest, Script, Task, Worker};
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -24,8 +24,8 @@ async fn test_set_timeout() {
     };
 
     let (task, rx) = Task::fetch(req);
-    let result = worker.exec(task).await.unwrap();
-    assert_eq!(result, TerminationReason::Success);
+    let result = worker.exec(task).await;
+    assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
 
     let response = rx.await.unwrap();
     assert_eq!(response.status, 200);
@@ -138,8 +138,8 @@ async fn test_async_response() {
     };
 
     let (task, rx) = Task::fetch(req);
-    let result = worker.exec(task).await.unwrap();
-    assert_eq!(result, TerminationReason::Success);
+    let result = worker.exec(task).await;
+    assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
 
     let response = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx)
         .await
@@ -182,12 +182,16 @@ async fn test_fetch_forward() {
     };
 
     let (task, rx) = Task::fetch(req);
-    let result = worker.exec(task).await.unwrap();
+    let result = worker.exec(task).await;
     // Fetch may fail (network issues) but should be handled gracefully
-    // We accept both Success (fetch worked) and Exception (but caught)
+    // We accept both Ok (fetch worked) and Exception (but caught)
     assert!(
-        result == TerminationReason::Success || result == TerminationReason::Exception,
-        "Expected Success or Exception, got {:?}",
+        result.is_ok()
+            || matches!(
+                result,
+                Err(openworkers_runtime_v8::TerminationReason::Exception(_))
+            ),
+        "Expected Ok or Exception, got {:?}",
         result
     );
 

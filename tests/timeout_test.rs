@@ -1,4 +1,4 @@
-use openworkers_runtime_v8::{HttpRequest, RuntimeLimits, Script, Task, TerminationReason, Worker};
+use openworkers_runtime_v8::{HttpRequest, RuntimeLimits, Script, Task, Worker};
 use std::collections::HashMap;
 
 // Wall-clock timeout tests are Linux-only because they spin CPU waiting for timeout.
@@ -38,13 +38,13 @@ async fn test_wall_clock_timeout_infinite_loop() {
     };
 
     let (task, _rx) = Task::fetch(req);
-    let result = worker.exec(task).await.unwrap();
+    let result = worker.exec(task).await;
 
     // exec() should return WallClockTimeout termination reason
     assert_eq!(
         result,
-        TerminationReason::WallClockTimeout,
-        "Expected TerminationReason::WallClockTimeout, got: {:?}",
+        Err(TerminationReason::WallClockTimeout),
+        "Expected Err(TerminationReason::WallClockTimeout), got: {:?}",
         result
     );
 }
@@ -85,13 +85,13 @@ async fn test_wall_clock_timeout_async_loop() {
     };
 
     let (task, _rx) = Task::fetch(req);
-    let result = worker.exec(task).await.unwrap();
+    let result = worker.exec(task).await;
 
     // Should be wall-clock timeout since it's waiting (not computing)
     assert_eq!(
         result,
-        TerminationReason::WallClockTimeout,
-        "Expected TerminationReason::WallClockTimeout, got: {:?}",
+        Err(TerminationReason::WallClockTimeout),
+        "Expected Err(TerminationReason::WallClockTimeout), got: {:?}",
         result
     );
 }
@@ -129,15 +129,10 @@ async fn test_fast_execution_no_timeout() {
     };
 
     let (task, rx) = Task::fetch(req);
-    let result = worker.exec(task).await.unwrap();
+    let result = worker.exec(task).await;
 
     // Should succeed - no timeout
-    assert_eq!(
-        result,
-        TerminationReason::Success,
-        "Expected TerminationReason::Success, got: {:?}",
-        result
-    );
+    assert!(result.is_ok(), "Expected Ok(), got: {:?}", result);
 
     // Verify response
     let response = rx.await.unwrap();
@@ -179,15 +174,10 @@ async fn test_disabled_timeout_allows_long_execution() {
     };
 
     let (task, rx) = Task::fetch(req);
-    let result = worker.exec(task).await.unwrap();
+    let result = worker.exec(task).await;
 
     // Should succeed since timeout is disabled
-    assert_eq!(
-        result,
-        TerminationReason::Success,
-        "Expected TerminationReason::Success, got: {:?}",
-        result
-    );
+    assert!(result.is_ok(), "Expected Ok(), got: {:?}", result);
 
     let response = rx.await.unwrap();
     assert_eq!(response.status, 200);
@@ -232,13 +222,13 @@ mod cpu_tests {
         };
 
         let (task, _rx) = Task::fetch(req);
-        let result = worker.exec(task).await.unwrap();
+        let result = worker.exec(task).await;
 
         // exec() should return CpuTimeLimit termination reason
         assert_eq!(
             result,
-            TerminationReason::CpuTimeLimit,
-            "Expected TerminationReason::CpuTimeLimit, got: {:?}",
+            Err(TerminationReason::CpuTimeLimit),
+            "Expected Err(TerminationReason::CpuTimeLimit), got: {:?}",
             result
         );
     }
@@ -276,13 +266,13 @@ mod cpu_tests {
         };
 
         let (task, _rx) = Task::fetch(req);
-        let result = worker.exec(task).await.unwrap();
+        let result = worker.exec(task).await;
 
         // Should be terminated by CPU limit
         assert_eq!(
             result,
-            TerminationReason::CpuTimeLimit,
-            "Expected TerminationReason::CpuTimeLimit, got: {:?}",
+            Err(TerminationReason::CpuTimeLimit),
+            "Expected Err(TerminationReason::CpuTimeLimit), got: {:?}",
             result
         );
     }
@@ -320,15 +310,10 @@ mod cpu_tests {
         };
 
         let (task, rx) = Task::fetch(req);
-        let result = worker.exec(task).await.unwrap();
+        let result = worker.exec(task).await;
 
         // Should succeed - sleep doesn't count as CPU time
-        assert_eq!(
-            result,
-            TerminationReason::Success,
-            "Expected TerminationReason::Success, got: {:?}",
-            result
-        );
+        assert!(result.is_ok(), "Expected Ok(), got: {:?}", result);
 
         let response = rx.await.unwrap();
         assert_eq!(response.status, 200);
@@ -365,13 +350,13 @@ mod cpu_tests {
         };
 
         let (task, _rx) = Task::fetch(req);
-        let result = worker.exec(task).await.unwrap();
+        let result = worker.exec(task).await;
 
         // CPU limit should be hit first since it's 200ms
         assert_eq!(
             result,
-            TerminationReason::CpuTimeLimit,
-            "Expected TerminationReason::CpuTimeLimit (priority), got: {:?}",
+            Err(TerminationReason::CpuTimeLimit),
+            "Expected Err(TerminationReason::CpuTimeLimit) (priority), got: {:?}",
             result
         );
     }

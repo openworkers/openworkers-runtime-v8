@@ -1,14 +1,14 @@
-pub mod compat;
 pub mod runtime;
 pub mod security;
 pub mod snapshot;
-pub mod task;
 pub mod worker;
 
 // Core API
 pub use runtime::Runtime;
-pub use task::{FetchInit, HttpRequest, HttpResponse, ResponseBody, ScheduledInit, Task, TaskType};
 pub use worker::Worker;
 
-// Compatibility exports
-pub use compat::{LogEvent, LogLevel, RuntimeLimits, Script, TerminationReason};
+// Re-export common types from openworkers-common
+pub use openworkers_core::{
+    FetchInit, HttpRequest, HttpResponse, LogEvent, LogLevel, LogSender, ResponseBody,
+    RuntimeLimits, ScheduledInit, Script, Task, TaskType, TerminationReason, Worker as WorkerTrait,
+};
