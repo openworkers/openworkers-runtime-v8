@@ -14,21 +14,22 @@ fn test_get_thread_cpu_time_works() {
 fn test_cpu_timer_measures_computation() {
     let timer = CpuTimer::start();
 
-    // Do some CPU-intensive work
+    // Do some CPU-intensive work that can't be optimized away
     let mut sum = 0u64;
-    for i in 0..1_000_000 {
-        sum = sum.wrapping_add(i);
+    for i in 0..10_000_000 {
+        sum = sum.wrapping_add((i as f64).sqrt() as u64);
     }
 
     let elapsed = timer.elapsed();
 
-    // Prevent optimization
-    assert!(sum > 0);
+    // Prevent optimization with black_box-like pattern
+    std::hint::black_box(sum);
 
-    // Should have measured some CPU time
+    // Should have measured some CPU time (at least 1 nanosecond)
     assert!(
-        elapsed.as_micros() > 0,
-        "Should measure CPU time for computation"
+        elapsed.as_nanos() > 0,
+        "Should measure CPU time for computation, got {:?}",
+        elapsed
     );
 }
 

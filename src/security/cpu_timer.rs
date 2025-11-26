@@ -47,17 +47,6 @@ pub fn get_thread_cpu_time() -> Option<Duration> {
 }
 
 /// RAII guard that measures CPU time spent in a block of code.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use openworkers_runtime_v8::security::CpuTimer;
-///
-/// let timer = CpuTimer::start();
-/// // ... do work ...
-/// let elapsed = timer.elapsed();
-/// println!("CPU time: {:?}", elapsed);
-/// ```
 pub struct CpuTimer {
     start: Duration,
 }
@@ -75,59 +64,5 @@ impl CpuTimer {
         get_thread_cpu_time()
             .unwrap_or(self.start)
             .saturating_sub(self.start)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::thread;
-
-    #[test]
-    fn test_get_thread_cpu_time() {
-        let time = get_thread_cpu_time();
-        assert!(time.is_some(), "Should be able to get CPU time");
-
-        let time = time.unwrap();
-        assert!(time.as_nanos() > 0, "CPU time should be non-zero");
-    }
-
-    #[test]
-    fn test_cpu_timer_measures_computation() {
-        let timer = CpuTimer::start();
-
-        // Do some CPU-intensive work
-        let mut sum = 0u64;
-        for i in 0..1_000_000 {
-            sum = sum.wrapping_add(i);
-        }
-
-        let elapsed = timer.elapsed();
-
-        // Prevent optimization
-        assert!(sum > 0);
-
-        // Should have measured some CPU time
-        assert!(
-            elapsed.as_micros() > 0,
-            "Should measure CPU time for computation"
-        );
-    }
-
-    #[test]
-    fn test_cpu_timer_ignores_sleep() {
-        let timer = CpuTimer::start();
-
-        // Sleep doesn't consume CPU time
-        thread::sleep(Duration::from_millis(10));
-
-        let elapsed = timer.elapsed();
-
-        // CPU time should be very small (< 1ms) despite 10ms sleep
-        assert!(
-            elapsed.as_millis() < 5,
-            "Sleep should not count as CPU time, got {:?}",
-            elapsed
-        );
     }
 }
