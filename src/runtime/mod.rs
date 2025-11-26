@@ -6,10 +6,14 @@ pub mod streams;
 pub mod text_encoding;
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use v8;
+
+use crate::compat::RuntimeLimits;
+use crate::security::CustomAllocator;
 
 pub use fetch::{FetchRequest, FetchResponse, FetchResponseMeta};
 
@@ -49,14 +53,22 @@ pub struct Runtime {
     platform: &'static v8::SharedRef<v8::Platform>,
     /// Stream manager for native streaming
     pub(crate) stream_manager: Arc<stream_manager::StreamManager>,
+    /// Flag set when ArrayBuffer memory limit is hit
+    pub(crate) memory_limit_hit: Arc<AtomicBool>,
+    /// Runtime resource limits (CPU, wall-clock, memory)
+    pub(crate) limits: RuntimeLimits,
 }
 
 impl Runtime {
-    pub fn new() -> (
+    pub fn new(
+        limits: Option<RuntimeLimits>,
+    ) -> (
         Self,
         mpsc::UnboundedReceiver<SchedulerMessage>,
         mpsc::UnboundedSender<CallbackMessage>,
     ) {
+        let limits = limits.unwrap_or_default();
+
         // Initialize V8 platform (once, globally) using OnceLock for safety
         use std::sync::OnceLock;
         static PLATFORM: OnceLock<v8::SharedRef<v8::Platform>> = OnceLock::new();
@@ -77,6 +89,17 @@ impl Runtime {
         let fetch_response_tx = Arc::new(Mutex::new(None));
         let stream_manager = Arc::new(stream_manager::StreamManager::new());
 
+        // Memory limit tracking for ArrayBuffer allocations
+        let memory_limit_hit = Arc::new(AtomicBool::new(false));
+
+        // Convert heap limits from MB to bytes
+        let heap_initial = limits.heap_initial_mb * 1024 * 1024;
+        let heap_max = limits.heap_max_mb * 1024 * 1024;
+
+        // Create custom ArrayBuffer allocator to enforce memory limits on external memory
+        // This is critical: V8 heap limits don't cover ArrayBuffers, Uint8Array, etc.
+        let array_buffer_allocator = CustomAllocator::new(heap_max, Arc::clone(&memory_limit_hit));
+
         // Load snapshot once and cache it in static memory
         static SNAPSHOT: OnceLock<Option<&'static [u8]>> = OnceLock::new();
 
@@ -87,12 +110,18 @@ impl Runtime {
                 .map(|bytes| Box::leak(bytes.into_boxed_slice()) as &'static [u8])
         });
 
-        // Create isolate with or without snapshot
+        // Create isolate with custom allocator and heap limits
         let mut isolate = if let Some(snapshot_data) = snapshot_ref {
-            let params = v8::CreateParams::default().snapshot_blob((*snapshot_data).into());
+            let params = v8::CreateParams::default()
+                .heap_limits(heap_initial, heap_max)
+                .array_buffer_allocator(array_buffer_allocator.into_v8_allocator())
+                .snapshot_blob((*snapshot_data).into());
             v8::Isolate::new(params)
         } else {
-            v8::Isolate::new(Default::default())
+            let params = v8::CreateParams::default()
+                .heap_limits(heap_initial, heap_max)
+                .array_buffer_allocator(array_buffer_allocator.into_v8_allocator());
+            v8::Isolate::new(params)
         };
 
         let use_snapshot = snapshot_ref.is_some();
@@ -150,6 +179,8 @@ impl Runtime {
             fetch_response_tx,
             platform,
             stream_manager,
+            memory_limit_hit,
+            limits,
         };
 
         (runtime, scheduler_rx, callback_tx)

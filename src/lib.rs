@@ -1,5 +1,6 @@
 pub mod compat;
 pub mod runtime;
+pub mod security;
 pub mod snapshot;
 pub mod task;
 pub mod worker;

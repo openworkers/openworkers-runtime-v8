@@ -1,6 +1,8 @@
 use crate::compat::{Script, TerminationReason};
 use crate::runtime::{Runtime, run_event_loop};
+use crate::security::{CpuEnforcer, TimeoutGuard};
 use crate::task::{HttpResponse, ResponseBody, Task};
+use std::sync::atomic::Ordering;
 use v8;
 
 pub struct Worker {
@@ -35,9 +37,9 @@ impl Worker {
     pub async fn new(
         script: Script,
         _log_tx: Option<std::sync::mpsc::Sender<crate::compat::LogEvent>>,
-        _limits: Option<crate::compat::RuntimeLimits>,
+        limits: Option<crate::compat::RuntimeLimits>,
     ) -> Result<Self, String> {
-        let (mut runtime, scheduler_rx, callback_tx) = Runtime::new();
+        let (mut runtime, scheduler_rx, callback_tx) = Runtime::new(limits);
 
         // Setup addEventListener
         setup_event_listener(&mut runtime)?;
@@ -60,19 +62,82 @@ impl Worker {
     }
 
     pub async fn exec(&mut self, mut task: Task) -> Result<TerminationReason, String> {
-        match task {
+        // Get limits from runtime
+        let limits = &self.runtime.limits;
+        let isolate_handle = self.runtime.isolate.thread_safe_handle();
+
+        // Setup security guards:
+        // 1. Wall-clock timeout (all platforms) - prevents hanging on I/O
+        let wall_guard = TimeoutGuard::new(isolate_handle.clone(), limits.max_wall_clock_time_ms);
+
+        // 2. CPU time limit (Linux only) - prevents CPU-bound infinite loops
+        let cpu_guard = CpuEnforcer::new(isolate_handle, limits.max_cpu_time_ms);
+
+        // Execute the task
+        let result = match task {
             Task::Fetch(ref mut init) => {
                 let fetch_init = init.take().ok_or("FetchInit already consumed")?;
-                match self.trigger_fetch_event(fetch_init).await {
-                    Ok(_) => Ok(TerminationReason::Success),
-                    Err(_) => Ok(TerminationReason::Exception),
-                }
+                self.trigger_fetch_event(fetch_init).await
             }
             Task::Scheduled(ref mut init) => {
                 let scheduled_init = init.take().ok_or("ScheduledInit already consumed")?;
-                self.trigger_scheduled_event(scheduled_init).await?;
-                Ok(TerminationReason::Success)
+                self.trigger_scheduled_event(scheduled_init)
+                    .await
+                    .map(|_| HttpResponse {
+                        status: 200,
+                        headers: vec![],
+                        body: ResponseBody::None,
+                    })
             }
+        };
+
+        // Determine termination reason by checking guards (in priority order)
+        let termination_reason = self.determine_termination_reason(
+            result.is_ok(),
+            cpu_guard
+                .as_ref()
+                .map(|g| g.was_terminated())
+                .unwrap_or(false),
+            wall_guard.was_triggered(),
+        );
+
+        // Guards are dropped here, cancelling any pending watchdogs
+        Ok(termination_reason)
+    }
+
+    /// Determine the termination reason based on execution result and guard states.
+    ///
+    /// Priority order:
+    /// 1. CPU time limit (most specific - actual computation exceeded)
+    /// 2. Wall-clock timeout (execution took too long)
+    /// 3. Memory limit (ArrayBuffer allocation failed)
+    /// 4. Exception (JS error)
+    /// 5. Success
+    fn determine_termination_reason(
+        &self,
+        success: bool,
+        cpu_limit_hit: bool,
+        wall_timeout_hit: bool,
+    ) -> TerminationReason {
+        // Check guards first (they caused termination)
+        if cpu_limit_hit {
+            return TerminationReason::CpuTimeLimit;
+        }
+
+        if wall_timeout_hit {
+            return TerminationReason::WallClockTimeout;
+        }
+
+        // Check memory limit flag
+        if self.runtime.memory_limit_hit.load(Ordering::SeqCst) {
+            return TerminationReason::MemoryLimit;
+        }
+
+        // Finally check execution result
+        if success {
+            TerminationReason::Success
+        } else {
+            TerminationReason::Exception
         }
     }
 

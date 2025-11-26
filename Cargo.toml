@@ -29,6 +29,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Crypto
 ring = "0.17"
 
+# Signal handling (for CPU time enforcement on Linux)
+[target.'cfg(target_os = "linux")'.dependencies]
+signal-hook = "0.3"
+libc = "0.2"
+
 # Optional dependencies
 actix-web = { version = "4.12.0", features = ["macros"], optional = true }
 tokio-stream = "0.1"
