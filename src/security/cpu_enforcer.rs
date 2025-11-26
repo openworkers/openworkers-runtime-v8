@@ -121,6 +121,33 @@ mod linux {
         pub fn was_terminated(&self) -> bool {
             self.terminated.load(Ordering::SeqCst)
         }
+
+        /// Reset the timer for a new request (useful for worker pooling).
+        ///
+        /// This rearms the CPU timer with the given timeout, allowing the same
+        /// worker to handle multiple requests with fresh CPU budgets.
+        pub fn reset(&self, timeout_ms: u64) -> Result<(), std::io::Error> {
+            // Reset terminated flag
+            self.terminated.store(false, Ordering::SeqCst);
+
+            // Rearm the timer
+            let timeout_secs = timeout_ms / 1000;
+            let timeout_nsecs = (timeout_ms % 1000) * 1_000_000;
+
+            let mut timer_spec: libc::itimerspec = unsafe { std::mem::zeroed() };
+            timer_spec.it_value.tv_sec = timeout_secs as i64;
+            timer_spec.it_value.tv_nsec = timeout_nsecs as i64;
+            // it_interval stays 0 = one-shot timer
+
+            let ret =
+                unsafe { libc::timer_settime(self.timer_id, 0, &timer_spec, std::ptr::null_mut()) };
+
+            if ret != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            Ok(())
+        }
     }
 
     impl Drop for CpuEnforcer {
@@ -253,5 +280,10 @@ impl CpuEnforcer {
     /// Always returns `false` on non-Linux platforms.
     pub fn was_terminated(&self) -> bool {
         false
+    }
+
+    /// No-op on non-Linux platforms.
+    pub fn reset(&self, _timeout_ms: u64) -> Result<(), std::io::Error> {
+        Ok(())
     }
 }
