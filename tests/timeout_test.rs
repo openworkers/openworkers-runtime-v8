@@ -1,6 +1,10 @@
 use openworkers_runtime_v8::{HttpRequest, RuntimeLimits, Script, Task, TerminationReason, Worker};
 use std::collections::HashMap;
 
+// Wall-clock timeout tests are Linux-only because they spin CPU waiting for timeout.
+// On macOS without CPU enforcement, these tests would burn CPU unnecessarily.
+
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn test_wall_clock_timeout_infinite_loop() {
     // Set a short wall-clock timeout (500ms)
@@ -44,6 +48,7 @@ async fn test_wall_clock_timeout_infinite_loop() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn test_wall_clock_timeout_async_loop() {
     // Set a short wall-clock timeout (500ms)

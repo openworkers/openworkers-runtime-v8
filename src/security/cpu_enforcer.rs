@@ -183,28 +183,49 @@ mod linux {
     }
 
     fn signal_handler_thread() {
+        use futures::StreamExt;
         use signal_hook::consts::signal;
-        use signal_hook::iterator::Signals;
+        use signal_hook::iterator::exfiltrator::raw::WithRawSiginfo;
+        use signal_hook_tokio::SignalsInfo;
 
-        let mut signals =
-            Signals::new([signal::SIGALRM]).expect("Failed to register SIGALRM handler");
+        // Create a dedicated single-threaded tokio runtime for signal handling
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create tokio runtime for CPU enforcer signal handler");
 
-        for _sig in signals.forever() {
-            // Terminate all pending enforcers (typically only one active at a time)
-            let enforcers: Vec<EnforcerData> = {
-                let map = ENFORCER_REGISTRY.lock().unwrap();
-                map.values().cloned().collect()
-            };
+        rt.block_on(async {
+            // Setup async-signal-safe SIGALRM handler with raw siginfo extraction
+            let mut signals = SignalsInfo::with_exfiltrator([signal::SIGALRM], WithRawSiginfo)
+                .expect("Failed to register SIGALRM handler");
 
-            for data in enforcers {
-                if !data.terminated.swap(true, Ordering::SeqCst) {
+            while let Some(siginfo) = signals.next().await {
+                // Extract enforcer_id from signal value (set in timer_create)
+                let enforcer_id = unsafe { siginfo.si_value().sival_ptr as usize };
+
+                // Lookup ONLY this specific enforcer in registry
+                let data = {
+                    let map = ENFORCER_REGISTRY.lock().unwrap();
+                    map.get(&enforcer_id).cloned()
+                };
+
+                if let Some(enforcer_data) = data {
+                    if !enforcer_data.terminated.swap(true, Ordering::SeqCst) {
+                        eprintln!(
+                            "[openworkers-runtime-v8] CPU time limit exceeded for enforcer #{}, terminating isolate",
+                            enforcer_id
+                        );
+                        enforcer_data.isolate_handle.terminate_execution();
+                    }
+                } else {
+                    // Timer fired but enforcer was already dropped (normal race condition)
                     eprintln!(
-                        "[openworkers-runtime-v8] CPU time limit exceeded, terminating isolate"
+                        "[openworkers-runtime-v8] SIGALRM for unknown enforcer #{} (already dropped?)",
+                        enforcer_id
                     );
-                    data.isolate_handle.terminate_execution();
                 }
             }
-        }
+        });
     }
 }
 
