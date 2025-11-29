@@ -54,6 +54,11 @@ impl Worker {
             ))
         })?;
 
+        // Setup environment variables
+        setup_env(&mut runtime, &script.env).map_err(|e| {
+            TerminationReason::InitializationError(format!("Failed to setup env: {}", e))
+        })?;
+
         // Evaluate user script
         runtime.evaluate(&script.code).map_err(|e| {
             TerminationReason::Exception(format!("Script evaluation failed: {}", e))
@@ -530,6 +535,41 @@ impl Worker {
         let _ = scheduled_init.res_tx.send(());
         Ok(())
     }
+}
+
+fn setup_env(
+    runtime: &mut Runtime,
+    env: &Option<std::collections::HashMap<String, String>>,
+) -> Result<(), String> {
+    // Build JSON string for env
+    let env_json = if let Some(env_map) = env {
+        let pairs: Vec<String> = env_map
+            .iter()
+            .map(|(k, v)| {
+                format!(
+                    "{}:{}",
+                    serde_json::to_string(k).unwrap_or_else(|_| "\"\"".to_string()),
+                    serde_json::to_string(v).unwrap_or_else(|_| "\"\"".to_string())
+                )
+            })
+            .collect();
+        format!("{{{}}}", pairs.join(","))
+    } else {
+        "{}".to_string()
+    };
+
+    // Set globalThis.env as read-only
+    let code = format!(
+        r#"Object.defineProperty(globalThis, 'env', {{
+            value: {},
+            writable: false,
+            enumerable: true,
+            configurable: false
+        }});"#,
+        env_json
+    );
+
+    runtime.evaluate(&code)
 }
 
 fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
