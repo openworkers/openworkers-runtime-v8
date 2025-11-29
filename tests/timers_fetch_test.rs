@@ -1,4 +1,5 @@
-use openworkers_runtime_v8::{HttpRequest, Script, Task, Worker};
+use openworkers_core::{HttpBody, HttpMethod, HttpRequest, Script, Task};
+use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -17,10 +18,10 @@ async fn test_set_timeout() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -58,10 +59,10 @@ async fn test_set_interval_and_clear() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -94,10 +95,10 @@ async fn test_clear_timeout() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -131,10 +132,10 @@ async fn test_async_response() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -148,7 +149,7 @@ async fn test_async_response() {
 
     assert_eq!(response.status, 200);
     assert_eq!(
-        String::from_utf8_lossy(response.body.as_bytes().unwrap()),
+        String::from_utf8_lossy(&response.body.collect().await.unwrap()),
         "Async response!"
     );
 }
@@ -175,10 +176,10 @@ async fn test_fetch_forward() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -198,7 +199,8 @@ async fn test_fetch_forward() {
     // Try to get response with timeout
     if let Ok(Ok(response)) = tokio::time::timeout(tokio::time::Duration::from_secs(10), rx).await {
         assert_eq!(response.status, 200);
-        let body = String::from_utf8_lossy(response.body.as_bytes().unwrap());
+        let body_bytes = response.body.collect().await.unwrap();
+        let body = String::from_utf8_lossy(&body_bytes);
         // Either fetch succeeded or was handled
         assert!(body.contains("Fetch completed") || body.contains("Fetch failed but handled"));
     }
@@ -221,10 +223,10 @@ async fn test_promise_rejection_handling() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -236,7 +238,8 @@ async fn test_promise_rejection_handling() {
         .unwrap();
 
     assert_eq!(response.status, 500);
-    let body = String::from_utf8_lossy(response.body.as_bytes().unwrap());
+    let body_bytes = response.body.collect().await.unwrap();
+    let body = String::from_utf8_lossy(&body_bytes);
     assert!(body.contains("Error handled: Test error"));
 }
 
@@ -261,10 +264,10 @@ async fn test_multiple_async_operations() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -277,7 +280,7 @@ async fn test_multiple_async_operations() {
 
     assert_eq!(response.status, 200);
     assert_eq!(
-        String::from_utf8_lossy(response.body.as_bytes().unwrap()),
+        String::from_utf8_lossy(&response.body.collect().await.unwrap()),
         "All async ops completed!"
     );
 }
@@ -300,10 +303,10 @@ async fn test_custom_headers() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);

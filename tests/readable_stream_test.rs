@@ -1,4 +1,5 @@
-use openworkers_runtime_v8::{HttpRequest, Script, Task, Worker};
+use openworkers_core::{HttpBody, HttpMethod, HttpRequest, Script, Task};
+use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -27,10 +28,10 @@ async fn test_readable_stream_basic() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -38,7 +39,8 @@ async fn test_readable_stream_basic() {
 
     assert!(result.is_ok());
     let response = rx.await.unwrap();
-    let body_text = String::from_utf8_lossy(response.body.as_bytes().unwrap());
+    let body_bytes = response.body.collect().await.unwrap();
+    let body_text = String::from_utf8_lossy(&body_bytes);
     assert_eq!(body_text, "Stream says: Hello");
 }
 
@@ -83,10 +85,10 @@ async fn test_readable_stream_multiple_chunks() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -94,7 +96,8 @@ async fn test_readable_stream_multiple_chunks() {
 
     assert!(result.is_ok());
     let response = rx.await.unwrap();
-    let body_text = String::from_utf8_lossy(response.body.as_bytes().unwrap());
+    let body_bytes = response.body.collect().await.unwrap();
+    let body_text = String::from_utf8_lossy(&body_bytes);
     assert_eq!(body_text, "Got: Hello");
 }
 
@@ -114,10 +117,10 @@ async fn test_response_body_is_stream() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -125,7 +128,8 @@ async fn test_response_body_is_stream() {
 
     assert!(result.is_ok());
     let response = rx.await.unwrap();
-    let body_text = String::from_utf8_lossy(response.body.as_bytes().unwrap());
+    let body_bytes = response.body.collect().await.unwrap();
+    let body_text = String::from_utf8_lossy(&body_bytes);
     assert_eq!(body_text, "Is stream: true");
 }
 
@@ -158,10 +162,10 @@ async fn test_stream_locked() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -169,6 +173,7 @@ async fn test_stream_locked() {
 
     assert!(result.is_ok());
     let response = rx.await.unwrap();
-    let body_text = String::from_utf8_lossy(response.body.as_bytes().unwrap());
+    let body_bytes = response.body.collect().await.unwrap();
+    let body_text = String::from_utf8_lossy(&body_bytes);
     assert_eq!(body_text, "Error caught: true");
 }

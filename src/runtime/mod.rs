@@ -13,9 +13,7 @@ use tokio::sync::mpsc;
 use v8;
 
 use crate::security::CustomAllocator;
-use openworkers_core::RuntimeLimits;
-
-pub use fetch::{FetchRequest, FetchResponseMeta};
+use openworkers_core::{HttpRequest, HttpResponseMeta, RuntimeLimits};
 
 pub type CallbackId = u64;
 
@@ -23,9 +21,9 @@ pub enum SchedulerMessage {
     ScheduleTimeout(CallbackId, u64),
     ScheduleInterval(CallbackId, u64),
     ClearTimer(CallbackId),
-    FetchStreaming(CallbackId, FetchRequest), // Fetch with streaming (stream created internally)
+    FetchStreaming(CallbackId, HttpRequest), // Fetch with streaming (stream created internally)
     StreamRead(CallbackId, stream_manager::StreamId), // Read next chunk from stream
-    StreamCancel(stream_manager::StreamId),   // Cancel/close a stream
+    StreamCancel(stream_manager::StreamId),  // Cancel/close a stream
     Shutdown,
 }
 
@@ -33,7 +31,7 @@ pub enum CallbackMessage {
     ExecuteTimeout(CallbackId),
     ExecuteInterval(CallbackId),
     FetchError(CallbackId, String),
-    FetchStreamingSuccess(CallbackId, FetchResponseMeta, stream_manager::StreamId), // Fetch metadata + stream ID
+    FetchStreamingSuccess(CallbackId, HttpResponseMeta, stream_manager::StreamId), // Fetch metadata + stream ID
     StreamChunk(CallbackId, stream_manager::StreamChunk), // Stream chunk ready
 }
 
@@ -146,6 +144,7 @@ impl Runtime {
                 stream_callbacks.clone(),
                 next_callback_id.clone(),
             );
+            bindings::setup_response_stream_ops(scope, stream_manager.clone());
             crypto::setup_crypto(scope);
 
             // Only setup pure JS APIs if no snapshot (they're in the snapshot)

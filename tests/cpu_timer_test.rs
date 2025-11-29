@@ -1,5 +1,6 @@
+use openworkers_core::{HttpBody, HttpMethod, HttpRequest, RuntimeLimits, Script, Task};
+use openworkers_runtime_v8::Worker;
 use openworkers_runtime_v8::security::{CpuTimer, get_thread_cpu_time};
-use openworkers_runtime_v8::{HttpRequest, RuntimeLimits, Script, Task, Worker};
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -76,10 +77,10 @@ async fn test_exec_cpu_time_measurement() {
     let mut worker = Worker::new(script, None, Some(limits)).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     // Measure CPU time around exec
@@ -128,10 +129,10 @@ async fn test_exec_cpu_time_excludes_async_wait() {
     let mut worker = Worker::new(script, None, Some(limits)).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let timer = CpuTimer::start();
@@ -194,10 +195,10 @@ async fn test_exec_cpu_intensive_uses_more_cpu_time() {
         .await
         .unwrap();
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
     let timer = CpuTimer::start();
     let (task, _rx) = Task::fetch(req);
@@ -208,10 +209,10 @@ async fn test_exec_cpu_intensive_uses_more_cpu_time() {
     let script = Script::new(heavy_code);
     let mut worker = Worker::new(script, None, Some(limits)).await.unwrap();
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
     let timer = CpuTimer::start();
     let (task, _rx) = Task::fetch(req);

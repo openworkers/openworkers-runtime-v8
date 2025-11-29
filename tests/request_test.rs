@@ -1,5 +1,6 @@
 use bytes::Bytes;
-use openworkers_runtime_v8::{HttpRequest, Script, Task, Worker};
+use openworkers_core::{HttpBody, HttpMethod, HttpRequest, Script, Task};
+use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
 /// Test Request basic properties
@@ -28,17 +29,17 @@ async fn test_request_basic() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/test".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
 
-    let body = response.body.as_bytes().unwrap();
+    let body = &response.body.collect().await.unwrap();
     assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
 }
 
@@ -63,17 +64,17 @@ async fn test_request_method_url() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "POST".to_string(),
+        method: HttpMethod::Post,
         url: "http://localhost/api/users".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
 
-    let body = response.body.as_bytes().unwrap();
+    let body = &response.body.collect().await.unwrap();
     assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
 }
 
@@ -104,17 +105,17 @@ async fn test_request_headers() {
     headers.insert("Authorization".to_string(), "Bearer token123".to_string());
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers,
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
 
-    let body = response.body.as_bytes().unwrap();
+    let body = &response.body.collect().await.unwrap();
     assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
 }
 
@@ -138,17 +139,17 @@ async fn test_request_body_text() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "POST".to_string(),
+        method: HttpMethod::Post,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: Some(Bytes::from("Hello, World!")),
+        body: HttpBody::Bytes(Bytes::from("Hello, World!")),
     };
 
     let (task, rx) = Task::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
 
-    let body = response.body.as_bytes().unwrap();
+    let body = &response.body.collect().await.unwrap();
     assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
 }
 
@@ -172,17 +173,17 @@ async fn test_request_body_json() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "POST".to_string(),
+        method: HttpMethod::Post,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: Some(Bytes::from(r#"{"name":"test","value":42}"#)),
+        body: HttpBody::Bytes(Bytes::from(r#"{"name":"test","value":42}"#)),
     };
 
     let (task, rx) = Task::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
 
-    let body = response.body.as_bytes().unwrap();
+    let body = &response.body.collect().await.unwrap();
     assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
 }
 
@@ -213,17 +214,17 @@ async fn test_request_clone() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
 
-    let body = response.body.as_bytes().unwrap();
+    let body = &response.body.collect().await.unwrap();
     assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
 }
 
@@ -255,16 +256,16 @@ async fn test_request_from_request() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
 
-    let body = response.body.as_bytes().unwrap();
+    let body = &response.body.collect().await.unwrap();
     assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
 }

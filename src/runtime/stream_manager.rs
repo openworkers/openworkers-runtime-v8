@@ -138,6 +138,12 @@ impl StreamManager {
         }
     }
 
+    /// Take the receiver from a stream (for passing to HttpBody::Stream)
+    /// The sender remains active for writing chunks
+    pub fn take_receiver(&self, stream_id: StreamId) -> Option<mpsc::Receiver<StreamChunk>> {
+        self.receivers.lock().unwrap().remove(&stream_id)
+    }
+
     /// Close and remove a stream
     pub fn close_stream(&self, stream_id: StreamId) {
         self.senders.lock().unwrap().remove(&stream_id);

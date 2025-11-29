@@ -1,4 +1,5 @@
-use openworkers_runtime_v8::{HttpRequest, Script, Task, Worker};
+use openworkers_core::{HttpBody, HttpMethod, HttpRequest, Script, Task};
+use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -19,10 +20,10 @@ async fn bench_simple_response() {
 
     for _ in 0..iterations {
         let req = HttpRequest {
-            method: "GET".to_string(),
+            method: HttpMethod::Get,
             url: "http://localhost/".to_string(),
             headers: HashMap::new(),
-            body: None,
+            body: HttpBody::None,
         };
 
         let (task, rx) = Task::fetch(req);
@@ -65,10 +66,10 @@ async fn bench_async_response() {
 
     for _ in 0..iterations {
         let req = HttpRequest {
-            method: "GET".to_string(),
+            method: HttpMethod::Get,
             url: "http://localhost/".to_string(),
             headers: HashMap::new(),
-            body: None,
+            body: HttpBody::None,
         };
 
         let (task, rx) = Task::fetch(req);
@@ -154,10 +155,10 @@ async fn bench_complex_scenario() {
 
     for _ in 0..iterations {
         let req = HttpRequest {
-            method: "GET".to_string(),
+            method: HttpMethod::Get,
             url: "http://localhost/".to_string(),
             headers: HashMap::new(),
-            body: None,
+            body: HttpBody::None,
         };
 
         let (task, rx) = Task::fetch(req);

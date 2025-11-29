@@ -1,4 +1,5 @@
-use openworkers_runtime_v8::{Script, Worker};
+use openworkers_core::Script;
+use openworkers_runtime_v8::Worker;
 use std::time::Duration;
 
 /// Test that fetch with streaming works correctly

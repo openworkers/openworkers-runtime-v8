@@ -1,4 +1,7 @@
-use openworkers_runtime_v8::{HttpRequest, RuntimeLimits, Script, Task, Worker};
+#[cfg(target_os = "linux")]
+use openworkers_core::TerminationReason;
+use openworkers_core::{HttpBody, HttpMethod, HttpRequest, RuntimeLimits, Script, Task};
+use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
 // Wall-clock timeout tests are Linux-only because they spin CPU waiting for timeout.
@@ -31,10 +34,10 @@ async fn test_wall_clock_timeout_infinite_loop() {
     let mut worker = Worker::new(script, None, Some(limits)).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, _rx) = Task::fetch(req);
@@ -78,10 +81,10 @@ async fn test_wall_clock_timeout_async_loop() {
     let mut worker = Worker::new(script, None, Some(limits)).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, _rx) = Task::fetch(req);
@@ -122,10 +125,10 @@ async fn test_fast_execution_no_timeout() {
     let mut worker = Worker::new(script, None, Some(limits)).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -137,7 +140,8 @@ async fn test_fast_execution_no_timeout() {
     // Verify response
     let response = rx.await.unwrap();
     assert_eq!(response.status, 200);
-    let body = String::from_utf8_lossy(response.body.as_bytes().unwrap());
+    let body_bytes = response.body.collect().await.unwrap();
+    let body = String::from_utf8_lossy(&body_bytes);
     assert!(body.contains("Sum: 499500"), "Got: {}", body);
 }
 
@@ -167,10 +171,10 @@ async fn test_disabled_timeout_allows_long_execution() {
     let mut worker = Worker::new(script, None, Some(limits)).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -215,10 +219,10 @@ mod cpu_tests {
         let mut worker = Worker::new(script, None, Some(limits)).await.unwrap();
 
         let req = HttpRequest {
-            method: "GET".to_string(),
+            method: HttpMethod::Get,
             url: "http://localhost/".to_string(),
             headers: HashMap::new(),
-            body: None,
+            body: HttpBody::None,
         };
 
         let (task, _rx) = Task::fetch(req);
@@ -259,10 +263,10 @@ mod cpu_tests {
         let mut worker = Worker::new(script, None, Some(limits)).await.unwrap();
 
         let req = HttpRequest {
-            method: "GET".to_string(),
+            method: HttpMethod::Get,
             url: "http://localhost/".to_string(),
             headers: HashMap::new(),
-            body: None,
+            body: HttpBody::None,
         };
 
         let (task, _rx) = Task::fetch(req);
@@ -303,10 +307,10 @@ mod cpu_tests {
         let mut worker = Worker::new(script, None, Some(limits)).await.unwrap();
 
         let req = HttpRequest {
-            method: "GET".to_string(),
+            method: HttpMethod::Get,
             url: "http://localhost/".to_string(),
             headers: HashMap::new(),
-            body: None,
+            body: HttpBody::None,
         };
 
         let (task, rx) = Task::fetch(req);
@@ -343,10 +347,10 @@ mod cpu_tests {
         let mut worker = Worker::new(script, None, Some(limits)).await.unwrap();
 
         let req = HttpRequest {
-            method: "GET".to_string(),
+            method: HttpMethod::Get,
             url: "http://localhost/".to_string(),
             headers: HashMap::new(),
-            body: None,
+            body: HttpBody::None,
         };
 
         let (task, _rx) = Task::fetch(req);

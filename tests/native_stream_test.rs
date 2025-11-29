@@ -1,6 +1,7 @@
 use bytes::Bytes;
+use openworkers_core::Script;
+use openworkers_runtime_v8::Worker;
 use openworkers_runtime_v8::runtime::stream_manager::StreamChunk;
-use openworkers_runtime_v8::{Script, Worker};
 use std::time::Duration;
 
 /// Test that the native stream bridge works end-to-end

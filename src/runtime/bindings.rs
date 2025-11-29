@@ -1,4 +1,5 @@
 use super::{CallbackId, SchedulerMessage};
+use openworkers_core::{HttpBody, HttpMethod, HttpRequest};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -297,8 +298,7 @@ pub fn setup_fetch(
                 .map(|s| s.to_rust_string_lossy(scope))
                 .unwrap_or_else(|| "GET".to_string());
 
-            let method = super::fetch::HttpMethod::from_str(&method_str)
-                .unwrap_or(super::fetch::HttpMethod::Get);
+            let method = HttpMethod::from_str(&method_str).unwrap_or(HttpMethod::Get);
 
             // Get headers
             let mut headers = std::collections::HashMap::new();
@@ -328,12 +328,12 @@ pub fn setup_fetch(
                 .get(scope, body_key.into())
                 .filter(|v| !v.is_null() && !v.is_undefined())
                 .and_then(|v| v.to_string(scope))
-                .map(|s| s.to_rust_string_lossy(scope));
-
-            // Create FetchRequest
-            let request = super::fetch::FetchRequest {
-                url,
+                .map(|s| HttpBody::Bytes(bytes::Bytes::from(s.to_rust_string_lossy(scope))))
+                .unwrap_or(HttpBody::None);
+            // Create HttpRequest
+            let request = HttpRequest {
                 method,
+                url,
                 headers,
                 body,
             };
@@ -1170,7 +1170,7 @@ pub fn setup_response(scope: &mut v8::PinScope) {
             }
             this._nativeStreamId = null;  // Will be set if body is a native stream
 
-            // Support different body types
+            // Support different body types - all wrapped in ReadableStream
             if (body instanceof ReadableStream) {
                 // Already a stream - use it directly
                 this.body = body;
@@ -1188,12 +1188,8 @@ pub fn setup_response(scope: &mut v8::PinScope) {
                     }
                 });
             } else if (body === null || body === undefined) {
-                // Empty body
-                this.body = new ReadableStream({
-                    start(controller) {
-                        controller.close();
-                    }
-                });
+                // Empty body - body should be null per spec
+                this.body = null;
             } else {
                 // String or other - convert to bytes and wrap in stream
                 const encoder = new TextEncoder();
@@ -1483,4 +1479,130 @@ pub fn setup_stream_ops(
     let code_str = v8::String::new(scope, code).unwrap();
     let script = v8::Script::compile(scope, code_str, None).unwrap();
     script.run(scope).unwrap();
+}
+
+/// Setup response streaming operations
+/// These allow JS to stream response body chunks back to Rust
+pub fn setup_response_stream_ops(
+    scope: &mut v8::PinScope,
+    stream_manager: std::sync::Arc<super::stream_manager::StreamManager>,
+) {
+    // Store stream_manager in global for access from callbacks
+    let manager_ptr = std::sync::Arc::into_raw(stream_manager) as *mut std::ffi::c_void;
+    let external = v8::External::new(scope, manager_ptr);
+
+    let global = scope.get_current_context().global(scope);
+    let state_key = v8::String::new(scope, "__responseStreamManager").unwrap();
+    global.set(scope, state_key.into(), external.into());
+
+    // __responseStreamCreate() -> stream_id
+    let create_fn = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope,
+         _args: v8::FunctionCallbackArguments,
+         mut retval: v8::ReturnValue| {
+            let global = scope.get_current_context().global(scope);
+            let state_key = v8::String::new(scope, "__responseStreamManager").unwrap();
+            let state_val = global.get(scope, state_key.into()).unwrap();
+
+            if !state_val.is_external() {
+                return;
+            }
+
+            let external: v8::Local<v8::External> = state_val.try_into().unwrap();
+            let manager_ptr = external.value() as *const super::stream_manager::StreamManager;
+            let manager = unsafe { &*manager_ptr };
+
+            let stream_id = manager.create_stream("response".to_string());
+            retval.set(v8::Number::new(scope, stream_id as f64).into());
+        },
+    )
+    .unwrap();
+
+    let create_key = v8::String::new(scope, "__responseStreamCreate").unwrap();
+    global.set(scope, create_key.into(), create_fn.into());
+
+    // __responseStreamWrite(stream_id, Uint8Array) -> boolean (true if written, false if full)
+    let write_fn = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope,
+         args: v8::FunctionCallbackArguments,
+         mut retval: v8::ReturnValue| {
+            let global = scope.get_current_context().global(scope);
+            let state_key = v8::String::new(scope, "__responseStreamManager").unwrap();
+            let state_val = global.get(scope, state_key.into()).unwrap();
+
+            if !state_val.is_external() {
+                retval.set(v8::Boolean::new(scope, false).into());
+                return;
+            }
+
+            let external: v8::Local<v8::External> = state_val.try_into().unwrap();
+            let manager_ptr = external.value() as *const super::stream_manager::StreamManager;
+            let manager = unsafe { &*manager_ptr };
+
+            // Get stream_id
+            let stream_id = if let Some(id_val) = args.get(0).to_uint32(scope) {
+                id_val.value() as u64
+            } else {
+                retval.set(v8::Boolean::new(scope, false).into());
+                return;
+            };
+
+            // Get chunk data (Uint8Array)
+            let chunk_val = args.get(1);
+            if let Ok(uint8_array) = v8::Local::<v8::Uint8Array>::try_from(chunk_val) {
+                let len = uint8_array.byte_length();
+                let mut bytes_vec = vec![0u8; len];
+                uint8_array.copy_contents(&mut bytes_vec);
+
+                let result = manager.try_write_chunk(
+                    stream_id,
+                    super::stream_manager::StreamChunk::Data(bytes::Bytes::from(bytes_vec)),
+                );
+
+                retval.set(v8::Boolean::new(scope, result.is_ok()).into());
+            } else {
+                retval.set(v8::Boolean::new(scope, false).into());
+            }
+        },
+    )
+    .unwrap();
+
+    let write_key = v8::String::new(scope, "__responseStreamWrite").unwrap();
+    global.set(scope, write_key.into(), write_fn.into());
+
+    // __responseStreamEnd(stream_id)
+    let end_fn = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope,
+         args: v8::FunctionCallbackArguments,
+         mut _retval: v8::ReturnValue| {
+            let global = scope.get_current_context().global(scope);
+            let state_key = v8::String::new(scope, "__responseStreamManager").unwrap();
+            let state_val = global.get(scope, state_key.into()).unwrap();
+
+            if !state_val.is_external() {
+                return;
+            }
+
+            let external: v8::Local<v8::External> = state_val.try_into().unwrap();
+            let manager_ptr = external.value() as *const super::stream_manager::StreamManager;
+            let manager = unsafe { &*manager_ptr };
+
+            // Get stream_id
+            let stream_id = if let Some(id_val) = args.get(0).to_uint32(scope) {
+                id_val.value() as u64
+            } else {
+                return;
+            };
+
+            // Send Done chunk to signal end of stream
+            let _ = manager.try_write_chunk(stream_id, super::stream_manager::StreamChunk::Done);
+        },
+    )
+    .unwrap();
+
+    let end_key = v8::String::new(scope, "__responseStreamEnd").unwrap();
+    global.set(scope, end_key.into(), end_fn.into());
 }

@@ -1,4 +1,5 @@
-use openworkers_runtime_v8::{HttpRequest, ResponseBody, Script, Task, Worker};
+use openworkers_core::{HttpBody, HttpMethod, HttpRequest, Script, Task};
+use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -26,10 +27,10 @@ async fn bench_local_stream(chunk_count: usize, chunk_size: usize) -> (Duration,
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let start = Instant::now();
@@ -38,7 +39,7 @@ async fn bench_local_stream(chunk_count: usize, chunk_size: usize) -> (Duration,
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
 
-    let bytes = response.body.as_bytes().unwrap();
+    let bytes = response.body.collect().await.unwrap();
     let total_bytes = bytes.len();
 
     let elapsed = start.elapsed();
@@ -59,10 +60,10 @@ async fn bench_buffered_response(iterations: u32) -> Duration {
 
     for _ in 0..iterations {
         let req = HttpRequest {
-            method: "GET".to_string(),
+            method: HttpMethod::Get,
             url: "http://localhost/".to_string(),
             headers: HashMap::new(),
-            body: None,
+            body: HttpBody::None,
         };
 
         let (task, rx) = Task::fetch(req);
@@ -89,10 +90,10 @@ async fn bench_streaming_forward(iterations: u32) -> Duration {
 
     for _ in 0..iterations {
         let req = HttpRequest {
-            method: "GET".to_string(),
+            method: HttpMethod::Get,
             url: "http://localhost/".to_string(),
             headers: HashMap::new(),
-            body: None,
+            body: HttpBody::None,
         };
 
         let (task, rx) = Task::fetch(req);
@@ -100,7 +101,7 @@ async fn bench_streaming_forward(iterations: u32) -> Duration {
         let response = rx.await.unwrap();
 
         // Consume the stream
-        if let ResponseBody::Stream(mut rx) = response.body {
+        if let HttpBody::Stream(mut rx) = response.body {
             while let Some(_) = rx.recv().await {}
         }
     }
@@ -122,10 +123,10 @@ async fn bench_large_streaming(size_kb: usize) -> (Duration, usize) {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let total_start = Instant::now();
@@ -140,7 +141,7 @@ async fn bench_large_streaming(size_kb: usize) -> (Duration, usize) {
     let mut chunk_count = 0;
     let mut first_byte_time = None;
 
-    if let ResponseBody::Stream(mut rx) = response.body {
+    if let HttpBody::Stream(mut rx) = response.body {
         while let Some(result) = rx.recv().await {
             if let Ok(bytes) = result {
                 if first_byte_time.is_none() {

@@ -1,4 +1,5 @@
-use openworkers_runtime_v8::{HttpRequest, ResponseBody, Script, Task, Worker};
+use openworkers_core::{HttpBody, HttpMethod, HttpRequest, Script, Task};
+use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
 /// Test that fetch forward returns a streaming response
@@ -15,10 +16,10 @@ async fn test_fetch_forward_streaming() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -39,7 +40,7 @@ async fn test_fetch_forward_streaming() {
     );
 
     // Consume the stream
-    if let ResponseBody::Stream(mut rx) = response.body {
+    if let HttpBody::Stream(mut rx) = response.body {
         let mut total_bytes = 0;
         while let Some(result) = rx.recv().await {
             match result {
@@ -54,12 +55,12 @@ async fn test_fetch_forward_streaming() {
     }
 }
 
-/// Test that buffered responses still return Bytes
+/// Test that string responses are streamed
 #[tokio::test]
-async fn test_buffered_response_still_bytes() {
+async fn test_string_response_is_streamed() {
     let code = r#"
         addEventListener('fetch', (event) => {
-            // Direct string response - should be buffered (Bytes)
+            // Direct string response - should be streamed
             event.respondWith(new Response('Hello World'));
         });
     "#;
@@ -68,10 +69,10 @@ async fn test_buffered_response_still_bytes() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -80,13 +81,14 @@ async fn test_buffered_response_still_bytes() {
     let response = rx.await.unwrap();
     assert_eq!(response.status, 200);
 
-    // The response body should be bytes (not a stream)
+    // All responses with body should be streamed
     assert!(
-        !response.body.is_stream(),
-        "String response should be buffered bytes, not stream"
+        response.body.is_stream(),
+        "String response should be streamed"
     );
 
-    let body_text = String::from_utf8_lossy(response.body.as_bytes().unwrap());
+    let body_bytes = response.body.collect().await.unwrap();
+    let body_text = String::from_utf8_lossy(&body_bytes);
     assert_eq!(body_text, "Hello World");
 }
 
@@ -104,10 +106,10 @@ async fn test_streaming_response_chunked() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -122,7 +124,7 @@ async fn test_streaming_response_chunked() {
     assert!(response.body.is_stream(), "Should be streaming");
 
     // Consume and verify chunks
-    if let ResponseBody::Stream(mut rx) = response.body {
+    if let HttpBody::Stream(mut rx) = response.body {
         let mut chunks = Vec::new();
         while let Some(result) = rx.recv().await {
             match result {
@@ -144,7 +146,7 @@ async fn test_processed_fetch_response() {
             const upstream = await fetch('https://httpbin.workers.rocks/get');
             const text = await upstream.text();
 
-            // Return a new buffered response
+            // Return a new response with processed content
             event.respondWith(new Response('Processed: ' + text.substring(0, 20)));
         });
     "#;
@@ -153,10 +155,10 @@ async fn test_processed_fetch_response() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -169,12 +171,13 @@ async fn test_processed_fetch_response() {
 
     assert_eq!(response.status, 200);
 
-    // Since we created a new Response with a string, it should be buffered
+    // All responses with body should be streamed
     assert!(
-        !response.body.is_stream(),
-        "Processed response should be buffered"
+        response.body.is_stream(),
+        "Processed response should be streamed"
     );
 
-    let body = String::from_utf8_lossy(response.body.as_bytes().unwrap());
+    let body_bytes = response.body.collect().await.unwrap();
+    let body = String::from_utf8_lossy(&body_bytes);
     assert!(body.starts_with("Processed:"), "Body: {}", body);
 }

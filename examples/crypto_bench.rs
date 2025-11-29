@@ -1,5 +1,6 @@
 // Quick crypto benchmark
-use openworkers_runtime_v8::{HttpRequest, Script, Task, Worker};
+use openworkers_core::{HttpBody, HttpMethod, HttpRequest, Script, Task};
+use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
 #[tokio::main]
@@ -47,17 +48,17 @@ async fn benchmark_hmac() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
-    let body = response.body.as_bytes().unwrap();
-    let ops_per_sec: u64 = std::str::from_utf8(body).unwrap().parse().unwrap();
+    let body = response.body.collect().await.unwrap();
+    let ops_per_sec: u64 = std::str::from_utf8(&body).unwrap().parse().unwrap();
 
     println!("HMAC-SHA256:  {:>8} ops/sec", ops_per_sec);
 }
@@ -101,17 +102,17 @@ async fn benchmark_ecdsa() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
-    let body = response.body.as_bytes().unwrap();
-    let parts: Vec<&str> = std::str::from_utf8(body).unwrap().split(',').collect();
+    let body = response.body.collect().await.unwrap();
+    let parts: Vec<&str> = std::str::from_utf8(&body).unwrap().split(',').collect();
     let sign_ops: u64 = parts[0].parse().unwrap();
     let verify_ops: u64 = parts[1].parse().unwrap();
 
@@ -140,17 +141,17 @@ async fn benchmark_sha256() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
-    let body = response.body.as_bytes().unwrap();
-    let ops_per_sec: u64 = std::str::from_utf8(body).unwrap().parse().unwrap();
+    let body = response.body.collect().await.unwrap();
+    let ops_per_sec: u64 = std::str::from_utf8(&body).unwrap().parse().unwrap();
 
     println!("SHA-256:      {:>8} ops/sec", ops_per_sec);
 }
@@ -220,17 +221,17 @@ async fn benchmark_rsa() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
-    let body = response.body.as_bytes().unwrap();
-    let parts: Vec<&str> = std::str::from_utf8(body).unwrap().split(',').collect();
+    let body = response.body.collect().await.unwrap();
+    let parts: Vec<&str> = std::str::from_utf8(&body).unwrap().split(',').collect();
     let sign_ops: u64 = parts[0].parse().unwrap();
     let verify_ops: u64 = parts[1].parse().unwrap();
 

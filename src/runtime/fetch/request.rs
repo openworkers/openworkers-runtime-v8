@@ -1,14 +1,14 @@
-use super::{FetchRequest, FetchResponseMeta, HttpMethod};
 use crate::runtime::stream_manager::{StreamChunk, StreamId, StreamManager};
 use futures::StreamExt;
+use openworkers_core::{HttpBody, HttpMethod, HttpRequest, HttpResponseMeta};
 use std::sync::Arc;
 
 /// Execute HTTP request with true streaming - returns immediately with metadata,
 /// body chunks are streamed via StreamManager
 pub async fn execute_fetch_streaming(
-    request: FetchRequest,
+    request: HttpRequest,
     stream_manager: Arc<StreamManager>,
-) -> Result<(FetchResponseMeta, StreamId), String> {
+) -> Result<(HttpResponseMeta, StreamId), String> {
     let client = reqwest::Client::new();
 
     let mut req_builder = match request.method {
@@ -24,12 +24,12 @@ pub async fn execute_fetch_streaming(
     };
 
     // Add headers
-    for (key, value) in request.headers {
+    for (key, value) in &request.headers {
         req_builder = req_builder.header(key, value);
     }
 
     // Add body if present
-    if let Some(body) = request.body {
+    if let HttpBody::Bytes(body) = request.body {
         req_builder = req_builder.body(body);
     }
 
@@ -88,7 +88,7 @@ pub async fn execute_fetch_streaming(
     });
 
     Ok((
-        FetchResponseMeta {
+        HttpResponseMeta {
             status,
             status_text,
             headers,

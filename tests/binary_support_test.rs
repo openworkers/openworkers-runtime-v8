@@ -1,4 +1,5 @@
-use openworkers_runtime_v8::{HttpRequest, Script, Task, Worker};
+use openworkers_core::{HttpBody, HttpMethod, HttpRequest, Script, Task};
+use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -15,10 +16,10 @@ async fn test_binary_response() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -29,7 +30,7 @@ async fn test_binary_response() {
     assert_eq!(response.status, 200);
 
     // Check binary content
-    let body_bytes = response.body.as_bytes().unwrap();
+    let body_bytes = &response.body.collect().await.unwrap();
     assert_eq!(body_bytes.as_ref(), b"Hello");
 }
 
@@ -52,10 +53,10 @@ async fn test_text_method_with_binary() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -63,7 +64,7 @@ async fn test_text_method_with_binary() {
 
     assert!(result.is_ok());
     let response = rx.await.unwrap();
-    let body_bytes = response.body.as_bytes().unwrap();
+    let body_bytes = &response.body.collect().await.unwrap();
     let body_text = String::from_utf8_lossy(body_bytes.as_ref());
     assert_eq!(body_text, "Got: Hello");
 }
@@ -93,10 +94,10 @@ async fn test_array_buffer_method() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -104,7 +105,7 @@ async fn test_array_buffer_method() {
 
     assert!(result.is_ok());
     let response = rx.await.unwrap();
-    let body_bytes = response.body.as_bytes().unwrap();
+    let body_bytes = &response.body.collect().await.unwrap();
     let body_text = String::from_utf8_lossy(body_bytes.as_ref());
     assert_eq!(body_text, "Sum: 15"); // 1+2+3+4+5 = 15
 }
@@ -122,10 +123,10 @@ async fn test_string_still_works() {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: HttpBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -133,7 +134,7 @@ async fn test_string_still_works() {
 
     assert!(result.is_ok());
     let response = rx.await.unwrap();
-    let body_bytes = response.body.as_bytes().unwrap();
+    let body_bytes = &response.body.collect().await.unwrap();
     let body_text = String::from_utf8_lossy(body_bytes.as_ref());
     assert_eq!(body_text, "Plain text response");
 }

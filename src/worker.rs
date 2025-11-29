@@ -1,7 +1,7 @@
 use crate::runtime::{Runtime, run_event_loop};
 use crate::security::{CpuEnforcer, TimeoutGuard};
 use openworkers_core::{
-    HttpResponse, LogSender, ResponseBody, RuntimeLimits, Script, Task, TerminationReason,
+    HttpBody, HttpResponse, LogSender, RuntimeLimits, Script, Task, TerminationReason,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -116,7 +116,7 @@ impl Worker {
                     .map(|_| HttpResponse {
                         status: 200,
                         headers: vec![],
-                        body: ResponseBody::None,
+                        body: HttpBody::None,
                     })
             }
         };
@@ -211,7 +211,7 @@ impl Worker {
                 let init_obj = v8::Object::new(scope);
 
                 let method_key = v8::String::new(scope, "method").unwrap();
-                let method_val = v8::String::new(scope, &req.method).unwrap();
+                let method_val = v8::String::new(scope, req.method.as_str()).unwrap();
                 init_obj.set(scope, method_key.into(), method_val.into());
 
                 // Create headers object for init
@@ -225,7 +225,7 @@ impl Worker {
                 init_obj.set(scope, headers_key.into(), headers_obj.into());
 
                 // Add body if present (convert Bytes to string)
-                if let Some(body_bytes) = &req.body {
+                if let HttpBody::Bytes(body_bytes) = &req.body {
                     if let Ok(body_str) = std::str::from_utf8(body_bytes) {
                         let body_key = v8::String::new(scope, "body").unwrap();
                         let body_val = v8::String::new(scope, body_str).unwrap();
@@ -246,7 +246,7 @@ impl Worker {
                 obj.set(scope, url_key.into(), url_val.into());
 
                 let method_key = v8::String::new(scope, "method").unwrap();
-                let method_val = v8::String::new(scope, &req.method).unwrap();
+                let method_val = v8::String::new(scope, req.method.as_str()).unwrap();
                 obj.set(scope, method_key.into(), method_val.into());
 
                 let headers_obj = v8::Object::new(scope);
@@ -353,17 +353,18 @@ impl Worker {
                 .and_then(|v| v.uint32_value(scope))
                 .unwrap_or(200) as u16;
 
-            // Check if response has _nativeStreamId (it's a native stream forward)
-            let native_stream_id_key = v8::String::new(scope, "_nativeStreamId").unwrap();
-            let native_stream_id = resp_obj
-                .get(scope, native_stream_id_key.into())
-                .and_then(|v| {
-                    if v.is_null() || v.is_undefined() {
-                        None
-                    } else {
-                        v.uint32_value(scope).map(|n| n as u64)
-                    }
-                });
+            // Check if response has _responseStreamId (streaming body)
+            let response_stream_id_key = v8::String::new(scope, "_responseStreamId").unwrap();
+            let response_stream_id =
+                resp_obj
+                    .get(scope, response_stream_id_key.into())
+                    .and_then(|v| {
+                        if v.is_null() || v.is_undefined() {
+                            None
+                        } else {
+                            v.uint32_value(scope).map(|n| n as u64)
+                        }
+                    });
 
             // Extract headers first (needed for both paths)
             // Headers can be a Headers instance (with _map) or a plain object
@@ -414,22 +415,21 @@ impl Worker {
             }
 
             // Determine body type: streaming or buffered
-            let body = if let Some(stream_id) = native_stream_id {
-                // Native stream forward - create bounded channel for backpressure
+            let body = if let Some(stream_id) = response_stream_id {
+                // Response stream - take the receiver from StreamManager
+                // JS is writing chunks to this stream via __responseStreamWrite
                 use crate::runtime::stream_manager::StreamChunk;
-                const RESPONSE_STREAM_BUFFER_SIZE: usize = 16;
 
-                let (tx, rx) = tokio::sync::mpsc::channel(RESPONSE_STREAM_BUFFER_SIZE);
-                let stream_manager = self.runtime.stream_manager.clone();
+                if let Some(receiver) = self.runtime.stream_manager.take_receiver(stream_id) {
+                    // Create a channel that converts StreamChunk to Result<Bytes, String>
+                    let (tx, rx) = tokio::sync::mpsc::channel(16);
 
-                // Spawn task to read from stream and forward to channel
-                // Backpressure: if channel is full, this task waits (slowing upstream)
-                tokio::spawn(async move {
-                    loop {
-                        match stream_manager.read_chunk(stream_id).await {
-                            Ok(chunk) => match chunk {
+                    // Spawn task to convert StreamChunk -> Result<Bytes, String>
+                    tokio::spawn(async move {
+                        let mut receiver = receiver;
+                        while let Some(chunk) = receiver.recv().await {
+                            match chunk {
                                 StreamChunk::Data(bytes) => {
-                                    // send() is async and waits if buffer is full
                                     if tx.send(Ok(bytes)).await.is_err() {
                                         break;
                                     }
@@ -441,16 +441,15 @@ impl Worker {
                                     let _ = tx.send(Err(e)).await;
                                     break;
                                 }
-                            },
-                            Err(e) => {
-                                let _ = tx.send(Err(e)).await;
-                                break;
                             }
                         }
-                    }
-                });
+                    });
 
-                ResponseBody::Stream(rx)
+                    HttpBody::Stream(rx)
+                } else {
+                    // Stream not found - fall back to empty body
+                    HttpBody::None
+                }
             } else {
                 // Buffered body - use _getRawBody()
                 let get_raw_body_key = v8::String::new(scope, "_getRawBody").unwrap();
@@ -473,7 +472,7 @@ impl Worker {
                     bytes::Bytes::new()
                 };
 
-                ResponseBody::Bytes(body_bytes)
+                HttpBody::Bytes(body_bytes)
             };
 
             let response = HttpResponse {
@@ -488,7 +487,7 @@ impl Worker {
             return Ok(HttpResponse {
                 status,
                 headers: vec![],
-                body: ResponseBody::None,
+                body: HttpBody::None,
             });
         }
 
@@ -535,6 +534,45 @@ impl Worker {
 
 fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
     let code = r#"
+        // Stream response body to Rust (stream all responses with body)
+        async function __streamResponseBody(response) {
+            if (!response.body) {
+                return response;
+            }
+
+            // If it's a native stream (fetch forward), just mark it
+            if (response.body._nativeStreamId !== undefined) {
+                response._responseStreamId = response.body._nativeStreamId;
+                return response;
+            }
+
+            // Stream the body: create output stream and pipe
+            const streamId = __responseStreamCreate();
+            response._responseStreamId = streamId;
+
+            // Read and forward asynchronously
+            (async () => {
+                try {
+                    const reader = response.body.getReader();
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        if (value && value.length > 0) {
+                            while (!__responseStreamWrite(streamId, value)) {
+                                await new Promise(resolve => setTimeout(resolve, 1));
+                            }
+                        }
+                    }
+                } catch (error) {
+                    console.error('[streamResponseBody] Error:', error);
+                } finally {
+                    __responseStreamEnd(streamId);
+                }
+            })();
+
+            return response;
+        }
+
         globalThis.addEventListener = function(type, handler) {
             if (type === 'fetch') {
                 globalThis.__fetchHandler = handler;
@@ -544,8 +582,8 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
                         respondWith: function(responseOrPromise) {
                             // Handle both direct Response and Promise<Response>
                             if (responseOrPromise && typeof responseOrPromise.then === 'function') {
-                                // It's a Promise, wait for it to resolve
                                 responseOrPromise
+                                    .then(response => __streamResponseBody(response))
                                     .then(response => {
                                         globalThis.__lastResponse = response;
                                     })
@@ -557,18 +595,18 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
                                         );
                                     });
                             } else {
-                                // Direct Response object
-                                globalThis.__lastResponse = responseOrPromise;
+                                __streamResponseBody(responseOrPromise)
+                                    .then(response => {
+                                        globalThis.__lastResponse = response;
+                                    });
                             }
                         }
                     };
 
-                    // Call handler synchronously
                     try {
                         handler(event);
                     } catch (error) {
                         console.error('[addEventListener] Error in fetch handler:', error);
-                        // Set error response
                         globalThis.__lastResponse = new Response('Handler exception: ' + (error.message || error), { status: 500 });
                     }
                 };
