@@ -1,5 +1,4 @@
 pub mod request;
-pub mod response;
 
 use std::collections::HashMap;
 
@@ -59,22 +58,6 @@ impl Default for FetchRequest {
             headers: HashMap::new(),
             body: None,
         }
-    }
-}
-
-/// Fetch response data
-#[derive(Debug, Clone)]
-pub struct FetchResponse {
-    pub status: u16,
-    pub status_text: String,
-    pub headers: HashMap<String, String>,
-    pub body: bytes::Bytes, // Changed from String to Bytes for binary support
-    pub chunks: Vec<bytes::Bytes>, // For streaming: body split into chunks
-}
-
-impl FetchResponse {
-    pub fn ok(&self) -> bool {
-        self.status >= 200 && self.status < 300
     }
 }
 

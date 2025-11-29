@@ -15,7 +15,7 @@ use v8;
 use crate::security::CustomAllocator;
 use openworkers_core::RuntimeLimits;
 
-pub use fetch::{FetchRequest, FetchResponse, FetchResponseMeta};
+pub use fetch::{FetchRequest, FetchResponseMeta};
 
 pub type CallbackId = u64;
 
@@ -23,7 +23,6 @@ pub enum SchedulerMessage {
     ScheduleTimeout(CallbackId, u64),
     ScheduleInterval(CallbackId, u64),
     ClearTimer(CallbackId),
-    Fetch(CallbackId, FetchRequest),
     FetchStreaming(CallbackId, FetchRequest), // Fetch with streaming (stream created internally)
     StreamRead(CallbackId, stream_manager::StreamId), // Read next chunk from stream
     StreamCancel(stream_manager::StreamId),   // Cancel/close a stream
@@ -33,7 +32,6 @@ pub enum SchedulerMessage {
 pub enum CallbackMessage {
     ExecuteTimeout(CallbackId),
     ExecuteInterval(CallbackId),
-    FetchSuccess(CallbackId, FetchResponse),
     FetchError(CallbackId, String),
     FetchStreamingSuccess(CallbackId, FetchResponseMeta, stream_manager::StreamId), // Fetch metadata + stream ID
     StreamChunk(CallbackId, stream_manager::StreamChunk), // Stream chunk ready
@@ -217,21 +215,6 @@ impl Runtime {
                         execute_fn.call(scope, global.into(), &[id_val.into()]);
                     }
                 }
-                CallbackMessage::FetchSuccess(callback_id, response) => {
-                    let callback_opt = {
-                        let mut cbs = self.fetch_callbacks.lock().unwrap();
-                        cbs.remove(&callback_id)
-                    };
-
-                    if let Some(callback_global) = callback_opt
-                        && let Ok(response_obj) =
-                            fetch::response::create_response_object(scope, response)
-                    {
-                        let callback = v8::Local::new(scope, &callback_global);
-                        let recv = v8::undefined(scope);
-                        callback.call(scope, recv.into(), &[response_obj.into()]);
-                    }
-                }
                 CallbackMessage::FetchError(callback_id, error_msg) => {
                     let callback_opt = {
                         let mut cbs = self.fetch_callbacks.lock().unwrap();
@@ -411,20 +394,6 @@ pub async fn run_event_loop(
                     }
                 });
                 running_tasks.insert(callback_id, handle);
-            }
-            SchedulerMessage::Fetch(promise_id, request) => {
-                let callback_tx = callback_tx.clone();
-                tokio::spawn(async move {
-                    match fetch::request::execute_fetch(request).await {
-                        Ok(response) => {
-                            let _ = callback_tx
-                                .send(CallbackMessage::FetchSuccess(promise_id, response));
-                        }
-                        Err(e) => {
-                            let _ = callback_tx.send(CallbackMessage::FetchError(promise_id, e));
-                        }
-                    }
-                });
             }
             SchedulerMessage::FetchStreaming(promise_id, request) => {
                 // Fetch with real-time streaming
