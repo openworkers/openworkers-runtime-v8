@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use v8;
 
 use crate::security::CustomAllocator;
-use openworkers_core::{HttpRequest, HttpResponseMeta, RuntimeLimits};
+use openworkers_core::{HttpRequest, HttpResponseMeta, LogSender, RuntimeLimits};
 
 pub type CallbackId = u64;
 
@@ -58,6 +58,7 @@ pub struct Runtime {
 impl Runtime {
     pub fn new(
         limits: Option<RuntimeLimits>,
+        log_tx: Option<LogSender>,
     ) -> (
         Self,
         mpsc::UnboundedReceiver<SchedulerMessage>,
@@ -130,7 +131,7 @@ impl Runtime {
             let scope = &mut v8::ContextScope::new(&mut scope, context);
 
             // Always setup native bindings (not in snapshot)
-            bindings::setup_console(scope);
+            bindings::setup_console(scope, log_tx);
             bindings::setup_timers(scope, scheduler_tx.clone());
             bindings::setup_fetch(
                 scope,

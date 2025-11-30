@@ -1,5 +1,5 @@
 use super::{CallbackId, SchedulerMessage};
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody};
+use openworkers_core::{HttpMethod, HttpRequest, LogEvent, LogLevel, LogSender, RequestBody};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -7,47 +7,99 @@ use v8;
 
 // Shared state accessible from V8 callbacks (for timers)
 #[derive(Clone)]
-pub struct TimerState {
-    pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+struct TimerState {
+    scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
 }
 
-pub fn setup_console(scope: &mut v8::PinScope) {
+// State for console logging
+#[derive(Clone)]
+struct ConsoleState {
+    log_tx: Option<LogSender>,
+}
+
+pub fn setup_console(scope: &mut v8::PinScope, log_tx: Option<LogSender>) {
     let context = scope.get_current_context();
     let global = context.global(scope);
 
-    // Setup native print function using closure
-    let print_fn = v8::Function::new(
-        scope,
+    // Store console state in External
+    let console_state = ConsoleState { log_tx };
+    let state_ptr = Box::into_raw(Box::new(console_state)) as *mut std::ffi::c_void;
+    let external = v8::External::new(scope, state_ptr);
+
+    // Setup __console_log native function
+    let console_log_fn = v8::Function::builder(
         |scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut _retval: v8::ReturnValue| {
-            if args.length() > 0
-                && let Some(msg_str) = args.get(0).to_string(scope)
-            {
-                let msg = msg_str.to_rust_string_lossy(scope);
-                println!("{}", msg);
+            // Get level (first arg) and message (second arg)
+            if args.length() < 2 {
+                return;
             }
+
+            let level_num = args.get(0).int32_value(scope).unwrap_or(2); // default to Info
+            let level = match level_num {
+                0 => LogLevel::Error,
+                1 => LogLevel::Warn,
+                _ => LogLevel::Info,
+            };
+
+            let msg = args
+                .get(1)
+                .to_string(scope)
+                .map(|s| s.to_rust_string_lossy(scope))
+                .unwrap_or_default();
+
+            // Get state from External (data)
+            let data = args.data();
+            if let Ok(external) = v8::Local::<v8::External>::try_from(data) {
+                let state = unsafe { &*(external.value() as *const ConsoleState) };
+                if let Some(ref tx) = state.log_tx {
+                    let _ = tx.send(LogEvent {
+                        level,
+                        message: msg.clone(),
+                    });
+                }
+            }
+
+            // Also print to stdout for debugging
+            let prefix = match level {
+                LogLevel::Error => "[ERROR]",
+                LogLevel::Warn => "[WARN]",
+                LogLevel::Info | LogLevel::Log => "[LOG]",
+                LogLevel::Debug | LogLevel::Trace => "[DEBUG]",
+            };
+            println!("{} {}", prefix, msg);
         },
     )
+    .data(external.into())
+    .build(scope)
     .unwrap();
 
-    let print_key = v8::String::new(scope, "print").unwrap();
-    global.set(scope, print_key.into(), print_fn.into());
+    let console_log_key = v8::String::new(scope, "__console_log").unwrap();
+    global.set(scope, console_log_key.into(), console_log_fn.into());
 
-    // Setup console object
+    // Setup console object using JS that calls __console_log
     let code = r#"
         globalThis.console = {
             log: function(...args) {
-                const msg = args.map(a => String(a)).join(' ');
-                print('[LOG] ' + msg);
+                const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+                __console_log(2, msg);
+            },
+            info: function(...args) {
+                const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+                __console_log(2, msg);
             },
             warn: function(...args) {
-                const msg = args.map(a => String(a)).join(' ');
-                print('[WARN] ' + msg);
+                const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+                __console_log(1, msg);
             },
             error: function(...args) {
-                const msg = args.map(a => String(a)).join(' ');
-                print('[ERROR] ' + msg);
+                const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+                __console_log(0, msg);
+            },
+            debug: function(...args) {
+                const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+                __console_log(3, msg);
             }
         };
     "#;

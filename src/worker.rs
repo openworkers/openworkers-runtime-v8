@@ -42,10 +42,10 @@ impl Worker {
 impl Worker {
     pub async fn new(
         script: Script,
-        _log_tx: Option<LogSender>,
+        log_tx: Option<LogSender>,
         limits: Option<RuntimeLimits>,
     ) -> Result<Self, TerminationReason> {
-        let (mut runtime, scheduler_rx, callback_tx) = Runtime::new(limits);
+        let (mut runtime, scheduler_rx, callback_tx) = Runtime::new(limits, log_tx);
 
         // Setup addEventListener
         setup_event_listener(&mut runtime).map_err(|e| {
