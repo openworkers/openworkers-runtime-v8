@@ -377,14 +377,42 @@ pub fn setup_fetch(
 
     // JavaScript fetch implementation using Promises with streaming support
     let code = r#"
-        globalThis.fetch = function(url, options) {
+        // Helper to read entire ReadableStream into a string
+        async function __bufferReadableStream(stream) {
+            const reader = stream.getReader();
+            const chunks = [];
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                chunks.push(value);
+            }
+            // Concatenate all chunks
+            const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+            const result = new Uint8Array(totalLength);
+            let offset = 0;
+            for (const chunk of chunks) {
+                result.set(chunk, offset);
+                offset += chunk.length;
+            }
+            return new TextDecoder().decode(result);
+        }
+
+        globalThis.fetch = async function(url, options) {
+            options = options || {};
+            let body = options.body || null;
+
+            // If body is a ReadableStream, buffer it first
+            if (body instanceof ReadableStream) {
+                console.warn('[fetch] ReadableStream body detected - buffering entire stream before sending');
+                body = await __bufferReadableStream(body);
+            }
+
             return new Promise((resolve, reject) => {
-                options = options || {};
                 const fetchOptions = {
                     url: url,
                     method: options.method || 'GET',
                     headers: options.headers || {},
-                    body: options.body || null
+                    body: body
                 };
 
                 // Use streaming fetch
