@@ -399,7 +399,7 @@ pub async fn run_event_loop(
                 let callback_tx = callback_tx.clone();
                 let manager = stream_manager.clone();
                 tokio::spawn(async move {
-                    match fetch::request::execute_fetch_streaming(request, manager).await {
+                    match fetch::execute_fetch_streaming(request, manager).await {
                         Ok((meta, stream_id)) => {
                             let _ = callback_tx.send(CallbackMessage::FetchStreamingSuccess(
                                 promise_id, meta, stream_id,
