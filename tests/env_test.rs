@@ -1,4 +1,4 @@
-use openworkers_core::{HttpBody, HttpMethod, HttpRequest, Script, Task};
+use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
@@ -27,7 +27,7 @@ async fn test_env_variables() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(request);
@@ -60,7 +60,7 @@ async fn test_env_empty() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(request);
@@ -100,7 +100,7 @@ async fn test_env_readonly() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(request);

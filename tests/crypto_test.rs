@@ -1,4 +1,4 @@
-use openworkers_core::{HttpBody, HttpMethod, HttpRequest, Script, Task};
+use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
@@ -24,7 +24,7 @@ async fn test_get_random_values() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -63,7 +63,7 @@ async fn test_digest_sha256() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -96,7 +96,7 @@ async fn test_digest_sha512() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -145,7 +145,7 @@ async fn test_hmac_sign_verify() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -198,7 +198,7 @@ async fn test_hmac_different_algorithms() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -261,7 +261,7 @@ async fn test_ecdsa_sign_verify() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -311,7 +311,7 @@ async fn test_ecdsa_verify_with_private_key() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -421,7 +421,7 @@ async fn test_rsa_sign_verify() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);

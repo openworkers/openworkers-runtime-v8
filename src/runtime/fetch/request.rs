@@ -1,6 +1,6 @@
 use crate::runtime::stream_manager::{StreamChunk, StreamId, StreamManager};
 use futures::StreamExt;
-use openworkers_core::{HttpBody, HttpMethod, HttpRequest, HttpResponseMeta};
+use openworkers_core::{HttpMethod, HttpRequest, HttpResponseMeta, RequestBody};
 use std::sync::Arc;
 
 /// Execute HTTP request with true streaming - returns immediately with metadata,
@@ -29,7 +29,7 @@ pub async fn execute_fetch_streaming(
     }
 
     // Add body if present
-    if let HttpBody::Bytes(body) = request.body {
+    if let RequestBody::Bytes(body) = request.body {
         req_builder = req_builder.body(body);
     }
 

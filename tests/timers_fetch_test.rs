@@ -1,4 +1,4 @@
-use openworkers_core::{HttpBody, HttpMethod, HttpRequest, Script, Task};
+use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
@@ -21,7 +21,7 @@ async fn test_set_timeout() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -62,7 +62,7 @@ async fn test_set_interval_and_clear() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -98,7 +98,7 @@ async fn test_clear_timeout() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -135,7 +135,7 @@ async fn test_async_response() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -179,7 +179,7 @@ async fn test_fetch_forward() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -226,7 +226,7 @@ async fn test_promise_rejection_handling() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -267,7 +267,7 @@ async fn test_multiple_async_operations() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -306,7 +306,7 @@ async fn test_custom_headers() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);

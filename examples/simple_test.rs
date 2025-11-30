@@ -1,4 +1,4 @@
-use openworkers_core::{HttpBody, HttpMethod, HttpRequest, Script, Task};
+use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
@@ -17,7 +17,7 @@ async fn main() {
         method: HttpMethod::Get,
         url: "http://localhost/test".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);

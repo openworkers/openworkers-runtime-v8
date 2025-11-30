@@ -1,4 +1,4 @@
-use openworkers_core::{HttpBody, HttpMethod, HttpRequest, Script, Task};
+use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
@@ -32,7 +32,7 @@ async fn test_response_with_stream_chunks() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -75,7 +75,7 @@ async fn test_stream_consumed_by_text() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -118,7 +118,7 @@ async fn test_body_used_flag() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);

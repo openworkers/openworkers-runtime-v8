@@ -1,4 +1,4 @@
-use openworkers_core::{HttpBody, HttpMethod, HttpRequest, Script, Task};
+use openworkers_core::{HttpMethod, HttpRequest, RequestBody, ResponseBody, Script, Task};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -30,7 +30,7 @@ async fn bench_local_stream(chunk_count: usize, chunk_size: usize) -> (Duration,
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let start = Instant::now();
@@ -63,7 +63,7 @@ async fn bench_buffered_response(iterations: u32) -> Duration {
             method: HttpMethod::Get,
             url: "http://localhost/".to_string(),
             headers: HashMap::new(),
-            body: HttpBody::None,
+            body: RequestBody::None,
         };
 
         let (task, rx) = Task::fetch(req);
@@ -93,7 +93,7 @@ async fn bench_streaming_forward(iterations: u32) -> Duration {
             method: HttpMethod::Get,
             url: "http://localhost/".to_string(),
             headers: HashMap::new(),
-            body: HttpBody::None,
+            body: RequestBody::None,
         };
 
         let (task, rx) = Task::fetch(req);
@@ -101,7 +101,7 @@ async fn bench_streaming_forward(iterations: u32) -> Duration {
         let response = rx.await.unwrap();
 
         // Consume the stream
-        if let HttpBody::Stream(mut rx) = response.body {
+        if let ResponseBody::Stream(mut rx) = response.body {
             while let Some(_) = rx.recv().await {}
         }
     }
@@ -126,7 +126,7 @@ async fn bench_large_streaming(size_kb: usize) -> (Duration, usize) {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let total_start = Instant::now();
@@ -141,7 +141,7 @@ async fn bench_large_streaming(size_kb: usize) -> (Duration, usize) {
     let mut chunk_count = 0;
     let mut first_byte_time = None;
 
-    if let HttpBody::Stream(mut rx) = response.body {
+    if let ResponseBody::Stream(mut rx) = response.body {
         while let Some(result) = rx.recv().await {
             if let Ok(bytes) = result {
                 if first_byte_time.is_none() {

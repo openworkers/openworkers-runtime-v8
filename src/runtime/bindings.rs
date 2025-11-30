@@ -1,5 +1,5 @@
 use super::{CallbackId, SchedulerMessage};
-use openworkers_core::{HttpBody, HttpMethod, HttpRequest};
+use openworkers_core::{HttpMethod, HttpRequest, RequestBody};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -328,8 +328,8 @@ pub fn setup_fetch(
                 .get(scope, body_key.into())
                 .filter(|v| !v.is_null() && !v.is_undefined())
                 .and_then(|v| v.to_string(scope))
-                .map(|s| HttpBody::Bytes(bytes::Bytes::from(s.to_rust_string_lossy(scope))))
-                .unwrap_or(HttpBody::None);
+                .map(|s| RequestBody::Bytes(bytes::Bytes::from(s.to_rust_string_lossy(scope))))
+                .unwrap_or(RequestBody::None);
             // Create HttpRequest
             let request = HttpRequest {
                 method,

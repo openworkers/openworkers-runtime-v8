@@ -1,5 +1,5 @@
 use openworkers_core::{
-    HttpBody, HttpMethod, HttpRequest, RuntimeLimits, Script, Task, TerminationReason,
+    HttpMethod, HttpRequest, RequestBody, RuntimeLimits, Script, Task, TerminationReason,
 };
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
@@ -35,7 +35,7 @@ async fn test_memory_limit_arraybuffer_allocation() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, _rx) = Task::fetch(req);
@@ -80,7 +80,7 @@ async fn test_memory_limit_uint8array_allocation() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, _rx) = Task::fetch(req);
@@ -131,7 +131,7 @@ async fn test_memory_limit_incremental_allocation() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, _rx) = Task::fetch(req);
@@ -178,7 +178,7 @@ async fn test_memory_within_limit() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);

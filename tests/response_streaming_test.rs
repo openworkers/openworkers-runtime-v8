@@ -1,4 +1,4 @@
-use openworkers_core::{HttpBody, HttpMethod, HttpRequest, Script, Task};
+use openworkers_core::{HttpMethod, HttpRequest, RequestBody, ResponseBody, Script, Task};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
@@ -19,7 +19,7 @@ async fn test_fetch_forward_streaming() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -40,7 +40,7 @@ async fn test_fetch_forward_streaming() {
     );
 
     // Consume the stream
-    if let HttpBody::Stream(mut rx) = response.body {
+    if let ResponseBody::Stream(mut rx) = response.body {
         let mut total_bytes = 0;
         while let Some(result) = rx.recv().await {
             match result {
@@ -72,7 +72,7 @@ async fn test_string_response_is_streamed() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -109,7 +109,7 @@ async fn test_streaming_response_chunked() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -124,7 +124,7 @@ async fn test_streaming_response_chunked() {
     assert!(response.body.is_stream(), "Should be streaming");
 
     // Consume and verify chunks
-    if let HttpBody::Stream(mut rx) = response.body {
+    if let ResponseBody::Stream(mut rx) = response.body {
         let mut chunks = Vec::new();
         while let Some(result) = rx.recv().await {
             match result {
@@ -158,7 +158,7 @@ async fn test_processed_fetch_response() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);

@@ -1,6 +1,6 @@
 #[cfg(target_os = "linux")]
 use openworkers_core::TerminationReason;
-use openworkers_core::{HttpBody, HttpMethod, HttpRequest, RuntimeLimits, Script, Task};
+use openworkers_core::{HttpMethod, HttpRequest, RequestBody, RuntimeLimits, Script, Task};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
@@ -37,7 +37,7 @@ async fn test_wall_clock_timeout_infinite_loop() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, _rx) = Task::fetch(req);
@@ -84,7 +84,7 @@ async fn test_wall_clock_timeout_async_loop() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, _rx) = Task::fetch(req);
@@ -128,7 +128,7 @@ async fn test_fast_execution_no_timeout() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -174,7 +174,7 @@ async fn test_disabled_timeout_allows_long_execution() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -222,7 +222,7 @@ mod cpu_tests {
             method: HttpMethod::Get,
             url: "http://localhost/".to_string(),
             headers: HashMap::new(),
-            body: HttpBody::None,
+            body: RequestBody::None,
         };
 
         let (task, _rx) = Task::fetch(req);
@@ -266,7 +266,7 @@ mod cpu_tests {
             method: HttpMethod::Get,
             url: "http://localhost/".to_string(),
             headers: HashMap::new(),
-            body: HttpBody::None,
+            body: RequestBody::None,
         };
 
         let (task, _rx) = Task::fetch(req);
@@ -310,7 +310,7 @@ mod cpu_tests {
             method: HttpMethod::Get,
             url: "http://localhost/".to_string(),
             headers: HashMap::new(),
-            body: HttpBody::None,
+            body: RequestBody::None,
         };
 
         let (task, rx) = Task::fetch(req);
@@ -350,7 +350,7 @@ mod cpu_tests {
             method: HttpMethod::Get,
             url: "http://localhost/".to_string(),
             headers: HashMap::new(),
-            body: HttpBody::None,
+            body: RequestBody::None,
         };
 
         let (task, _rx) = Task::fetch(req);

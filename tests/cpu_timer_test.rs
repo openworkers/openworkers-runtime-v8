@@ -1,4 +1,4 @@
-use openworkers_core::{HttpBody, HttpMethod, HttpRequest, RuntimeLimits, Script, Task};
+use openworkers_core::{HttpMethod, HttpRequest, RequestBody, RuntimeLimits, Script, Task};
 use openworkers_runtime_v8::Worker;
 use openworkers_runtime_v8::security::{CpuTimer, get_thread_cpu_time};
 use std::collections::HashMap;
@@ -80,7 +80,7 @@ async fn test_exec_cpu_time_measurement() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     // Measure CPU time around exec
@@ -132,7 +132,7 @@ async fn test_exec_cpu_time_excludes_async_wait() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let timer = CpuTimer::start();
@@ -198,7 +198,7 @@ async fn test_exec_cpu_intensive_uses_more_cpu_time() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
     let timer = CpuTimer::start();
     let (task, _rx) = Task::fetch(req);
@@ -212,7 +212,7 @@ async fn test_exec_cpu_intensive_uses_more_cpu_time() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
     let timer = CpuTimer::start();
     let (task, _rx) = Task::fetch(req);

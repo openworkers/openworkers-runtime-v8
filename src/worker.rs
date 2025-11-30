@@ -1,7 +1,8 @@
 use crate::runtime::{Runtime, run_event_loop};
 use crate::security::{CpuEnforcer, TimeoutGuard};
 use openworkers_core::{
-    HttpBody, HttpResponse, LogSender, RuntimeLimits, Script, Task, TerminationReason,
+    HttpResponse, LogSender, RequestBody, ResponseBody, RuntimeLimits, Script, Task,
+    TerminationReason,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -121,7 +122,7 @@ impl Worker {
                     .map(|_| HttpResponse {
                         status: 200,
                         headers: vec![],
-                        body: HttpBody::None,
+                        body: ResponseBody::None,
                     })
             }
         };
@@ -230,7 +231,7 @@ impl Worker {
                 init_obj.set(scope, headers_key.into(), headers_obj.into());
 
                 // Add body if present (convert Bytes to string)
-                if let HttpBody::Bytes(body_bytes) = &req.body {
+                if let RequestBody::Bytes(body_bytes) = &req.body {
                     if let Ok(body_str) = std::str::from_utf8(body_bytes) {
                         let body_key = v8::String::new(scope, "body").unwrap();
                         let body_val = v8::String::new(scope, body_str).unwrap();
@@ -450,10 +451,10 @@ impl Worker {
                         }
                     });
 
-                    HttpBody::Stream(rx)
+                    ResponseBody::Stream(rx)
                 } else {
                     // Stream not found - fall back to empty body
-                    HttpBody::None
+                    ResponseBody::None
                 }
             } else {
                 // Buffered body - use _getRawBody()
@@ -477,7 +478,7 @@ impl Worker {
                     bytes::Bytes::new()
                 };
 
-                HttpBody::Bytes(body_bytes)
+                ResponseBody::Bytes(body_bytes)
             };
 
             let response = HttpResponse {
@@ -492,7 +493,7 @@ impl Worker {
             return Ok(HttpResponse {
                 status,
                 headers: vec![],
-                body: HttpBody::None,
+                body: ResponseBody::None,
             });
         }
 

@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use openworkers_core::{HttpBody, HttpMethod, HttpRequest, Script, Task};
+use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
@@ -32,7 +32,7 @@ async fn test_request_basic() {
         method: HttpMethod::Get,
         url: "http://localhost/test".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -67,7 +67,7 @@ async fn test_request_method_url() {
         method: HttpMethod::Post,
         url: "http://localhost/api/users".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -108,7 +108,7 @@ async fn test_request_headers() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers,
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -142,7 +142,7 @@ async fn test_request_body_text() {
         method: HttpMethod::Post,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::Bytes(Bytes::from("Hello, World!")),
+        body: RequestBody::Bytes(Bytes::from("Hello, World!")),
     };
 
     let (task, rx) = Task::fetch(req);
@@ -176,7 +176,7 @@ async fn test_request_body_json() {
         method: HttpMethod::Post,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::Bytes(Bytes::from(r#"{"name":"test","value":42}"#)),
+        body: RequestBody::Bytes(Bytes::from(r#"{"name":"test","value":42}"#)),
     };
 
     let (task, rx) = Task::fetch(req);
@@ -217,7 +217,7 @@ async fn test_request_clone() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
@@ -259,7 +259,7 @@ async fn test_request_from_request() {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: HttpBody::None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(req);
