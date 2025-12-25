@@ -39,6 +39,9 @@ pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
         // because they use native functions (v8::Function::new) which require external references.
         // They will be setup at runtime instead.
 
+        // Setup global aliases (self, global) for browser/Node.js compatibility
+        crate::runtime::bindings::setup_global_aliases(scope);
+
         // Setup TextEncoder/TextDecoder (pre-compiled in snapshot - pure JS)
         crate::runtime::text_encoding::setup_text_encoding(scope);
 

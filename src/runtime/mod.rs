@@ -130,6 +130,9 @@ impl Runtime {
             let context = v8::Context::new(&scope, Default::default());
             let scope = &mut v8::ContextScope::new(&mut scope, context);
 
+            // Setup global aliases (self, global) for compatibility
+            bindings::setup_global_aliases(scope);
+
             // Always setup native bindings (not in snapshot)
             bindings::setup_console(scope, log_tx);
             bindings::setup_performance(scope);

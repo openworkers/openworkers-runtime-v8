@@ -17,6 +17,19 @@ struct ConsoleState {
     log_tx: Option<LogSender>,
 }
 
+/// Setup global aliases for compatibility with browser/Node.js code
+/// Adds `self` and `global` as aliases for `globalThis`
+pub fn setup_global_aliases(scope: &mut v8::PinScope) {
+    let code = r#"
+        globalThis.self = globalThis;
+        globalThis.global = globalThis;
+    "#;
+
+    let code_str = v8::String::new(scope, code).unwrap();
+    let script = v8::Script::compile(scope, code_str, None).unwrap();
+    script.run(scope).unwrap();
+}
+
 pub fn setup_console(scope: &mut v8::PinScope, log_tx: Option<LogSender>) {
     let context = scope.get_current_context();
     let global = context.global(scope);
