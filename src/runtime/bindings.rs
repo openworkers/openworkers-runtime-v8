@@ -258,6 +258,10 @@ pub fn setup_timers(
 
         globalThis.clearInterval = globalThis.clearTimeout;
 
+        globalThis.queueMicrotask = function(callback) {
+            Promise.resolve().then(callback);
+        };
+
         globalThis.__executeTimer = function(id) {
             const callback = globalThis.__timerCallbacks.get(id);
             if (callback) {
