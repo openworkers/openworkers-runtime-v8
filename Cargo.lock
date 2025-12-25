@@ -1577,7 +1577,7 @@ dependencies = [
 
 [[package]]
 name = "openworkers-runtime-v8"
-version = "0.5.2"
+version = "0.5.4"
 dependencies = [
  "actix-web",
  "bytes",

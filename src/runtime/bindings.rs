@@ -1393,6 +1393,27 @@ pub fn setup_response(scope: &mut v8::PinScope) {
 
                 return result;
             };
+
+            // clone() method - create a copy of the response
+            this.clone = function() {
+                if (this.bodyUsed) {
+                    throw new TypeError('Cannot clone a Response whose body has been consumed');
+                }
+
+                // Tee the body stream if it exists
+                let clonedBody = null;
+                if (this.body) {
+                    const [stream1, stream2] = this.body.tee();
+                    this.body = stream1;
+                    clonedBody = stream2;
+                }
+
+                return new Response(clonedBody, {
+                    status: this.status,
+                    statusText: this.statusText,
+                    headers: new Headers(this.headers)
+                });
+            };
         };
     "#;
 

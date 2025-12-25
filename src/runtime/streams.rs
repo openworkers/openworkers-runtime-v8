@@ -61,6 +61,54 @@ pub fn setup_readable_stream(scope: &mut v8::PinScope) {
             get locked() {
                 return this._reader !== null;
             }
+
+            tee() {
+                if (this.locked) {
+                    throw new TypeError('Cannot tee a locked stream');
+                }
+
+                const reader = this.getReader();
+                let canceled1 = false;
+                let canceled2 = false;
+                let reason1;
+                let reason2;
+
+                const branch1 = new ReadableStream({
+                    pull: async (controller) => {
+                        const { done, value } = await reader.read();
+                        if (done) {
+                            if (!canceled1) controller.close();
+                            if (!canceled2) branch2._controller.close();
+                            reader.releaseLock();
+                            return;
+                        }
+                        if (!canceled1) controller.enqueue(value);
+                        if (!canceled2) branch2._controller.enqueue(value);
+                    },
+                    cancel: (reason) => {
+                        canceled1 = true;
+                        reason1 = reason;
+                        if (canceled2) {
+                            reader.cancel(reason1);
+                        }
+                    }
+                });
+
+                const branch2 = new ReadableStream({
+                    pull: async () => {
+                        // Pulling is handled by branch1
+                    },
+                    cancel: (reason) => {
+                        canceled2 = true;
+                        reason2 = reason;
+                        if (canceled1) {
+                            reader.cancel(reason2);
+                        }
+                    }
+                });
+
+                return [branch1, branch2];
+            }
         };
 
         // ReadableStreamDefaultController
