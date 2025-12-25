@@ -1211,12 +1211,17 @@ pub fn setup_request(scope: &mut v8::PinScope) {
                     throw new TypeError('Cannot clone a Request whose body has been consumed');
                 }
 
-                // For simplicity, create a new Request with same properties
-                // Note: proper implementation would tee() the body stream
+                let clonedBody = null;
+                if (this.body) {
+                    const [stream1, stream2] = this.body.tee();
+                    this.body = stream1;
+                    clonedBody = stream2;
+                }
+
                 return new Request(this.url, {
                     method: this.method,
-                    headers: this.headers,
-                    body: this.body,
+                    headers: new Headers(this.headers),
+                    body: clonedBody,
                     mode: this.mode,
                     credentials: this.credentials,
                     cache: this.cache,
@@ -1243,6 +1248,11 @@ pub fn setup_response(scope: &mut v8::PinScope) {
                 this.ok = this.status >= 200 && this.status < 300;
                 this.bodyUsed = false;
                 this._nativeStreamId = null;
+
+                // Standard Response properties
+                this.url = init.url || '';
+                this.type = init.type || 'default';
+                this.redirected = init.redirected || false;
 
                 // Convert headers to Headers instance
                 if (init.headers instanceof Headers) {
@@ -1396,8 +1406,45 @@ pub fn setup_response(scope: &mut v8::PinScope) {
                 return new Response(clonedBody, {
                     status: this.status,
                     statusText: this.statusText,
-                    headers: new Headers(this.headers)
+                    headers: new Headers(this.headers),
+                    url: this.url,
+                    type: this.type,
+                    redirected: this.redirected
                 });
+            }
+
+            static json(data, init) {
+                init = init || {};
+                const body = JSON.stringify(data);
+                const headers = new Headers(init.headers);
+                if (!headers.has('content-type')) {
+                    headers.set('content-type', 'application/json');
+                }
+                return new Response(body, {
+                    status: init.status || 200,
+                    statusText: init.statusText || '',
+                    headers: headers
+                });
+            }
+
+            static redirect(url, status) {
+                status = status || 302;
+                if (![301, 302, 303, 307, 308].includes(status)) {
+                    throw new RangeError('Invalid redirect status code');
+                }
+                const headers = new Headers({ 'Location': url });
+                return new Response(null, {
+                    status: status,
+                    headers: headers
+                });
+            }
+
+            static error() {
+                const response = new Response(null, {
+                    status: 0,
+                    type: 'error'
+                });
+                return response;
             }
         };
     "#;
