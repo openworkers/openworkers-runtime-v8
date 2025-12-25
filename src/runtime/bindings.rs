@@ -1235,55 +1235,51 @@ pub fn setup_request(scope: &mut v8::PinScope) {
 
 pub fn setup_response(scope: &mut v8::PinScope) {
     let code = r#"
-        globalThis.Response = function(body, init) {
-            init = init || {};
-            this.status = init.status || 200;
-            this.statusText = init.statusText || '';
-            this.ok = this.status >= 200 && this.status < 300;
-            this.bodyUsed = false;
+        globalThis.Response = class Response {
+            constructor(body, init) {
+                init = init || {};
+                this.status = init.status || 200;
+                this.statusText = init.statusText || '';
+                this.ok = this.status >= 200 && this.status < 300;
+                this.bodyUsed = false;
+                this._nativeStreamId = null;
 
-            // Convert headers to Headers instance
-            if (init.headers instanceof Headers) {
-                this.headers = init.headers;
-            } else {
-                this.headers = new Headers(init.headers);
-            }
-            this._nativeStreamId = null;  // Will be set if body is a native stream
-
-            // Support different body types - all wrapped in ReadableStream
-            if (body instanceof ReadableStream) {
-                // Already a stream - use it directly
-                this.body = body;
-                // Check if this is a native stream (from fetch)
-                if (body._nativeStreamId !== undefined) {
-                    this._nativeStreamId = body._nativeStreamId;
+                // Convert headers to Headers instance
+                if (init.headers instanceof Headers) {
+                    this.headers = init.headers;
+                } else {
+                    this.headers = new Headers(init.headers);
                 }
-            } else if (body instanceof Uint8Array || body instanceof ArrayBuffer) {
-                // Binary data - wrap in a stream
-                const bytes = body instanceof Uint8Array ? body : new Uint8Array(body);
-                this.body = new ReadableStream({
-                    start(controller) {
-                        controller.enqueue(bytes);
-                        controller.close();
+
+                // Support different body types - all wrapped in ReadableStream
+                if (body instanceof ReadableStream) {
+                    this.body = body;
+                    if (body._nativeStreamId !== undefined) {
+                        this._nativeStreamId = body._nativeStreamId;
                     }
-                });
-            } else if (body === null || body === undefined) {
-                // Empty body - body should be null per spec
-                this.body = null;
-            } else {
-                // String or other - convert to bytes and wrap in stream
-                const encoder = new TextEncoder();
-                const bytes = encoder.encode(String(body));
-                this.body = new ReadableStream({
-                    start(controller) {
-                        controller.enqueue(bytes);
-                        controller.close();
-                    }
-                });
+                } else if (body instanceof Uint8Array || body instanceof ArrayBuffer) {
+                    const bytes = body instanceof Uint8Array ? body : new Uint8Array(body);
+                    this.body = new ReadableStream({
+                        start(controller) {
+                            controller.enqueue(bytes);
+                            controller.close();
+                        }
+                    });
+                } else if (body === null || body === undefined) {
+                    this.body = null;
+                } else {
+                    const encoder = new TextEncoder();
+                    const bytes = encoder.encode(String(body));
+                    this.body = new ReadableStream({
+                        start(controller) {
+                            controller.enqueue(bytes);
+                            controller.close();
+                        }
+                    });
+                }
             }
 
-            // text() method - read stream and decode to string
-            this.text = async function() {
+            async text() {
                 if (this.bodyUsed) {
                     throw new TypeError('Body has already been consumed');
                 }
@@ -1302,7 +1298,6 @@ pub fn setup_response(scope: &mut v8::PinScope) {
                     reader.releaseLock();
                 }
 
-                // Concatenate all chunks
                 const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
                 const result = new Uint8Array(totalLength);
                 let offset = 0;
@@ -1313,10 +1308,9 @@ pub fn setup_response(scope: &mut v8::PinScope) {
 
                 const decoder = new TextDecoder();
                 return decoder.decode(result);
-            };
+            }
 
-            // arrayBuffer() method - read stream and return buffer
-            this.arrayBuffer = async function() {
+            async arrayBuffer() {
                 if (this.bodyUsed) {
                     throw new TypeError('Body has already been consumed');
                 }
@@ -1335,7 +1329,6 @@ pub fn setup_response(scope: &mut v8::PinScope) {
                     reader.releaseLock();
                 }
 
-                // Concatenate all chunks
                 const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
                 const result = new Uint8Array(totalLength);
                 let offset = 0;
@@ -1345,17 +1338,14 @@ pub fn setup_response(scope: &mut v8::PinScope) {
                 }
 
                 return result.buffer;
-            };
+            }
 
-            // json() method - decode and parse
-            this.json = async function() {
+            async json() {
                 const text = await this.text();
                 return JSON.parse(text);
-            };
+            }
 
-            // Internal method to synchronously get raw body bytes
-            // Used by the Rust runtime to extract response body
-            this._getRawBody = function() {
+            _getRawBody() {
                 if (!this.body || !this.body._controller) {
                     return new Uint8Array(0);
                 }
@@ -1365,7 +1355,6 @@ pub fn setup_response(scope: &mut v8::PinScope) {
                     return new Uint8Array(0);
                 }
 
-                // Concatenate all chunks in the queue
                 const chunks = [];
                 for (const item of queue) {
                     if (item.type === 'chunk' && item.value) {
@@ -1377,12 +1366,10 @@ pub fn setup_response(scope: &mut v8::PinScope) {
                     return new Uint8Array(0);
                 }
 
-                // Single chunk - return directly
                 if (chunks.length === 1) {
                     return chunks[0];
                 }
 
-                // Multiple chunks - concatenate
                 const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
                 const result = new Uint8Array(totalLength);
                 let offset = 0;
@@ -1392,15 +1379,13 @@ pub fn setup_response(scope: &mut v8::PinScope) {
                 }
 
                 return result;
-            };
+            }
 
-            // clone() method - create a copy of the response
-            this.clone = function() {
+            clone() {
                 if (this.bodyUsed) {
                     throw new TypeError('Cannot clone a Response whose body has been consumed');
                 }
 
-                // Tee the body stream if it exists
                 let clonedBody = null;
                 if (this.body) {
                     const [stream1, stream2] = this.body.tee();
@@ -1413,7 +1398,7 @@ pub fn setup_response(scope: &mut v8::PinScope) {
                     statusText: this.statusText,
                     headers: new Headers(this.headers)
                 });
-            };
+            }
         };
     "#;
 
