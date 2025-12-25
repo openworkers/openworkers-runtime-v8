@@ -109,6 +109,42 @@ pub fn setup_console(scope: &mut v8::PinScope, log_tx: Option<LogSender>) {
     script.run(scope).unwrap();
 }
 
+pub fn setup_performance(scope: &mut v8::PinScope) {
+    use std::time::Instant;
+
+    // Store start time
+    let start = Box::into_raw(Box::new(Instant::now())) as *mut std::ffi::c_void;
+    let external = v8::External::new(scope, start);
+
+    let now_fn = v8::Function::builder(
+        |scope: &mut v8::PinScope,
+         args: v8::FunctionCallbackArguments,
+         mut retval: v8::ReturnValue| {
+            let data = args.data();
+            if let Ok(external) = v8::Local::<v8::External>::try_from(data) {
+                let start = unsafe { &*(external.value() as *const Instant) };
+                // Round to 100µs precision to mitigate timing attacks
+                let micros = start.elapsed().as_micros() / 100 * 100;
+                let elapsed_ms = micros as f64 / 1000.0;
+                retval.set(v8::Number::new(scope, elapsed_ms).into());
+            }
+        },
+    )
+    .data(external.into())
+    .build(scope)
+    .unwrap();
+
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+
+    let perf_obj = v8::Object::new(scope);
+    let now_key = v8::String::new(scope, "now").unwrap();
+    perf_obj.set(scope, now_key.into(), now_fn.into());
+
+    let perf_key = v8::String::new(scope, "performance").unwrap();
+    global.set(scope, perf_key.into(), perf_obj.into());
+}
+
 pub fn setup_timers(
     scope: &mut v8::PinScope,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,

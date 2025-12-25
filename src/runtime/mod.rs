@@ -132,6 +132,7 @@ impl Runtime {
 
             // Always setup native bindings (not in snapshot)
             bindings::setup_console(scope, log_tx);
+            bindings::setup_performance(scope);
             bindings::setup_timers(scope, scheduler_tx.clone());
             bindings::setup_fetch(
                 scope,
