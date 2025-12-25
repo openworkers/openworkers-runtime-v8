@@ -1,6 +1,6 @@
 [package]
 name = "openworkers-runtime-v8"
-version = "0.5.7"
+version = "0.5.8"
 edition = "2024"
 
 [features]

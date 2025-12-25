@@ -48,6 +48,9 @@ pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
         // Setup Blob/File - pure JS
         crate::runtime::bindings::setup_blob(scope);
 
+        // Setup FormData - pure JS (must be after Blob)
+        crate::runtime::bindings::setup_form_data(scope);
+
         // Setup AbortController/AbortSignal - pure JS
         crate::runtime::bindings::setup_abort_controller(scope);
 
