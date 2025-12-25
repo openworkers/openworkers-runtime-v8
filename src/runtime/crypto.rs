@@ -19,6 +19,9 @@ pub fn setup_crypto(scope: &mut v8::PinScope) {
     // Setup crypto.getRandomValues(typedArray)
     setup_get_random_values(scope, crypto_obj);
 
+    // Setup crypto.randomUUID()
+    setup_random_uuid(scope, crypto_obj);
+
     // Setup crypto.subtle.digest(algorithm, data)
     setup_digest(scope, subtle_obj);
 
@@ -71,6 +74,23 @@ fn setup_get_random_values(scope: &mut v8::PinScope, crypto_obj: v8::Local<v8::O
 
     let key = v8::String::new(scope, "getRandomValues").unwrap();
     crypto_obj.set(scope, key.into(), get_random_values_fn.into());
+}
+
+fn setup_random_uuid(scope: &mut v8::PinScope, crypto_obj: v8::Local<v8::Object>) {
+    let random_uuid_fn = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope,
+         _args: v8::FunctionCallbackArguments,
+         mut retval: v8::ReturnValue| {
+            let uuid = uuid::Uuid::new_v4().to_string();
+            let uuid_str = v8::String::new(scope, &uuid).unwrap();
+            retval.set(uuid_str.into());
+        },
+    )
+    .unwrap();
+
+    let key = v8::String::new(scope, "randomUUID").unwrap();
+    crypto_obj.set(scope, key.into(), random_uuid_fn.into());
 }
 
 fn setup_digest(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Object>) {

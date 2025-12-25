@@ -1,6 +1,6 @@
 [package]
 name = "openworkers-runtime-v8"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 
 [features]
@@ -20,23 +20,24 @@ tokio = { version = "1.43", features = ["full"] }
 futures = "0.3"
 
 # Logging
-log = "0.4"
+log = "0.4.29"
 env_logger = "0.11"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = "1.0.147"
 
 # HTTP
 bytes = { version = "1.11", features = ["serde"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "json", "stream"] }
 
 # Crypto
 ring = "0.17"
+uuid = { version = "1", features = ["v4"] }
 
 # CPU time measurement (Unix only)
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc = "0.2.178"
 
 # Signal handling (for CPU time enforcement on Linux)
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -44,12 +45,12 @@ signal-hook = "0.3"
 signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 
 # Optional dependencies
-actix-web = { version = "4.12.0", features = ["macros"], optional = true }
+actix-web = { version = "4.12.1", features = ["macros"], optional = true }
 tokio-stream = "0.1"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
-ntest = "0.9"
+ntest = "0.9.5"
 
 [[bench]]
 name = "generic_benchmark"
