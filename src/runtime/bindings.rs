@@ -605,6 +605,87 @@ pub fn setup_blob(scope: &mut v8::PinScope) {
     script.run(scope).unwrap();
 }
 
+pub fn setup_form_data(scope: &mut v8::PinScope) {
+    let code = r#"
+        globalThis.FormData = class FormData {
+            constructor() {
+                this._entries = [];
+            }
+
+            append(name, value, filename) {
+                if (value instanceof Blob && filename === undefined && value instanceof File) {
+                    filename = value.name;
+                }
+                this._entries.push([String(name), value, filename]);
+            }
+
+            delete(name) {
+                const strName = String(name);
+                this._entries = this._entries.filter(([k]) => k !== strName);
+            }
+
+            get(name) {
+                const strName = String(name);
+                const entry = this._entries.find(([k]) => k === strName);
+                return entry ? entry[1] : null;
+            }
+
+            getAll(name) {
+                const strName = String(name);
+                return this._entries.filter(([k]) => k === strName).map(([, v]) => v);
+            }
+
+            has(name) {
+                const strName = String(name);
+                return this._entries.some(([k]) => k === strName);
+            }
+
+            set(name, value, filename) {
+                const strName = String(name);
+                if (value instanceof Blob && filename === undefined && value instanceof File) {
+                    filename = value.name;
+                }
+                // Remove all existing entries with this name
+                this._entries = this._entries.filter(([k]) => k !== strName);
+                // Add the new entry
+                this._entries.push([strName, value, filename]);
+            }
+
+            *entries() {
+                for (const [name, value] of this._entries) {
+                    yield [name, value];
+                }
+            }
+
+            *keys() {
+                for (const [name] of this._entries) {
+                    yield name;
+                }
+            }
+
+            *values() {
+                for (const [, value] of this._entries) {
+                    yield value;
+                }
+            }
+
+            forEach(callback, thisArg) {
+                for (const [name, value] of this._entries) {
+                    callback.call(thisArg, value, name, this);
+                }
+            }
+
+            [Symbol.iterator]() {
+                return this.entries();
+            }
+        };
+    "#;
+
+    let code_str = v8::String::new(scope, code).unwrap();
+    let script = v8::Script::compile(scope, code_str, None).unwrap();
+    script.run(scope).unwrap();
+}
+
 pub fn setup_abort_controller(scope: &mut v8::PinScope) {
     let code = r#"
         globalThis.AbortSignal = class AbortSignal {
@@ -1212,6 +1293,95 @@ pub fn setup_request(scope: &mut v8::PinScope) {
                 return JSON.parse(text);
             }
 
+            async formData() {
+                const contentType = this.headers.get('content-type') || '';
+                const formData = new FormData();
+
+                if (contentType.includes('application/x-www-form-urlencoded')) {
+                    const text = await this.text();
+                    const params = new URLSearchParams(text);
+                    for (const [key, value] of params) {
+                        formData.append(key, value);
+                    }
+                } else if (contentType.includes('multipart/form-data')) {
+                    const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;\s]+))/);
+                    if (!boundaryMatch) {
+                        throw new TypeError('Missing boundary in multipart/form-data');
+                    }
+                    const boundary = '--' + (boundaryMatch[1] || boundaryMatch[2]);
+                    const boundaryBytes = new TextEncoder().encode(boundary);
+                    const crlfcrlf = new Uint8Array([13, 10, 13, 10]); // \r\n\r\n
+                    const crlf = new Uint8Array([13, 10]); // \r\n
+
+                    const buffer = await this.arrayBuffer();
+                    const data = new Uint8Array(buffer);
+
+                    // Find byte pattern in array
+                    const findPattern = (arr, pattern, start = 0) => {
+                        outer: for (let i = start; i <= arr.length - pattern.length; i++) {
+                            for (let j = 0; j < pattern.length; j++) {
+                                if (arr[i + j] !== pattern[j]) continue outer;
+                            }
+                            return i;
+                        }
+                        return -1;
+                    };
+
+                    let pos = findPattern(data, boundaryBytes);
+                    while (pos !== -1) {
+                        pos += boundaryBytes.length;
+
+                        // Check for final boundary (--)
+                        if (data[pos] === 45 && data[pos + 1] === 45) break;
+
+                        // Skip CRLF after boundary
+                        if (data[pos] === 13 && data[pos + 1] === 10) pos += 2;
+
+                        // Find header end
+                        const headerEnd = findPattern(data, crlfcrlf, pos);
+                        if (headerEnd === -1) break;
+
+                        // Parse headers as text
+                        const headerBytes = data.slice(pos, headerEnd);
+                        const headerText = new TextDecoder().decode(headerBytes);
+
+                        // Find next boundary for body end
+                        const nextBoundary = findPattern(data, boundaryBytes, headerEnd + 4);
+                        const bodyEnd = nextBoundary !== -1 ? nextBoundary - 2 : data.length; // -2 for CRLF before boundary
+
+                        // Extract body as bytes
+                        const bodyBytes = data.slice(headerEnd + 4, bodyEnd);
+
+                        const nameMatch = headerText.match(/name="([^"]+)"/);
+                        if (!nameMatch) {
+                            pos = nextBoundary;
+                            continue;
+                        }
+
+                        const name = nameMatch[1];
+                        const filenameMatch = headerText.match(/filename="([^"]+)"/);
+
+                        if (filenameMatch) {
+                            const filename = filenameMatch[1];
+                            const contentTypeMatch = headerText.match(/Content-Type:\s*([^\r\n]+)/i);
+                            const fileType = contentTypeMatch ? contentTypeMatch[1].trim() : 'application/octet-stream';
+                            const file = new File([bodyBytes], filename, { type: fileType });
+                            formData.append(name, file, filename);
+                        } else {
+                            // Text field - decode as UTF-8
+                            const value = new TextDecoder().decode(bodyBytes);
+                            formData.append(name, value);
+                        }
+
+                        pos = nextBoundary;
+                    }
+                } else {
+                    throw new TypeError('Invalid content-type for formData()');
+                }
+
+                return formData;
+            }
+
             async arrayBuffer() {
                 if (this.bodyUsed) {
                     throw new TypeError('Body has already been consumed');
@@ -1393,6 +1563,99 @@ pub fn setup_response(scope: &mut v8::PinScope) {
             async json() {
                 const text = await this.text();
                 return JSON.parse(text);
+            }
+
+            async formData() {
+                const contentType = this.headers.get('content-type') || '';
+                const formData = new FormData();
+
+                if (contentType.includes('application/x-www-form-urlencoded')) {
+                    const text = await this.text();
+                    const params = new URLSearchParams(text);
+
+                    for (const [key, value] of params) {
+                        formData.append(key, value);
+                    }
+                } else if (contentType.includes('multipart/form-data')) {
+                    const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;\s]+))/);
+
+                    if (!boundaryMatch) {
+                        throw new TypeError('Missing boundary in multipart/form-data');
+                    }
+
+                    const boundary = '--' + (boundaryMatch[1] || boundaryMatch[2]);
+                    const boundaryBytes = new TextEncoder().encode(boundary);
+                    const crlfcrlf = new Uint8Array([13, 10, 13, 10]); // \r\n\r\n
+
+                    const buffer = await this.arrayBuffer();
+                    const data = new Uint8Array(buffer);
+
+                    // Find byte pattern in array
+                    const findPattern = (arr, pattern, start = 0) => {
+                        outer: for (let i = start; i <= arr.length - pattern.length; i++) {
+                            for (let j = 0; j < pattern.length; j++) {
+                                if (arr[i + j] !== pattern[j]) continue outer;
+                            }
+                            return i;
+                        }
+                        return -1;
+                    };
+
+                    let pos = findPattern(data, boundaryBytes);
+
+                    while (pos !== -1) {
+                        pos += boundaryBytes.length;
+
+                        // Check for final boundary (--)
+                        if (data[pos] === 45 && data[pos + 1] === 45) break;
+
+                        // Skip CRLF after boundary
+                        if (data[pos] === 13 && data[pos + 1] === 10) pos += 2;
+
+                        // Find header end
+                        const headerEnd = findPattern(data, crlfcrlf, pos);
+                        if (headerEnd === -1) break;
+
+                        // Parse headers as text
+                        const headerBytes = data.slice(pos, headerEnd);
+                        const headerText = new TextDecoder().decode(headerBytes);
+
+                        // Find next boundary for body end
+                        const nextBoundary = findPattern(data, boundaryBytes, headerEnd + 4);
+                        const bodyEnd = nextBoundary !== -1 ? nextBoundary - 2 : data.length; // -2 for CRLF before boundary
+
+                        // Extract body as bytes
+                        const bodyBytes = data.slice(headerEnd + 4, bodyEnd);
+
+                        const nameMatch = headerText.match(/name="([^"]+)"/);
+
+                        if (!nameMatch) {
+                            pos = nextBoundary;
+                            continue;
+                        }
+
+                        const name = nameMatch[1];
+                        const filenameMatch = headerText.match(/filename="([^"]+)"/);
+
+                        if (filenameMatch) {
+                            const filename = filenameMatch[1];
+                            const contentTypeMatch = headerText.match(/Content-Type:\s*([^\r\n]+)/i);
+                            const fileType = contentTypeMatch ? contentTypeMatch[1].trim() : 'application/octet-stream';
+                            const file = new File([bodyBytes], filename, { type: fileType });
+                            formData.append(name, file, filename);
+                        } else {
+                            // Text field - decode as UTF-8
+                            const value = new TextDecoder().decode(bodyBytes);
+                            formData.append(name, value);
+                        }
+
+                        pos = nextBoundary;
+                    }
+                } else {
+                    throw new TypeError('Invalid content-type for formData()');
+                }
+
+                return formData;
             }
 
             _getRawBody() {
