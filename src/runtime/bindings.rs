@@ -93,26 +93,37 @@ pub fn setup_console(scope: &mut v8::PinScope, log_tx: Option<LogSender>) {
 
     // Setup console object using JS that calls __console_log
     let code = r#"
+        function __formatArg(a) {
+            if (a instanceof Error) {
+                return a.stack || (a.name + ': ' + a.message);
+            }
+
+            if (typeof a === 'object' && a !== null) {
+                try {
+                    return JSON.stringify(a);
+                } catch (e) {
+                    return String(a);
+                }
+            }
+
+            return String(a);
+        }
+
         globalThis.console = {
             log: function(...args) {
-                const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
-                __console_log(2, msg);
+                __console_log(2, args.map(__formatArg).join(' '));
             },
             info: function(...args) {
-                const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
-                __console_log(2, msg);
+                __console_log(2, args.map(__formatArg).join(' '));
             },
             warn: function(...args) {
-                const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
-                __console_log(1, msg);
+                __console_log(1, args.map(__formatArg).join(' '));
             },
             error: function(...args) {
-                const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
-                __console_log(0, msg);
+                __console_log(0, args.map(__formatArg).join(' '));
             },
             debug: function(...args) {
-                const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
-                __console_log(3, msg);
+                __console_log(3, args.map(__formatArg).join(' '));
             }
         };
     "#;
@@ -513,10 +524,22 @@ pub fn setup_fetch(
             }
 
             return new Promise((resolve, reject) => {
+                // Convert Headers instance to plain object
+                let headersObj = {};
+                const h = options.headers;
+
+                if (h instanceof Headers) {
+                    for (const [key, value] of h) {
+                        headersObj[key] = value;
+                    }
+                } else if (h && typeof h === 'object') {
+                    headersObj = h;
+                }
+
                 const fetchOptions = {
                     url: url,
                     method: options.method || 'GET',
-                    headers: options.headers || {},
+                    headers: headersObj,
                     body: body
                 };
 
