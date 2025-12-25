@@ -354,12 +354,70 @@ impl Runtime {
         let context = v8::Local::new(&scope, &self.context);
         let scope = &mut v8::ContextScope::new(&mut scope, context);
 
-        let code = v8::String::new(scope, script).ok_or("Failed to create script")?;
-        let script_obj =
-            v8::Script::compile(scope, code, None).ok_or("Failed to compile script")?;
-        script_obj.run(scope).ok_or("Failed to execute script")?;
+        let code = v8::String::new(scope, script).ok_or("Failed to create script string")?;
 
-        Ok(())
+        // Use TryCatch to capture JavaScript exceptions
+        let tc_scope = pin!(v8::TryCatch::new(scope));
+        let mut tc_scope = tc_scope.init();
+
+        let script_obj = match v8::Script::compile(&mut tc_scope, code, None) {
+            Some(s) => s,
+            None => {
+                if let Some(exception) = tc_scope.exception() {
+                    let msg = exception
+                        .to_string(&tc_scope)
+                        .map(|s| s.to_rust_string_lossy(&*tc_scope))
+                        .unwrap_or_else(|| "Unknown error".to_string());
+
+                    // Try to get more detail from message
+                    if let Some(message) = tc_scope.message() {
+                        let line = message.get_line_number(&tc_scope).unwrap_or(0);
+                        let col = message.get_start_column();
+                        let source_line = message
+                            .get_source_line(&tc_scope)
+                            .map(|s| s.to_rust_string_lossy(&*tc_scope))
+                            .unwrap_or_default();
+
+                        return Err(format!(
+                            "SyntaxError at line {}, column {}: {}\n  > {}",
+                            line, col, msg, source_line
+                        ));
+                    }
+
+                    return Err(format!("SyntaxError: {}", msg));
+                }
+
+                return Err("Failed to compile script".to_string());
+            }
+        };
+
+        match script_obj.run(&mut tc_scope) {
+            Some(_) => Ok(()),
+            None => {
+                if let Some(exception) = tc_scope.exception() {
+                    let msg = exception
+                        .to_string(&tc_scope)
+                        .map(|s| s.to_rust_string_lossy(&*tc_scope))
+                        .unwrap_or_else(|| "Unknown error".to_string());
+
+                    // Try to get stack trace
+                    if let Some(stack) = tc_scope.stack_trace() {
+                        let stack_str = stack
+                            .to_string(&tc_scope)
+                            .map(|s| s.to_rust_string_lossy(&*tc_scope))
+                            .unwrap_or_default();
+
+                        if !stack_str.is_empty() {
+                            return Err(format!("{}\n{}", msg, stack_str));
+                        }
+                    }
+
+                    return Err(msg);
+                }
+
+                Err("Failed to execute script".to_string())
+            }
+        }
     }
 }
 
