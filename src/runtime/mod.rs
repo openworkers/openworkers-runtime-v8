@@ -1,6 +1,5 @@
 pub mod bindings;
 pub mod crypto;
-pub mod fetch;
 pub mod stream_manager;
 pub mod streams;
 pub mod text_encoding;
@@ -13,7 +12,10 @@ use tokio::sync::mpsc;
 use v8;
 
 use crate::security::CustomAllocator;
-use openworkers_core::{HttpRequest, HttpResponseMeta, LogSender, RuntimeLimits};
+use openworkers_core::{
+    HttpRequest, HttpResponseMeta, Operation, OperationResult, OperationsHandle, ResponseBody,
+    RuntimeLimits,
+};
 
 pub type CallbackId = u64;
 
@@ -24,6 +26,7 @@ pub enum SchedulerMessage {
     FetchStreaming(CallbackId, HttpRequest), // Fetch with streaming (stream created internally)
     StreamRead(CallbackId, stream_manager::StreamId), // Read next chunk from stream
     StreamCancel(stream_manager::StreamId),  // Cancel/close a stream
+    Log(openworkers_core::LogLevel, String), // Log message (fire-and-forget)
     Shutdown,
 }
 
@@ -58,7 +61,6 @@ pub struct Runtime {
 impl Runtime {
     pub fn new(
         limits: Option<RuntimeLimits>,
-        log_tx: Option<LogSender>,
     ) -> (
         Self,
         mpsc::UnboundedReceiver<SchedulerMessage>,
@@ -134,7 +136,7 @@ impl Runtime {
             bindings::setup_global_aliases(scope);
 
             // Always setup native bindings (not in snapshot)
-            bindings::setup_console(scope, log_tx);
+            bindings::setup_console(scope, scheduler_tx.clone());
             bindings::setup_performance(scope);
             bindings::setup_timers(scope, scheduler_tx.clone());
             bindings::setup_fetch(
@@ -428,6 +430,7 @@ pub async fn run_event_loop(
     mut scheduler_rx: mpsc::UnboundedReceiver<SchedulerMessage>,
     callback_tx: mpsc::UnboundedSender<CallbackMessage>,
     stream_manager: Arc<stream_manager::StreamManager>,
+    ops: OperationsHandle,
 ) {
     let mut running_tasks: HashMap<CallbackId, tokio::task::JoinHandle<()>> = HashMap::new();
 
@@ -446,8 +449,10 @@ pub async fn run_event_loop(
                 let handle = tokio::spawn(async move {
                     let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
                     interval.tick().await;
+
                     loop {
                         interval.tick().await;
+
                         if callback_tx
                             .send(CallbackMessage::ExecuteInterval(callback_id))
                             .is_err()
@@ -459,11 +464,15 @@ pub async fn run_event_loop(
                 running_tasks.insert(callback_id, handle);
             }
             SchedulerMessage::FetchStreaming(promise_id, request) => {
-                // Fetch with real-time streaming
+                // Fetch via runner's OperationsHandler
                 let callback_tx = callback_tx.clone();
                 let manager = stream_manager.clone();
+                let ops = ops.clone();
+
                 tokio::spawn(async move {
-                    match fetch::execute_fetch_streaming(request, manager).await {
+                    let result = execute_fetch_via_ops(request, manager, ops).await;
+
+                    match result {
                         Ok((meta, stream_id)) => {
                             let _ = callback_tx.send(CallbackMessage::FetchStreamingSuccess(
                                 promise_id, meta, stream_id,
@@ -479,6 +488,7 @@ pub async fn run_event_loop(
                 // Read next chunk from a stream
                 let callback_tx = callback_tx.clone();
                 let manager = stream_manager.clone();
+
                 tokio::spawn(async move {
                     let chunk = match manager.read_chunk(stream_id).await {
                         Ok(chunk) => chunk,
@@ -496,6 +506,13 @@ pub async fn run_event_loop(
                     handle.abort();
                 }
             }
+            SchedulerMessage::Log(level, message) => {
+                // Fire-and-forget log via ops
+                let ops = ops.clone();
+                tokio::spawn(async move {
+                    let _ = ops.handle(Operation::Log { level, message }).await;
+                });
+            }
             SchedulerMessage::Shutdown => {
                 for (_, handle) in running_tasks.drain() {
                     handle.abort();
@@ -504,6 +521,83 @@ pub async fn run_event_loop(
             }
         }
     }
+}
+
+/// Execute fetch via OperationsHandler, converting HttpResponse to StreamManager pattern
+async fn execute_fetch_via_ops(
+    request: HttpRequest,
+    stream_manager: Arc<stream_manager::StreamManager>,
+    ops: OperationsHandle,
+) -> Result<(HttpResponseMeta, stream_manager::StreamId), String> {
+    // Call the OperationsHandler with Fetch operation
+    let result = ops.handle(Operation::Fetch(request)).await;
+
+    // Extract the HTTP response
+    let response = match result {
+        OperationResult::Http(r) => r?,
+        OperationResult::Ack => return Err("Unexpected Ack result for fetch".into()),
+    };
+
+    // Convert HttpResponse to (HttpResponseMeta, StreamId)
+    let meta = HttpResponseMeta {
+        status: response.status,
+        status_text: String::new(), // TODO: derive from status code
+        headers: response.headers.into_iter().collect(),
+    };
+
+    // Create a stream in the StreamManager
+    let stream_id = stream_manager.create_stream("ops_fetch".to_string());
+
+    // Handle the response body
+    match response.body {
+        ResponseBody::None => {
+            // No body - just signal done
+            let _ = stream_manager
+                .write_chunk(stream_id, stream_manager::StreamChunk::Done)
+                .await;
+        }
+        ResponseBody::Bytes(bytes) => {
+            // Buffered body - write all bytes then done
+            let _ = stream_manager
+                .write_chunk(stream_id, stream_manager::StreamChunk::Data(bytes))
+                .await;
+            let _ = stream_manager
+                .write_chunk(stream_id, stream_manager::StreamChunk::Done)
+                .await;
+        }
+        ResponseBody::Stream(mut rx) => {
+            // Streaming body - spawn task to forward chunks
+            let manager = stream_manager.clone();
+
+            tokio::spawn(async move {
+                while let Some(result) = rx.recv().await {
+                    match result {
+                        Ok(bytes) => {
+                            if manager
+                                .write_chunk(stream_id, stream_manager::StreamChunk::Data(bytes))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = manager
+                                .write_chunk(stream_id, stream_manager::StreamChunk::Error(e))
+                                .await;
+                            return;
+                        }
+                    }
+                }
+
+                let _ = manager
+                    .write_chunk(stream_id, stream_manager::StreamChunk::Done)
+                    .await;
+            });
+        }
+    }
+
+    Ok((meta, stream_id))
 }
 
 impl Drop for Runtime {

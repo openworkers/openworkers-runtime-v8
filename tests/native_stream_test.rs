@@ -43,7 +43,7 @@ async fn test_native_stream_bridge() {
         "#,
     );
 
-    let mut worker = Worker::new(script, None, None)
+    let mut worker = Worker::new(script, None)
         .await
         .expect("Worker creation failed");
 
@@ -149,7 +149,7 @@ async fn test_native_stream_cancel() {
         "#,
     );
 
-    let mut worker = Worker::new(script, None, None)
+    let mut worker = Worker::new(script, None)
         .await
         .expect("Worker creation failed");
 
@@ -208,7 +208,7 @@ async fn test_native_stream_error() {
         "#,
     );
 
-    let mut worker = Worker::new(script, None, None)
+    let mut worker = Worker::new(script, None)
         .await
         .expect("Worker creation failed");
 

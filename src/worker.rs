@@ -1,7 +1,7 @@
 use crate::runtime::{Runtime, run_event_loop};
 use crate::security::{CpuEnforcer, TimeoutGuard};
 use openworkers_core::{
-    HttpResponse, LogSender, RequestBody, ResponseBody, RuntimeLimits, Script, Task,
+    HttpResponse, OperationsHandle, RequestBody, ResponseBody, RuntimeLimits, Script, Task,
     TerminationReason,
 };
 use std::sync::Arc;
@@ -40,12 +40,15 @@ impl Worker {
 }
 
 impl Worker {
-    pub async fn new(
+    /// Create a new worker with an OperationsHandler
+    ///
+    /// All operations (fetch, log, etc.) go through the runner's OperationsHandler.
+    pub async fn new_with_ops(
         script: Script,
-        log_tx: Option<LogSender>,
         limits: Option<RuntimeLimits>,
+        ops: OperationsHandle,
     ) -> Result<Self, TerminationReason> {
-        let (mut runtime, scheduler_rx, callback_tx) = Runtime::new(limits, log_tx);
+        let (mut runtime, scheduler_rx, callback_tx) = Runtime::new(limits);
 
         // Setup addEventListener
         setup_event_listener(&mut runtime).map_err(|e| {
@@ -68,9 +71,9 @@ impl Worker {
         // Get stream_manager for event loop
         let stream_manager = runtime.stream_manager.clone();
 
-        // Start event loop in background
+        // Start event loop in background (with optional Operations handle)
         let event_loop_handle = tokio::spawn(async move {
-            run_event_loop(scheduler_rx, callback_tx, stream_manager).await;
+            run_event_loop(scheduler_rx, callback_tx, stream_manager, ops).await;
         });
 
         Ok(Self {
@@ -78,6 +81,18 @@ impl Worker {
             _event_loop_handle: event_loop_handle,
             aborted: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Create a new worker with default DirectOperations (for testing)
+    ///
+    /// Note: DirectOperations returns errors for fetch operations.
+    /// In production, use `new_with_ops` with a real OperationsHandler.
+    pub async fn new(
+        script: Script,
+        limits: Option<RuntimeLimits>,
+    ) -> Result<Self, TerminationReason> {
+        let ops: OperationsHandle = Arc::new(openworkers_core::DefaultOps);
+        Self::new_with_ops(script, limits, ops).await
     }
 
     /// Abort the worker execution
@@ -661,12 +676,8 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
 }
 
 impl openworkers_core::Worker for Worker {
-    async fn new(
-        script: Script,
-        log_tx: Option<LogSender>,
-        limits: Option<RuntimeLimits>,
-    ) -> Result<Self, TerminationReason> {
-        Worker::new(script, log_tx, limits).await
+    async fn new(script: Script, limits: Option<RuntimeLimits>) -> Result<Self, TerminationReason> {
+        Worker::new(script, limits).await
     }
 
     async fn exec(&mut self, task: Task) -> Result<(), TerminationReason> {

@@ -1,5 +1,5 @@
 use super::{CallbackId, SchedulerMessage};
-use openworkers_core::{HttpMethod, HttpRequest, LogEvent, LogLevel, LogSender, RequestBody};
+use openworkers_core::{HttpMethod, HttpRequest, LogLevel, RequestBody};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -11,10 +11,10 @@ struct TimerState {
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
 }
 
-// State for console logging
+// State for console logging (uses scheduler to send to ops)
 #[derive(Clone)]
 struct ConsoleState {
-    log_tx: Option<LogSender>,
+    scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
 }
 
 /// Setup global aliases for compatibility with browser/Node.js code
@@ -30,12 +30,15 @@ pub fn setup_global_aliases(scope: &mut v8::PinScope) {
     script.run(scope).unwrap();
 }
 
-pub fn setup_console(scope: &mut v8::PinScope, log_tx: Option<LogSender>) {
+pub fn setup_console(
+    scope: &mut v8::PinScope,
+    scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+) {
     let context = scope.get_current_context();
     let global = context.global(scope);
 
     // Store console state in External
-    let console_state = ConsoleState { log_tx };
+    let console_state = ConsoleState { scheduler_tx };
     let state_ptr = Box::into_raw(Box::new(console_state)) as *mut std::ffi::c_void;
     let external = v8::External::new(scope, state_ptr);
 
@@ -53,6 +56,9 @@ pub fn setup_console(scope: &mut v8::PinScope, log_tx: Option<LogSender>) {
             let level = match level_num {
                 0 => LogLevel::Error,
                 1 => LogLevel::Warn,
+                2 => LogLevel::Info,
+                3 => LogLevel::Debug,
+                4 => LogLevel::Trace,
                 _ => LogLevel::Info,
             };
 
@@ -62,26 +68,13 @@ pub fn setup_console(scope: &mut v8::PinScope, log_tx: Option<LogSender>) {
                 .map(|s| s.to_rust_string_lossy(scope))
                 .unwrap_or_default();
 
-            // Get state from External (data)
+            // Send log via scheduler -> ops
             let data = args.data();
+
             if let Ok(external) = v8::Local::<v8::External>::try_from(data) {
                 let state = unsafe { &*(external.value() as *const ConsoleState) };
-                if let Some(ref tx) = state.log_tx {
-                    let _ = tx.send(LogEvent {
-                        level,
-                        message: msg.clone(),
-                    });
-                }
+                let _ = state.scheduler_tx.send(SchedulerMessage::Log(level, msg));
             }
-
-            // Also print to stdout for debugging
-            let prefix = match level {
-                LogLevel::Error => "[ERROR]",
-                LogLevel::Warn => "[WARN]",
-                LogLevel::Info | LogLevel::Log => "[LOG]",
-                LogLevel::Debug | LogLevel::Trace => "[DEBUG]",
-            };
-            println!("{} {}", prefix, msg);
         },
     )
     .data(external.into())
@@ -124,6 +117,9 @@ pub fn setup_console(scope: &mut v8::PinScope, log_tx: Option<LogSender>) {
             },
             debug: function(...args) {
                 __console_log(3, args.map(__formatArg).join(' '));
+            },
+            trace: function(...args) {
+                __console_log(4, args.map(__formatArg).join(' '));
             }
         };
     "#;

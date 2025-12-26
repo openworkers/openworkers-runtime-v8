@@ -10,6 +10,7 @@ pub use worker::Worker;
 // Re-export common types from openworkers-common
 pub use openworkers_core::{
     FetchInit, HttpMethod, HttpRequest, HttpResponse, HttpResponseMeta, LogEvent, LogLevel,
-    LogSender, RequestBody, ResponseBody, ResponseSender, RuntimeLimits, ScheduledInit, Script,
-    Task, TaskType, TerminationReason, Worker as WorkerTrait,
+    Operation, OperationResult, OperationsHandle, OperationsHandler, RequestBody, ResponseBody,
+    ResponseSender, RuntimeLimits, ScheduledInit, Script, Task, TaskType, TerminationReason,
+    Worker as WorkerTrait,
 };
