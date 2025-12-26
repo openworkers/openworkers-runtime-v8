@@ -13,8 +13,8 @@ use v8;
 
 use crate::security::CustomAllocator;
 use openworkers_core::{
-    HttpRequest, HttpResponseMeta, Operation, OperationResult, OperationsHandle, ResponseBody,
-    RuntimeLimits,
+    HttpRequest, HttpResponseMeta, KvOp, KvResult, Operation, OperationResult, OperationsHandle,
+    ResponseBody, RuntimeLimits, StorageOp, StorageResult,
 };
 
 pub type CallbackId = u64;
@@ -24,6 +24,9 @@ pub enum SchedulerMessage {
     ScheduleInterval(CallbackId, u64),
     ClearTimer(CallbackId),
     FetchStreaming(CallbackId, HttpRequest), // Fetch with streaming (stream created internally)
+    BindingFetch(CallbackId, String, HttpRequest), // Fetch via binding (binding_name, request)
+    BindingStorage(CallbackId, String, StorageOp), // Storage operation (binding_name, op)
+    BindingKv(CallbackId, String, KvOp),     // KV operation (binding_name, op)
     StreamRead(CallbackId, stream_manager::StreamId), // Read next chunk from stream
     StreamCancel(stream_manager::StreamId),  // Cancel/close a stream
     Log(openworkers_core::LogLevel, String), // Log message (fire-and-forget)
@@ -36,6 +39,8 @@ pub enum CallbackMessage {
     FetchError(CallbackId, String),
     FetchStreamingSuccess(CallbackId, HttpResponseMeta, stream_manager::StreamId), // Fetch metadata + stream ID
     StreamChunk(CallbackId, stream_manager::StreamChunk), // Stream chunk ready
+    StorageResult(CallbackId, StorageResult),             // Storage operation result
+    KvResult(CallbackId, KvResult),                       // KV operation result
 }
 
 pub struct Runtime {
@@ -330,6 +335,178 @@ impl Runtime {
                         callback.call(scope, recv.into(), &[result_obj.into()]);
                     }
                 }
+                CallbackMessage::StorageResult(callback_id, storage_result) => {
+                    // Storage operation result - call the JavaScript callback
+                    let callback_opt = {
+                        let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback_global) = callback_opt {
+                        let callback = v8::Local::new(scope, &callback_global);
+                        let recv = v8::undefined(scope);
+
+                        // Create result object based on StorageResult type
+                        let result_obj = v8::Object::new(scope);
+
+                        match storage_result {
+                            StorageResult::Body(maybe_body) => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, true).into(),
+                                );
+
+                                if let Some(body) = maybe_body {
+                                    let vec = body;
+                                    let len = vec.len();
+                                    let backing_store =
+                                        v8::ArrayBuffer::new_backing_store_from_vec(vec);
+                                    let array_buffer = v8::ArrayBuffer::with_backing_store(
+                                        scope,
+                                        &backing_store.make_shared(),
+                                    );
+                                    let uint8_array =
+                                        v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
+                                    let body_key = v8::String::new(scope, "body").unwrap();
+                                    result_obj.set(scope, body_key.into(), uint8_array.into());
+                                }
+                            }
+                            StorageResult::Head { size, etag } => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, true).into(),
+                                );
+
+                                let size_key = v8::String::new(scope, "size").unwrap();
+                                let size_val = v8::Number::new(scope, size as f64);
+                                result_obj.set(scope, size_key.into(), size_val.into());
+
+                                if let Some(etag_str) = etag {
+                                    let etag_key = v8::String::new(scope, "etag").unwrap();
+                                    let etag_val = v8::String::new(scope, &etag_str).unwrap();
+                                    result_obj.set(scope, etag_key.into(), etag_val.into());
+                                }
+                            }
+                            StorageResult::List { keys, truncated } => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, true).into(),
+                                );
+
+                                let arr = v8::Array::new(scope, keys.len() as i32);
+                                for (i, key) in keys.iter().enumerate() {
+                                    let key_val = v8::String::new(scope, key).unwrap();
+                                    arr.set_index(scope, i as u32, key_val.into());
+                                }
+                                let keys_key = v8::String::new(scope, "keys").unwrap();
+                                result_obj.set(scope, keys_key.into(), arr.into());
+
+                                let truncated_key = v8::String::new(scope, "truncated").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    truncated_key.into(),
+                                    v8::Boolean::new(scope, truncated).into(),
+                                );
+                            }
+                            StorageResult::Error(err_msg) => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, false).into(),
+                                );
+
+                                let error_key = v8::String::new(scope, "error").unwrap();
+                                let error_val = v8::String::new(scope, &err_msg).unwrap();
+                                result_obj.set(scope, error_key.into(), error_val.into());
+                            }
+                        }
+
+                        callback.call(scope, recv.into(), &[result_obj.into()]);
+                    }
+                }
+                CallbackMessage::KvResult(callback_id, kv_result) => {
+                    // KV operation result - call the JavaScript callback
+                    let callback_opt = {
+                        let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback_global) = callback_opt {
+                        let callback = v8::Local::new(scope, &callback_global);
+                        let recv = v8::undefined(scope);
+
+                        // Create result object based on KvResult type
+                        let result_obj = v8::Object::new(scope);
+
+                        match kv_result {
+                            KvResult::Value(maybe_value) => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, true).into(),
+                                );
+
+                                let value_key = v8::String::new(scope, "value").unwrap();
+                                if let Some(value) = maybe_value {
+                                    let value_val = v8::String::new(scope, &value).unwrap();
+                                    result_obj.set(scope, value_key.into(), value_val.into());
+                                } else {
+                                    result_obj.set(scope, value_key.into(), v8::null(scope).into());
+                                }
+                            }
+                            KvResult::Ok => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, true).into(),
+                                );
+                            }
+                            KvResult::Keys(keys) => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, true).into(),
+                                );
+
+                                // Create JS array from keys
+                                let keys_array =
+                                    v8::Array::new(scope, keys.len().try_into().unwrap());
+
+                                for (i, key) in keys.iter().enumerate() {
+                                    let key_val = v8::String::new(scope, key).unwrap();
+                                    keys_array.set_index(scope, i as u32, key_val.into());
+                                }
+
+                                let keys_key = v8::String::new(scope, "keys").unwrap();
+                                result_obj.set(scope, keys_key.into(), keys_array.into());
+                            }
+                            KvResult::Error(err_msg) => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, false).into(),
+                                );
+
+                                let error_key = v8::String::new(scope, "error").unwrap();
+                                let error_val = v8::String::new(scope, &err_msg).unwrap();
+                                result_obj.set(scope, error_key.into(), error_val.into());
+                            }
+                        }
+
+                        callback.call(scope, recv.into(), &[result_obj.into()]);
+                    }
+                }
             }
         }
 
@@ -484,6 +661,71 @@ pub async fn run_event_loop(
                     }
                 });
             }
+            SchedulerMessage::BindingFetch(promise_id, binding_name, request) => {
+                // Fetch via binding (runner injects auth)
+                let callback_tx = callback_tx.clone();
+                let manager = stream_manager.clone();
+                let ops = ops.clone();
+
+                tokio::spawn(async move {
+                    let result =
+                        execute_binding_fetch_via_ops(binding_name, request, manager, ops).await;
+
+                    match result {
+                        Ok((meta, stream_id)) => {
+                            let _ = callback_tx.send(CallbackMessage::FetchStreamingSuccess(
+                                promise_id, meta, stream_id,
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = callback_tx.send(CallbackMessage::FetchError(promise_id, e));
+                        }
+                    }
+                });
+            }
+            SchedulerMessage::BindingStorage(callback_id, binding_name, storage_op) => {
+                // Storage operation via binding
+                let callback_tx = callback_tx.clone();
+                let ops = ops.clone();
+
+                tokio::spawn(async move {
+                    let result = ops
+                        .handle(Operation::BindingStorage {
+                            binding: binding_name,
+                            op: storage_op,
+                        })
+                        .await;
+
+                    let storage_result = match result {
+                        OperationResult::Storage(r) => r,
+                        _ => StorageResult::Error("Unexpected result type".into()),
+                    };
+
+                    let _ = callback_tx
+                        .send(CallbackMessage::StorageResult(callback_id, storage_result));
+                });
+            }
+            SchedulerMessage::BindingKv(callback_id, binding_name, kv_op) => {
+                // KV operation via binding
+                let callback_tx = callback_tx.clone();
+                let ops = ops.clone();
+
+                tokio::spawn(async move {
+                    let result = ops
+                        .handle(Operation::BindingKv {
+                            binding: binding_name,
+                            op: kv_op,
+                        })
+                        .await;
+
+                    let kv_result = match result {
+                        OperationResult::Kv(r) => r,
+                        _ => KvResult::Error("Unexpected result type".into()),
+                    };
+
+                    let _ = callback_tx.send(CallbackMessage::KvResult(callback_id, kv_result));
+                });
+            }
             SchedulerMessage::StreamRead(callback_id, stream_id) => {
                 // Read next chunk from a stream
                 let callback_tx = callback_tx.clone();
@@ -531,11 +773,37 @@ async fn execute_fetch_via_ops(
 ) -> Result<(HttpResponseMeta, stream_manager::StreamId), String> {
     // Call the OperationsHandler with Fetch operation
     let result = ops.handle(Operation::Fetch(request)).await;
+    convert_fetch_result_to_stream(result, stream_manager).await
+}
 
+/// Execute binding fetch via OperationsHandler
+async fn execute_binding_fetch_via_ops(
+    binding_name: String,
+    request: HttpRequest,
+    stream_manager: Arc<stream_manager::StreamManager>,
+    ops: OperationsHandle,
+) -> Result<(HttpResponseMeta, stream_manager::StreamId), String> {
+    // Call the OperationsHandler with BindingFetch operation
+    let result = ops
+        .handle(Operation::BindingFetch {
+            binding: binding_name,
+            request,
+        })
+        .await;
+    convert_fetch_result_to_stream(result, stream_manager).await
+}
+
+/// Convert OperationResult to (HttpResponseMeta, StreamId)
+async fn convert_fetch_result_to_stream(
+    result: OperationResult,
+    stream_manager: Arc<stream_manager::StreamManager>,
+) -> Result<(HttpResponseMeta, stream_manager::StreamId), String> {
     // Extract the HTTP response
     let response = match result {
         OperationResult::Http(r) => r?,
         OperationResult::Ack => return Err("Unexpected Ack result for fetch".into()),
+        OperationResult::Storage(_) => return Err("Unexpected Storage result for fetch".into()),
+        OperationResult::Kv(_) => return Err("Unexpected Kv result for fetch".into()),
     };
 
     // Convert HttpResponse to (HttpResponseMeta, StreamId)

@@ -58,8 +58,8 @@ impl Worker {
             ))
         })?;
 
-        // Setup environment variables
-        setup_env(&mut runtime, &script.env).map_err(|e| {
+        // Setup environment variables and bindings
+        setup_env(&mut runtime, &script.env, &script.bindings).map_err(|e| {
             TerminationReason::InitializationError(format!("Failed to setup env: {}", e))
         })?;
 
@@ -556,8 +556,9 @@ impl Worker {
 fn setup_env(
     runtime: &mut Runtime,
     env: &Option<std::collections::HashMap<String, String>>,
+    bindings: &[openworkers_core::BindingInfo],
 ) -> Result<(), String> {
-    // Build JSON string for env
+    // Build JSON string for env vars
     let env_json = if let Some(env_map) = env {
         let pairs: Vec<String> = env_map
             .iter()
@@ -574,15 +575,189 @@ fn setup_env(
         "{}".to_string()
     };
 
-    // Set globalThis.env as read-only
+    // Build binding object definitions
+    let binding_defs: Vec<String> = bindings
+        .iter()
+        .map(|b| {
+            let name = serde_json::to_string(&b.name).unwrap_or_else(|_| "\"\"".to_string());
+            match b.binding_type {
+                openworkers_core::BindingType::Assets => {
+                    // Assets binding has fetch() only
+                    format!(
+                        r#"{name}: {{
+                            fetch: function(path, options) {{
+                                options = options || {{}};
+                                return new Promise((resolve, reject) => {{
+                                    const fetchOptions = {{
+                                        url: path,
+                                        method: options.method || 'GET',
+                                        headers: options.headers || {{}},
+                                        body: options.body || null
+                                    }};
+                                    __nativeBindingFetch({name}, fetchOptions, (meta) => {{
+                                        const stream = __createNativeStream(meta.streamId);
+                                        const response = new Response(stream, {{
+                                            status: meta.status,
+                                            headers: meta.headers
+                                        }});
+                                        response.ok = meta.status >= 200 && meta.status < 300;
+                                        response.statusText = meta.statusText;
+                                        resolve(response);
+                                    }}, reject);
+                                }});
+                            }}
+                        }}"#,
+                    )
+                }
+                openworkers_core::BindingType::Storage => {
+                    // Storage binding has get/put/head/list/delete
+                    format!(
+                        r#"{name}: {{
+                            get: function(key) {{
+                                return new Promise((resolve, reject) => {{
+                                    __nativeBindingStorage({name}, 'get', {{ key }}, (result) => {{
+                                        if (!result.success) {{
+                                            reject(new Error(result.error));
+                                        }} else if (result.body) {{
+                                            resolve(new TextDecoder().decode(result.body));
+                                        }} else {{
+                                            resolve(null);
+                                        }}
+                                    }});
+                                }});
+                            }},
+                            put: function(key, value) {{
+                                return new Promise((resolve, reject) => {{
+                                    const body = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+                                    __nativeBindingStorage({name}, 'put', {{ key, body }}, (result) => {{
+                                        if (!result.success) {{
+                                            reject(new Error(result.error));
+                                        }} else {{
+                                            resolve();
+                                        }}
+                                    }});
+                                }});
+                            }},
+                            head: function(key) {{
+                                return new Promise((resolve, reject) => {{
+                                    __nativeBindingStorage({name}, 'head', {{ key }}, (result) => {{
+                                        if (!result.success) {{
+                                            reject(new Error(result.error));
+                                        }} else {{
+                                            resolve({{ size: result.size, etag: result.etag }});
+                                        }}
+                                    }});
+                                }});
+                            }},
+                            list: function(options) {{
+                                options = options || {{}};
+                                return new Promise((resolve, reject) => {{
+                                    __nativeBindingStorage({name}, 'list', {{ prefix: options.prefix, limit: options.limit }}, (result) => {{
+                                        if (!result.success) {{
+                                            reject(new Error(result.error));
+                                        }} else {{
+                                            resolve({{ keys: result.keys, truncated: result.truncated }});
+                                        }}
+                                    }});
+                                }});
+                            }},
+                            delete: function(key) {{
+                                return new Promise((resolve, reject) => {{
+                                    __nativeBindingStorage({name}, 'delete', {{ key }}, (result) => {{
+                                        if (!result.success) {{
+                                            reject(new Error(result.error));
+                                        }} else {{
+                                            resolve();
+                                        }}
+                                    }});
+                                }});
+                            }}
+                        }}"#,
+                    )
+                }
+                openworkers_core::BindingType::Kv => {
+                    // KV binding has get/put/delete/list
+                    // Use IIFE to capture binding name as a string constant
+                    format!(
+                        r#"{name}: (function() {{
+                            const __bindingName = {name};
+                            return {{
+                                get: function(key) {{
+                                    return new Promise((resolve, reject) => {{
+                                        __nativeBindingKv(__bindingName, 'get', {{ key }}, (result) => {{
+                                            if (!result.success) {{
+                                                reject(new Error(result.error));
+                                            }} else {{
+                                                resolve(result.value);
+                                            }}
+                                        }});
+                                    }});
+                                }},
+                                put: function(key, value, options) {{
+                                    return new Promise((resolve, reject) => {{
+                                        const params = {{ key, value }};
+                                        if (options && options.expiresIn) {{
+                                            params.expiresIn = options.expiresIn;
+                                        }}
+                                        __nativeBindingKv(__bindingName, 'put', params, (result) => {{
+                                            if (!result.success) {{
+                                                reject(new Error(result.error));
+                                            }} else {{
+                                                resolve();
+                                            }}
+                                        }});
+                                    }});
+                                }},
+                                delete: function(key) {{
+                                    return new Promise((resolve, reject) => {{
+                                        __nativeBindingKv(__bindingName, 'delete', {{ key }}, (result) => {{
+                                            if (!result.success) {{
+                                                reject(new Error(result.error));
+                                            }} else {{
+                                                resolve();
+                                            }}
+                                        }});
+                                    }});
+                                }},
+                                list: function(options) {{
+                                    return new Promise((resolve, reject) => {{
+                                        const params = {{}};
+                                        if (options) {{
+                                            if (options.prefix) params.prefix = options.prefix;
+                                            if (options.limit) params.limit = options.limit;
+                                        }}
+                                        __nativeBindingKv(__bindingName, 'list', params, (result) => {{
+                                            if (!result.success) {{
+                                                reject(new Error(result.error));
+                                            }} else {{
+                                                resolve(result.keys);
+                                            }}
+                                        }});
+                                    }});
+                                }}
+                            }};
+                        }})()"#,
+                    )
+                }
+            }
+        })
+        .collect();
+
+    let bindings_json = if binding_defs.is_empty() {
+        String::new()
+    } else {
+        format!(", {{{}}}", binding_defs.join(","))
+    };
+
+    // Set globalThis.env as read-only with both env vars and bindings
     let code = format!(
         r#"Object.defineProperty(globalThis, 'env', {{
-            value: {},
+            value: Object.freeze(Object.assign({}{})),
             writable: false,
             enumerable: true,
             configurable: false
         }});"#,
-        env_json
+        env_json, bindings_json
     );
 
     runtime.evaluate(&code)
