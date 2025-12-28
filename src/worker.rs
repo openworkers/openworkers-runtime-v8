@@ -318,26 +318,39 @@ impl Worker {
             self.runtime.process_callbacks();
 
             // Check if response is available and body has been read
-            use std::pin::pin;
-            let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
-            let mut scope = scope.init();
-            let context = v8::Local::new(&scope, &self.runtime.context);
-            let scope = &mut v8::ContextScope::new(&mut scope, context);
-            let global = context.global(scope);
+            // CRITICAL: Wrap in explicit block to drop V8 scopes BEFORE the await below.
+            // V8 scopes (HandleScope, ContextScope) use RAII - they Enter on creation and Exit on drop.
+            // If scopes are alive during await, another worker on the same thread may run and corrupt
+            // V8's context stack, causing "Cannot exit non-entered context" crashes.
+            let response_ready = {
+                use std::pin::pin;
+                let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
+                let mut scope = scope.init();
+                let context = v8::Local::new(&scope, &self.runtime.context);
+                let scope = &mut v8::ContextScope::new(&mut scope, context);
+                let global = context.global(scope);
 
-            let resp_key = v8::String::new(scope, "__lastResponse").unwrap();
-            if let Some(resp_val) = global.get(scope, resp_key.into()) {
-                // Check if it's a valid Response object (not undefined, not a Promise)
-                if !resp_val.is_undefined() && !resp_val.is_null() && !resp_val.is_promise() {
-                    if let Some(resp_obj) = resp_val.to_object(scope) {
-                        // Check if it has a 'status' property (indicates it's a Response, not a Promise)
-                        let status_key = v8::String::new(scope, "status").unwrap();
-                        if resp_obj.get(scope, status_key.into()).is_some() {
-                            // Response is ready! (body is in the ReadableStream queue)
-                            break;
+                let resp_key = v8::String::new(scope, "__lastResponse").unwrap();
+                if let Some(resp_val) = global.get(scope, resp_key.into()) {
+                    // Check if it's a valid Response object (not undefined, not a Promise)
+                    if !resp_val.is_undefined() && !resp_val.is_null() && !resp_val.is_promise() {
+                        if let Some(resp_obj) = resp_val.to_object(scope) {
+                            // Check if it has a 'status' property (indicates it's a Response, not a Promise)
+                            let status_key = v8::String::new(scope, "status").unwrap();
+                            resp_obj.get(scope, status_key.into()).is_some()
+                        } else {
+                            false
                         }
+                    } else {
+                        false
                     }
+                } else {
+                    false
                 }
+            }; // <-- V8 scopes dropped here, BEFORE the await
+
+            if response_ready {
+                break;
             }
 
             // Adaptive sleep: fast for first checks, slower later
