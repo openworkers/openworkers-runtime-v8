@@ -49,6 +49,7 @@ pub struct Runtime {
     pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     pub callback_rx: mpsc::UnboundedReceiver<CallbackMessage>,
     pub(crate) fetch_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    pub(crate) fetch_error_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
     pub(crate) stream_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
     pub(crate) _next_callback_id: Arc<Mutex<CallbackId>>,
     /// Channel for fetch response (set during fetch event execution)
@@ -88,6 +89,7 @@ impl Runtime {
         let (callback_tx, callback_rx) = mpsc::unbounded_channel();
 
         let fetch_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let fetch_error_callbacks = Arc::new(Mutex::new(HashMap::new()));
         let stream_callbacks = Arc::new(Mutex::new(HashMap::new()));
         let next_callback_id = Arc::new(Mutex::new(1));
         let fetch_response_tx = Arc::new(Mutex::new(None));
@@ -148,6 +150,7 @@ impl Runtime {
                 scope,
                 scheduler_tx.clone(),
                 fetch_callbacks.clone(),
+                fetch_error_callbacks.clone(),
                 next_callback_id.clone(),
             );
             bindings::setup_stream_ops(
@@ -184,6 +187,7 @@ impl Runtime {
             scheduler_tx,
             callback_rx,
             fetch_callbacks,
+            fetch_error_callbacks,
             stream_callbacks,
             _next_callback_id: next_callback_id,
             fetch_response_tx,
@@ -228,16 +232,24 @@ impl Runtime {
                     }
                 }
                 CallbackMessage::FetchError(callback_id, error_msg) => {
-                    let callback_opt = {
+                    // Remove from success callbacks (cleanup)
+                    {
                         let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        cbs.remove(&callback_id);
+                    }
+
+                    // Get error callback and call it
+                    let error_callback_opt = {
+                        let mut cbs = self.fetch_error_callbacks.lock().unwrap();
                         cbs.remove(&callback_id)
                     };
 
-                    if let Some(callback_global) = callback_opt {
-                        let error = v8::String::new(scope, &error_msg).unwrap();
+                    if let Some(callback_global) = error_callback_opt {
+                        let error_msg_val = v8::String::new(scope, &error_msg).unwrap();
+                        let error = v8::Exception::error(scope, error_msg_val);
                         let callback = v8::Local::new(scope, &callback_global);
                         let recv = v8::undefined(scope);
-                        callback.call(scope, recv.into(), &[error.into()]);
+                        callback.call(scope, recv.into(), &[error]);
                     }
                 }
                 CallbackMessage::FetchStreamingSuccess(callback_id, meta, stream_id) => {
@@ -246,6 +258,12 @@ impl Runtime {
                         let mut cbs = self.fetch_callbacks.lock().unwrap();
                         cbs.remove(&callback_id)
                     };
+
+                    // Cleanup error callback
+                    {
+                        let mut cbs = self.fetch_error_callbacks.lock().unwrap();
+                        cbs.remove(&callback_id);
+                    }
 
                     if let Some(callback_global) = callback_opt {
                         // Create metadata object for JS

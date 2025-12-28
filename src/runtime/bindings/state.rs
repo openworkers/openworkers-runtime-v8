@@ -21,6 +21,7 @@ pub struct ConsoleState {
 pub struct FetchState {
     pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     pub callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    pub error_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
     pub next_id: Arc<Mutex<CallbackId>>,
 }
 

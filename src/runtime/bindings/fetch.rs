@@ -10,11 +10,13 @@ pub fn setup_fetch(
     scope: &mut v8::PinScope,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    error_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
     next_id: Arc<Mutex<CallbackId>>,
 ) {
     let state = FetchState {
         scheduler_tx,
         callbacks,
+        error_callbacks,
         next_id,
     };
 
@@ -272,7 +274,7 @@ pub fn setup_fetch(
             }
 
             let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
-            let _error_fn: v8::Local<v8::Function> = error_cb.try_into().unwrap();
+            let error_fn: v8::Local<v8::Function> = error_cb.try_into().unwrap();
 
             let callback_id = {
                 let mut id = state.next_id.lock().unwrap();
@@ -284,6 +286,11 @@ pub fn setup_fetch(
             {
                 let mut cbs = state.callbacks.lock().unwrap();
                 cbs.insert(callback_id, v8::Global::new(scope, success_fn));
+            }
+
+            {
+                let mut error_cbs = state.error_callbacks.lock().unwrap();
+                error_cbs.insert(callback_id, v8::Global::new(scope, error_fn));
             }
 
             let _ = state.scheduler_tx.send(SchedulerMessage::BindingFetch(
