@@ -615,7 +615,7 @@ pub async fn run_event_loop(
         match msg {
             SchedulerMessage::ScheduleTimeout(callback_id, delay_ms) => {
                 let callback_tx = callback_tx.clone();
-                let handle = tokio::spawn(async move {
+                let handle = tokio::task::spawn_local(async move {
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     let _ = callback_tx.send(CallbackMessage::ExecuteTimeout(callback_id));
                 });
@@ -623,7 +623,7 @@ pub async fn run_event_loop(
             }
             SchedulerMessage::ScheduleInterval(callback_id, interval_ms) => {
                 let callback_tx = callback_tx.clone();
-                let handle = tokio::spawn(async move {
+                let handle = tokio::task::spawn_local(async move {
                     let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
                     interval.tick().await;
 
@@ -646,7 +646,7 @@ pub async fn run_event_loop(
                 let manager = stream_manager.clone();
                 let ops = ops.clone();
 
-                tokio::spawn(async move {
+                tokio::task::spawn_local(async move {
                     let result = execute_fetch_via_ops(request, manager, ops).await;
 
                     match result {
@@ -667,7 +667,7 @@ pub async fn run_event_loop(
                 let manager = stream_manager.clone();
                 let ops = ops.clone();
 
-                tokio::spawn(async move {
+                tokio::task::spawn_local(async move {
                     let result =
                         execute_binding_fetch_via_ops(binding_name, request, manager, ops).await;
 
@@ -688,7 +688,7 @@ pub async fn run_event_loop(
                 let callback_tx = callback_tx.clone();
                 let ops = ops.clone();
 
-                tokio::spawn(async move {
+                tokio::task::spawn_local(async move {
                     let result = ops
                         .handle(Operation::BindingStorage {
                             binding: binding_name,
@@ -710,7 +710,7 @@ pub async fn run_event_loop(
                 let callback_tx = callback_tx.clone();
                 let ops = ops.clone();
 
-                tokio::spawn(async move {
+                tokio::task::spawn_local(async move {
                     let result = ops
                         .handle(Operation::BindingKv {
                             binding: binding_name,
@@ -731,7 +731,7 @@ pub async fn run_event_loop(
                 let callback_tx = callback_tx.clone();
                 let manager = stream_manager.clone();
 
-                tokio::spawn(async move {
+                tokio::task::spawn_local(async move {
                     let chunk = match manager.read_chunk(stream_id).await {
                         Ok(chunk) => chunk,
                         Err(e) => stream_manager::StreamChunk::Error(e),
@@ -751,7 +751,7 @@ pub async fn run_event_loop(
             SchedulerMessage::Log(level, message) => {
                 // Fire-and-forget log via ops
                 let ops = ops.clone();
-                tokio::spawn(async move {
+                tokio::task::spawn_local(async move {
                     let _ = ops.handle(Operation::Log { level, message }).await;
                 });
             }
@@ -837,7 +837,7 @@ async fn convert_fetch_result_to_stream(
             // Streaming body - spawn task to forward chunks
             let manager = stream_manager.clone();
 
-            tokio::spawn(async move {
+            tokio::task::spawn_local(async move {
                 while let Some(result) = rx.recv().await {
                     match result {
                         Ok(bytes) => {

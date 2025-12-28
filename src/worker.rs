@@ -72,7 +72,9 @@ impl Worker {
         let stream_manager = runtime.stream_manager.clone();
 
         // Start event loop in background (with optional Operations handle)
-        let event_loop_handle = tokio::spawn(async move {
+        // Use spawn_local to keep it in the same LocalSet as the V8 worker,
+        // which allows nested spawn_local calls in ops (like do_fetch streaming)
+        let event_loop_handle = tokio::task::spawn_local(async move {
             run_event_loop(scheduler_rx, callback_tx, stream_manager, ops).await;
         });
 
@@ -446,7 +448,7 @@ impl Worker {
                     let (tx, rx) = tokio::sync::mpsc::channel(16);
 
                     // Spawn task to convert StreamChunk -> Result<Bytes, String>
-                    tokio::spawn(async move {
+                    tokio::task::spawn_local(async move {
                         let mut receiver = receiver;
                         while let Some(chunk) = receiver.recv().await {
                             match chunk {
