@@ -13,8 +13,8 @@ use v8;
 
 use crate::security::CustomAllocator;
 use openworkers_core::{
-    HttpRequest, HttpResponseMeta, KvOp, KvResult, Operation, OperationResult, OperationsHandle,
-    ResponseBody, RuntimeLimits, StorageOp, StorageResult,
+    DatabaseOp, DatabaseResult, HttpRequest, HttpResponseMeta, KvOp, KvResult, Operation,
+    OperationResult, OperationsHandle, ResponseBody, RuntimeLimits, StorageOp, StorageResult,
 };
 
 pub type CallbackId = u64;
@@ -27,6 +27,7 @@ pub enum SchedulerMessage {
     BindingFetch(CallbackId, String, HttpRequest), // Fetch via binding (binding_name, request)
     BindingStorage(CallbackId, String, StorageOp), // Storage operation (binding_name, op)
     BindingKv(CallbackId, String, KvOp),     // KV operation (binding_name, op)
+    BindingDatabase(CallbackId, String, DatabaseOp), // Database operation (binding_name, op)
     StreamRead(CallbackId, stream_manager::StreamId), // Read next chunk from stream
     StreamCancel(stream_manager::StreamId),  // Cancel/close a stream
     Log(openworkers_core::LogLevel, String), // Log message (fire-and-forget)
@@ -41,6 +42,7 @@ pub enum CallbackMessage {
     StreamChunk(CallbackId, stream_manager::StreamChunk), // Stream chunk ready
     StorageResult(CallbackId, StorageResult),             // Storage operation result
     KvResult(CallbackId, KvResult),                       // KV operation result
+    DatabaseResult(CallbackId, DatabaseResult),           // Database operation result
 }
 
 pub struct Runtime {
@@ -525,6 +527,60 @@ impl Runtime {
                         callback.call(scope, recv.into(), &[result_obj.into()]);
                     }
                 }
+                CallbackMessage::DatabaseResult(callback_id, database_result) => {
+                    // Database operation result - call the JavaScript callback
+                    let callback_opt = {
+                        let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback_global) = callback_opt {
+                        let callback = v8::Local::new(scope, &callback_global);
+                        let recv = v8::undefined(scope);
+
+                        // Create result object based on DatabaseResult type
+                        let result_obj = v8::Object::new(scope);
+
+                        match database_result {
+                            DatabaseResult::Rows(rows_json) => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, true).into(),
+                                );
+
+                                // Parse the JSON rows and set as rows property
+                                let rows_key = v8::String::new(scope, "rows").unwrap();
+                                let rows_str = v8::String::new(scope, &rows_json).unwrap();
+
+                                // Parse JSON string to JS object
+                                let parsed = v8::json::parse(scope, rows_str.into());
+
+                                if let Some(parsed_value) = parsed {
+                                    result_obj.set(scope, rows_key.into(), parsed_value);
+                                } else {
+                                    // Fallback: return the raw string if parsing fails
+                                    result_obj.set(scope, rows_key.into(), rows_str.into());
+                                }
+                            }
+                            DatabaseResult::Error(err_msg) => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, false).into(),
+                                );
+
+                                let error_key = v8::String::new(scope, "error").unwrap();
+                                let error_val = v8::String::new(scope, &err_msg).unwrap();
+                                result_obj.set(scope, error_key.into(), error_val.into());
+                            }
+                        }
+
+                        callback.call(scope, recv.into(), &[result_obj.into()]);
+                    }
+                }
             }
         }
 
@@ -744,6 +800,30 @@ pub async fn run_event_loop(
                     let _ = callback_tx.send(CallbackMessage::KvResult(callback_id, kv_result));
                 });
             }
+            SchedulerMessage::BindingDatabase(callback_id, binding_name, database_op) => {
+                // Database operation via binding
+                let callback_tx = callback_tx.clone();
+                let ops = ops.clone();
+
+                tokio::task::spawn_local(async move {
+                    let result = ops
+                        .handle(Operation::BindingDatabase {
+                            binding: binding_name,
+                            op: database_op,
+                        })
+                        .await;
+
+                    let database_result = match result {
+                        OperationResult::Database(r) => r,
+                        _ => DatabaseResult::Error("Unexpected result type".into()),
+                    };
+
+                    let _ = callback_tx.send(CallbackMessage::DatabaseResult(
+                        callback_id,
+                        database_result,
+                    ));
+                });
+            }
             SchedulerMessage::StreamRead(callback_id, stream_id) => {
                 // Read next chunk from a stream
                 let callback_tx = callback_tx.clone();
@@ -822,6 +902,7 @@ async fn convert_fetch_result_to_stream(
         OperationResult::Ack => return Err("Unexpected Ack result for fetch".into()),
         OperationResult::Storage(_) => return Err("Unexpected Storage result for fetch".into()),
         OperationResult::Kv(_) => return Err("Unexpected Kv result for fetch".into()),
+        OperationResult::Database(_) => return Err("Unexpected Database result for fetch".into()),
     };
 
     // Convert HttpResponse to (HttpResponseMeta, StreamId)

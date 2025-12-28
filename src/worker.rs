@@ -754,6 +754,32 @@ fn setup_env(
                         }})()"#,
                     )
                 }
+                openworkers_core::BindingType::Database => {
+                    // Database binding has query method
+                    // Use IIFE to capture binding name as a string constant
+                    format!(
+                        r#"{name}: (function() {{
+                            const __bindingName = {name};
+                            return {{
+                                query: function(sql, params) {{
+                                    return new Promise((resolve, reject) => {{
+                                        const queryParams = {{
+                                            sql,
+                                            params: params || []
+                                        }};
+                                        __nativeBindingDatabase(__bindingName, 'query', queryParams, (result) => {{
+                                            if (!result.success) {{
+                                                reject(new Error(result.error));
+                                            }} else {{
+                                                resolve(result.rows);
+                                            }}
+                                        }});
+                                    }});
+                                }}
+                            }};
+                        }})()"#,
+                    )
+                }
             }
         })
         .collect();

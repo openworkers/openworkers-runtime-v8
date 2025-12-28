@@ -1,6 +1,6 @@
 use super::super::{CallbackId, SchedulerMessage};
 use super::state::FetchState;
-use openworkers_core::{HttpMethod, HttpRequest, KvOp, RequestBody, StorageOp};
+use openworkers_core::{DatabaseOp, HttpMethod, HttpRequest, KvOp, RequestBody, StorageOp};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -609,6 +609,125 @@ pub fn setup_fetch(
         scope,
         native_binding_kv_key.into(),
         native_binding_kv_fn.into(),
+    );
+
+    // Create __nativeBindingDatabase for database operations (query)
+    let native_binding_database_fn = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope,
+         args: v8::FunctionCallbackArguments,
+         mut _retval: v8::ReturnValue| {
+            let global = scope.get_current_context().global(scope);
+            let state_key = v8::String::new(scope, "__fetchState").unwrap();
+            let state_val = global.get(scope, state_key.into()).unwrap();
+
+            if !state_val.is_external() {
+                return;
+            }
+
+            let external: v8::Local<v8::External> = state_val.try_into().unwrap();
+            let state_ptr = external.value() as *mut FetchState;
+            let state = unsafe { &*state_ptr };
+
+            // Args: (bindingName, operation, params, successCallback)
+            if args.length() < 4 {
+                return;
+            }
+
+            // Get binding name (arg 0)
+            let binding_name = match args.get(0).to_string(scope) {
+                Some(s) => s.to_rust_string_lossy(scope),
+                None => return,
+            };
+
+            // Get operation name (arg 1)
+            let operation = match args.get(1).to_string(scope) {
+                Some(s) => s.to_rust_string_lossy(scope),
+                None => return,
+            };
+
+            // Get params object (arg 2)
+            let params = match args.get(2).to_object(scope) {
+                Some(obj) => obj,
+                None => return,
+            };
+
+            // Build DatabaseOp from operation name and params
+            let database_op = match operation.as_str() {
+                "query" => {
+                    let sql_key = v8::String::new(scope, "sql").unwrap();
+                    let sql = params
+                        .get(scope, sql_key.into())
+                        .and_then(|v| v.to_string(scope))
+                        .map(|s| s.to_rust_string_lossy(scope))
+                        .unwrap_or_default();
+
+                    // Get params array
+                    let params_key = v8::String::new(scope, "params").unwrap();
+                    let query_params: Vec<String> =
+                        if let Some(params_val) = params.get(scope, params_key.into()) {
+                            if let Ok(params_array) = v8::Local::<v8::Array>::try_from(params_val) {
+                                let mut result = Vec::new();
+
+                                for i in 0..params_array.length() {
+                                    if let Some(item) = params_array.get_index(scope, i)
+                                        && let Some(item_str) = item.to_string(scope)
+                                    {
+                                        result.push(item_str.to_rust_string_lossy(scope));
+                                    }
+                                }
+
+                                result
+                            } else {
+                                Vec::new()
+                            }
+                        } else {
+                            Vec::new()
+                        };
+
+                    DatabaseOp::Query {
+                        sql,
+                        params: query_params,
+                    }
+                }
+                _ => return, // Unknown operation
+            };
+
+            // Get success callback (arg 3)
+            let success_cb = args.get(3);
+
+            if !success_cb.is_function() {
+                return;
+            }
+
+            let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
+
+            let callback_id = {
+                let mut id = state.next_id.lock().unwrap();
+                let current = *id;
+                *id += 1;
+                current
+            };
+
+            {
+                let mut cbs = state.callbacks.lock().unwrap();
+                cbs.insert(callback_id, v8::Global::new(scope, success_fn));
+            }
+
+            let _ = state.scheduler_tx.send(SchedulerMessage::BindingDatabase(
+                callback_id,
+                binding_name,
+                database_op,
+            ));
+        },
+    )
+    .unwrap();
+
+    let native_binding_database_key = v8::String::new(scope, "__nativeBindingDatabase").unwrap();
+    global.set(
+        scope,
+        native_binding_database_key.into(),
+        native_binding_database_fn.into(),
     );
 
     // JavaScript fetch implementation using Promises with streaming support
