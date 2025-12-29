@@ -378,30 +378,31 @@ impl Worker {
             tokio::time::sleep(sleep_duration).await;
         }
 
-        // Now read the response from global __lastResponse
-        use std::pin::pin;
-        let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
-        let mut scope = scope.init();
-        let context = v8::Local::new(&scope, &self.runtime.context);
-        let scope = &mut v8::ContextScope::new(&mut scope, context);
-        let global = context.global(scope);
+        // Read response from global __lastResponse
+        // Wrap in block to drop V8 scopes before the waitUntil loop
+        let (status, response) = {
+            use std::pin::pin;
+            let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
+            let mut scope = scope.init();
+            let context = v8::Local::new(&scope, &self.runtime.context);
+            let scope = &mut v8::ContextScope::new(&mut scope, context);
+            let global = context.global(scope);
 
-        let resp_key = v8::String::new(scope, "__lastResponse").unwrap();
-        let resp_val = global
-            .get(scope, resp_key.into())
-            .ok_or("No response set")?;
+            let resp_key = v8::String::new(scope, "__lastResponse").unwrap();
+            let resp_val = global
+                .get(scope, resp_key.into())
+                .ok_or("No response set")?;
 
-        if let Some(resp_obj) = resp_val.to_object(scope) {
-            let status_key = v8::String::new(scope, "status").unwrap();
-            let status = resp_obj
-                .get(scope, status_key.into())
-                .and_then(|v| v.uint32_value(scope))
-                .unwrap_or(200) as u16;
+            if let Some(resp_obj) = resp_val.to_object(scope) {
+                let status_key = v8::String::new(scope, "status").unwrap();
+                let status = resp_obj
+                    .get(scope, status_key.into())
+                    .and_then(|v| v.uint32_value(scope))
+                    .unwrap_or(200) as u16;
 
-            // Check if response has _responseStreamId (streaming body)
-            let response_stream_id_key = v8::String::new(scope, "_responseStreamId").unwrap();
-            let response_stream_id =
-                resp_obj
+                // Check if response has _responseStreamId (streaming body)
+                let response_stream_id_key = v8::String::new(scope, "_responseStreamId").unwrap();
+                let response_stream_id = resp_obj
                     .get(scope, response_stream_id_key.into())
                     .and_then(|v| {
                         if v.is_null() || v.is_undefined() {
@@ -411,132 +412,196 @@ impl Worker {
                         }
                     });
 
-            // Extract headers first (needed for both paths)
-            // Headers can be a Headers instance (with _map) or a plain object
-            let mut headers = vec![];
-            let headers_key = v8::String::new(scope, "headers").unwrap();
-            if let Some(headers_val) = resp_obj.get(scope, headers_key.into())
-                && let Some(headers_obj) = headers_val.to_object(scope)
-            {
-                // Check if this is a Headers instance (has _map)
-                let map_key = v8::String::new(scope, "_map").unwrap();
-                if let Some(map_val) = headers_obj.get(scope, map_key.into())
-                    && let Ok(map_obj) = v8::Local::<v8::Map>::try_from(map_val)
+                // Extract headers first (needed for both paths)
+                // Headers can be a Headers instance (with _map) or a plain object
+                let mut headers = vec![];
+                let headers_key = v8::String::new(scope, "headers").unwrap();
+
+                if let Some(headers_val) = resp_obj.get(scope, headers_key.into())
+                    && let Some(headers_obj) = headers_val.to_object(scope)
                 {
-                    // Headers instance - iterate over _map
-                    let entries = map_obj.as_array(scope);
-                    let len = entries.length();
-                    let mut i = 0;
-                    while i < len {
-                        if let Some(key_val) = entries.get_index(scope, i)
-                            && let Some(val_val) = entries.get_index(scope, i + 1)
-                            && let Some(key_str) = key_val.to_string(scope)
-                            && let Some(val_str) = val_val.to_string(scope)
-                        {
-                            let key = key_str.to_rust_string_lossy(scope);
-                            let value = val_str.to_rust_string_lossy(scope);
-                            headers.push((key, value));
-                        }
-                        i += 2; // Map.as_array returns [key, value, key, value, ...]
-                    }
-                } else if let Some(props) =
-                    headers_obj.get_own_property_names(scope, Default::default())
-                {
-                    // Plain object - use property iteration
-                    for i in 0..props.length() {
-                        if let Some(key_val) = props.get_index(scope, i)
-                            && let Some(key_str) = key_val.to_string(scope)
-                        {
-                            let key = key_str.to_rust_string_lossy(scope);
-                            if let Some(val) = headers_obj.get(scope, key_val)
-                                && let Some(val_str) = val.to_string(scope)
+                    // Check if this is a Headers instance (has _map)
+                    let map_key = v8::String::new(scope, "_map").unwrap();
+
+                    if let Some(map_val) = headers_obj.get(scope, map_key.into())
+                        && let Ok(map_obj) = v8::Local::<v8::Map>::try_from(map_val)
+                    {
+                        // Headers instance - iterate over _map
+                        let entries = map_obj.as_array(scope);
+                        let len = entries.length();
+                        let mut i = 0;
+
+                        while i < len {
+                            if let Some(key_val) = entries.get_index(scope, i)
+                                && let Some(val_val) = entries.get_index(scope, i + 1)
+                                && let Some(key_str) = key_val.to_string(scope)
+                                && let Some(val_str) = val_val.to_string(scope)
                             {
+                                let key = key_str.to_rust_string_lossy(scope);
                                 let value = val_str.to_rust_string_lossy(scope);
                                 headers.push((key, value));
                             }
+
+                            i += 2; // Map.as_array returns [key, value, key, value, ...]
                         }
-                    }
-                }
-            }
+                    } else if let Some(props) =
+                        headers_obj.get_own_property_names(scope, Default::default())
+                    {
+                        // Plain object - use property iteration
+                        for i in 0..props.length() {
+                            if let Some(key_val) = props.get_index(scope, i)
+                                && let Some(key_str) = key_val.to_string(scope)
+                            {
+                                let key = key_str.to_rust_string_lossy(scope);
 
-            // Determine body type: streaming or buffered
-            let body = if let Some(stream_id) = response_stream_id {
-                // Response stream - take the receiver from StreamManager
-                // JS is writing chunks to this stream via __responseStreamWrite
-                use crate::runtime::stream_manager::StreamChunk;
-
-                if let Some(receiver) = self.runtime.stream_manager.take_receiver(stream_id) {
-                    // Create a channel that converts StreamChunk to Result<Bytes, String>
-                    let (tx, rx) = tokio::sync::mpsc::channel(16);
-
-                    // Spawn task to convert StreamChunk -> Result<Bytes, String>
-                    tokio::task::spawn_local(async move {
-                        let mut receiver = receiver;
-                        while let Some(chunk) = receiver.recv().await {
-                            match chunk {
-                                StreamChunk::Data(bytes) => {
-                                    if tx.send(Ok(bytes)).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                StreamChunk::Done => {
-                                    break;
-                                }
-                                StreamChunk::Error(e) => {
-                                    let _ = tx.send(Err(e)).await;
-                                    break;
+                                if let Some(val) = headers_obj.get(scope, key_val)
+                                    && let Some(val_str) = val.to_string(scope)
+                                {
+                                    let value = val_str.to_rust_string_lossy(scope);
+                                    headers.push((key, value));
                                 }
                             }
                         }
-                    });
-
-                    ResponseBody::Stream(rx)
-                } else {
-                    // Stream not found - fall back to empty body
-                    ResponseBody::None
+                    }
                 }
-            } else {
-                // Buffered body - use _getRawBody()
-                let get_raw_body_key = v8::String::new(scope, "_getRawBody").unwrap();
-                let body_bytes = if let Some(get_raw_body_val) =
-                    resp_obj.get(scope, get_raw_body_key.into())
-                    && let Ok(get_raw_body_fn) =
-                        v8::Local::<v8::Function>::try_from(get_raw_body_val)
-                {
-                    if let Some(result_val) = get_raw_body_fn.call(scope, resp_obj.into(), &[])
-                        && let Ok(uint8_array) = v8::Local::<v8::Uint8Array>::try_from(result_val)
-                    {
-                        let len = uint8_array.byte_length();
-                        let mut bytes_vec = vec![0u8; len];
-                        uint8_array.copy_contents(&mut bytes_vec);
-                        bytes::Bytes::from(bytes_vec)
+
+                // Determine body type: streaming or buffered
+                let body = if let Some(stream_id) = response_stream_id {
+                    // Response stream - take the receiver from StreamManager
+                    // JS is writing chunks to this stream via __responseStreamWrite
+                    use crate::runtime::stream_manager::StreamChunk;
+
+                    if let Some(receiver) = self.runtime.stream_manager.take_receiver(stream_id) {
+                        // Create a channel that converts StreamChunk to Result<Bytes, String>
+                        let (tx, rx) = tokio::sync::mpsc::channel(16);
+
+                        // Spawn task to convert StreamChunk -> Result<Bytes, String>
+                        tokio::task::spawn_local(async move {
+                            let mut receiver = receiver;
+
+                            while let Some(chunk) = receiver.recv().await {
+                                match chunk {
+                                    StreamChunk::Data(bytes) => {
+                                        if tx.send(Ok(bytes)).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    StreamChunk::Done => {
+                                        break;
+                                    }
+                                    StreamChunk::Error(e) => {
+                                        let _ = tx.send(Err(e)).await;
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+
+                        ResponseBody::Stream(rx)
                     } else {
-                        bytes::Bytes::new()
+                        // Stream not found - fall back to empty body
+                        ResponseBody::None
                     }
                 } else {
-                    bytes::Bytes::new()
+                    // Buffered body - use _getRawBody()
+                    let get_raw_body_key = v8::String::new(scope, "_getRawBody").unwrap();
+                    let body_bytes = if let Some(get_raw_body_val) =
+                        resp_obj.get(scope, get_raw_body_key.into())
+                        && let Ok(get_raw_body_fn) =
+                            v8::Local::<v8::Function>::try_from(get_raw_body_val)
+                    {
+                        if let Some(result_val) = get_raw_body_fn.call(scope, resp_obj.into(), &[])
+                            && let Ok(uint8_array) =
+                                v8::Local::<v8::Uint8Array>::try_from(result_val)
+                        {
+                            let len = uint8_array.byte_length();
+                            let mut bytes_vec = vec![0u8; len];
+                            uint8_array.copy_contents(&mut bytes_vec);
+                            bytes::Bytes::from(bytes_vec)
+                        } else {
+                            bytes::Bytes::new()
+                        }
+                    } else {
+                        bytes::Bytes::new()
+                    };
+
+                    ResponseBody::Bytes(body_bytes)
                 };
 
-                ResponseBody::Bytes(body_bytes)
+                let response = HttpResponse {
+                    status,
+                    headers,
+                    body,
+                };
+
+                (status, Some(response))
+            } else {
+                (0, None)
+            }
+        }; // V8 scopes dropped here
+
+        // Send response if we got one
+        let Some(response) = response else {
+            return Err("Invalid response object".to_string());
+        };
+
+        let _ = fetch_init.res_tx.send(response);
+
+        // Wait for waitUntil promises to complete (if any)
+        // Response has already been sent, but we need to keep the worker alive
+        for iteration in 0..5000 {
+            // Check if execution was terminated
+            if self.runtime.isolate.is_execution_terminating()
+                || wall_guard.was_triggered()
+                || cpu_guard
+                    .as_ref()
+                    .map(|g| g.was_terminated())
+                    .unwrap_or(false)
+            {
+                return Err("Execution terminated".to_string());
+            }
+
+            // Process pending callbacks
+            self.runtime.process_callbacks();
+
+            // Check if request is fully complete (including waitUntil)
+            let request_complete = {
+                use std::pin::pin;
+                let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
+                let mut scope = scope.init();
+                let context = v8::Local::new(&scope, &self.runtime.context);
+                let scope = &mut v8::ContextScope::new(&mut scope, context);
+                let global = context.global(scope);
+
+                let complete_key = v8::String::new(scope, "__requestComplete").unwrap();
+                global
+                    .get(scope, complete_key.into())
+                    .map(|v| v.is_true())
+                    .unwrap_or(false)
             };
 
-            let response = HttpResponse {
-                status,
-                headers,
-                body,
+            if request_complete {
+                break;
+            }
+
+            // Adaptive sleep
+            let sleep_duration = if iteration < 10 {
+                tokio::time::Duration::from_micros(1)
+            } else if iteration < 100 {
+                tokio::time::Duration::from_millis(1)
+            } else {
+                tokio::time::Duration::from_millis(10)
             };
 
-            let _ = fetch_init.res_tx.send(response);
-
-            // Return success indicator (body already sent via channel)
-            return Ok(HttpResponse {
-                status,
-                headers: vec![],
-                body: ResponseBody::None,
-            });
+            tokio::time::sleep(sleep_duration).await;
         }
 
-        Err("Invalid response object".to_string())
+        // Return success indicator (body already sent via channel)
+        Ok(HttpResponse {
+            status,
+            headers: vec![],
+            body: ResponseBody::None,
+        })
     }
 
     async fn trigger_scheduled_event(
@@ -858,12 +923,19 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
             if (type === 'fetch') {
                 globalThis.__fetchHandler = handler;
                 globalThis.__triggerFetch = function(request) {
+                    // Collect promises passed to waitUntil
+                    const waitUntilPromises = [];
+                    let responsePromise = null;
+
                     const event = {
                         request: request,
+                        waitUntil: function(promise) {
+                            waitUntilPromises.push(Promise.resolve(promise));
+                        },
                         respondWith: function(responseOrPromise) {
                             // Handle both direct Response and Promise<Response>
                             if (responseOrPromise && typeof responseOrPromise.then === 'function') {
-                                responseOrPromise
+                                responsePromise = responseOrPromise
                                     .then(response => __streamResponseBody(response))
                                     .then(response => {
                                         globalThis.__lastResponse = response;
@@ -876,7 +948,7 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
                                         );
                                     });
                             } else {
-                                __streamResponseBody(responseOrPromise)
+                                responsePromise = __streamResponseBody(responseOrPromise)
                                     .then(response => {
                                         globalThis.__lastResponse = response;
                                     });
@@ -884,15 +956,44 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
                         }
                     };
 
-                    try {
-                        handler(event);
-                    } catch (error) {
-                        console.error('[addEventListener] Error in fetch handler:', error);
-                        globalThis.__lastResponse = new Response('Handler exception: ' + (error.message || error), { status: 500 });
-                    }
+                    // Run async to track completion
+                    (async () => {
+                        try {
+                            handler(event);
+
+                            // Wait for response to be set first
+                            if (responsePromise) {
+                                await responsePromise;
+                            }
+
+                            // Then wait for all waitUntil promises to complete
+                            if (waitUntilPromises.length > 0) {
+                                await Promise.all(waitUntilPromises);
+                            }
+                        } catch (error) {
+                            console.error('[addEventListener] Error in fetch handler:', error);
+                            globalThis.__lastResponse = new Response('Handler exception: ' + (error.message || error), { status: 500 });
+                        } finally {
+                            globalThis.__requestComplete = true;
+                        }
+                    })();
                 };
             } else if (type === 'scheduled') {
-                globalThis.__scheduledHandler = handler;
+                globalThis.__scheduledHandler = async function(event) {
+                    // Collect promises passed to waitUntil
+                    const waitUntilPromises = [];
+
+                    event.waitUntil = function(promise) {
+                        waitUntilPromises.push(Promise.resolve(promise));
+                    };
+
+                    await handler(event);
+
+                    // Wait for all waitUntil promises to complete
+                    if (waitUntilPromises.length > 0) {
+                        await Promise.all(waitUntilPromises);
+                    }
+                };
             }
         };
     "#;
@@ -914,24 +1015,41 @@ fn setup_es_modules_handler(runtime: &mut Runtime) -> Result<(), String> {
             const moduleHandler = globalThis.default;
 
             // Override __triggerFetch for ES Modules style
-            globalThis.__triggerFetch = async function(request) {
-                try {
-                    // ES Modules style: fetch(request, env, ctx) returns Response directly
-                    const response = await moduleHandler.fetch(request, globalThis.env, {
-                        waitUntil: () => {},
-                        passThroughOnException: () => {}
-                    });
+            globalThis.__triggerFetch = function(request) {
+                // Collect promises passed to waitUntil
+                const waitUntilPromises = [];
 
-                    // Process response body for streaming
-                    const processed = await __streamResponseBody(response);
-                    globalThis.__lastResponse = processed;
-                } catch (error) {
-                    console.error('[ES Modules] Error in fetch handler:', error);
-                    globalThis.__lastResponse = new Response(
-                        'Handler exception: ' + (error.message || error),
-                        { status: 500 }
-                    );
-                }
+                const ctx = {
+                    waitUntil: (promise) => {
+                        waitUntilPromises.push(Promise.resolve(promise));
+                    },
+                    passThroughOnException: () => {}
+                };
+
+                // Run async and track completion separately from response
+                (async () => {
+                    try {
+                        // ES Modules style: fetch(request, env, ctx) returns Response directly
+                        const response = await moduleHandler.fetch(request, globalThis.env, ctx);
+
+                        // Process response body for streaming
+                        const processed = await __streamResponseBody(response);
+                        globalThis.__lastResponse = processed;
+
+                        // Wait for all waitUntil promises to complete (after response is set)
+                        if (waitUntilPromises.length > 0) {
+                            await Promise.all(waitUntilPromises);
+                        }
+                    } catch (error) {
+                        console.error('[ES Modules] Error in fetch handler:', error);
+                        globalThis.__lastResponse = new Response(
+                            'Handler exception: ' + (error.message || error),
+                            { status: 500 }
+                        );
+                    } finally {
+                        globalThis.__requestComplete = true;
+                    }
+                })();
             };
         }
 
@@ -940,10 +1058,22 @@ fn setup_es_modules_handler(runtime: &mut Runtime) -> Result<(), String> {
             const moduleScheduled = globalThis.default.scheduled;
 
             // Wrap to pass env and ctx
-            globalThis.__scheduledHandler = function(event) {
-                return moduleScheduled(event, globalThis.env, {
-                    waitUntil: () => {}
-                });
+            globalThis.__scheduledHandler = async function(event) {
+                // Collect promises passed to waitUntil
+                const waitUntilPromises = [];
+
+                const ctx = {
+                    waitUntil: (promise) => {
+                        waitUntilPromises.push(Promise.resolve(promise));
+                    }
+                };
+
+                await moduleScheduled(event, globalThis.env, ctx);
+
+                // Wait for all waitUntil promises to complete
+                if (waitUntilPromises.length > 0) {
+                    await Promise.all(waitUntilPromises);
+                }
             };
         }
     "#;

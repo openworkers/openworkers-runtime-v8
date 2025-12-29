@@ -125,3 +125,171 @@ async fn test_es_modules_priority_over_addeventlistener() {
         })
         .await;
 }
+
+#[tokio::test]
+async fn test_es_modules_wait_until() {
+    let local = tokio::task::LocalSet::new();
+
+    local
+        .run_until(async {
+            // Test that waitUntil promises are awaited before handler completes
+            let code = r#"
+                globalThis.waitUntilCompleted = false;
+
+                globalThis.default = {
+                    async fetch(request, env, ctx) {
+                        // Schedule background work via waitUntil
+                        ctx.waitUntil(
+                            new Promise(resolve => {
+                                setTimeout(() => {
+                                    globalThis.waitUntilCompleted = true;
+                                    resolve();
+                                }, 50);
+                            })
+                        );
+
+                        return new Response('Response sent');
+                    }
+                };
+            "#;
+
+            let script = Script::new(code);
+            let mut worker = Worker::new(script, None).await.unwrap();
+
+            let req = HttpRequest {
+                method: HttpMethod::Get,
+                url: "http://localhost/".to_string(),
+                headers: HashMap::new(),
+                body: RequestBody::None,
+            };
+
+            let (task, rx) = Task::fetch(req);
+            worker.exec(task).await.unwrap();
+            let response = rx.await.unwrap();
+
+            let body = response.body.collect().await.unwrap();
+            assert_eq!(std::str::from_utf8(&body).unwrap(), "Response sent");
+
+            // Verify waitUntil completed by checking the global variable
+            worker
+                .evaluate("if (!globalThis.waitUntilCompleted) throw new Error('waitUntil not completed');")
+                .expect("waitUntil should have completed");
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn test_es_modules_multiple_wait_until() {
+    let local = tokio::task::LocalSet::new();
+
+    local
+        .run_until(async {
+            // Test multiple waitUntil calls
+            let code = r#"
+                globalThis.waitUntilCount = 0;
+
+                globalThis.default = {
+                    async fetch(request, env, ctx) {
+                        // Schedule multiple background tasks
+                        ctx.waitUntil(
+                            new Promise(resolve => {
+                                setTimeout(() => {
+                                    globalThis.waitUntilCount++;
+                                    resolve();
+                                }, 20);
+                            })
+                        );
+
+                        ctx.waitUntil(
+                            new Promise(resolve => {
+                                setTimeout(() => {
+                                    globalThis.waitUntilCount++;
+                                    resolve();
+                                }, 40);
+                            })
+                        );
+
+                        ctx.waitUntil(
+                            new Promise(resolve => {
+                                setTimeout(() => {
+                                    globalThis.waitUntilCount++;
+                                    resolve();
+                                }, 60);
+                            })
+                        );
+
+                        return new Response('Response sent');
+                    }
+                };
+            "#;
+
+            let script = Script::new(code);
+            let mut worker = Worker::new(script, None).await.unwrap();
+
+            let req = HttpRequest {
+                method: HttpMethod::Get,
+                url: "http://localhost/".to_string(),
+                headers: HashMap::new(),
+                body: RequestBody::None,
+            };
+
+            let (task, rx) = Task::fetch(req);
+            worker.exec(task).await.unwrap();
+            let _response = rx.await.unwrap();
+
+            // Verify all waitUntil callbacks completed
+            worker
+                .evaluate("if (globalThis.waitUntilCount !== 3) throw new Error('Expected 3, got ' + globalThis.waitUntilCount);")
+                .expect("All 3 waitUntil promises should have completed");
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn test_service_worker_wait_until() {
+    let local = tokio::task::LocalSet::new();
+
+    local
+        .run_until(async {
+            // Test waitUntil with addEventListener style
+            let code = r#"
+                globalThis.waitUntilCompleted = false;
+
+                addEventListener('fetch', (event) => {
+                    event.waitUntil(
+                        new Promise(resolve => {
+                            setTimeout(() => {
+                                globalThis.waitUntilCompleted = true;
+                                resolve();
+                            }, 50);
+                        })
+                    );
+
+                    event.respondWith(new Response('From Service Worker'));
+                });
+            "#;
+
+            let script = Script::new(code);
+            let mut worker = Worker::new(script, None).await.unwrap();
+
+            let req = HttpRequest {
+                method: HttpMethod::Get,
+                url: "http://localhost/".to_string(),
+                headers: HashMap::new(),
+                body: RequestBody::None,
+            };
+
+            let (task, rx) = Task::fetch(req);
+            worker.exec(task).await.unwrap();
+            let response = rx.await.unwrap();
+
+            let body = response.body.collect().await.unwrap();
+            assert_eq!(std::str::from_utf8(&body).unwrap(), "From Service Worker");
+
+            // Verify waitUntil completed
+            worker
+                .evaluate("if (!globalThis.waitUntilCompleted) throw new Error('waitUntil not completed');")
+                .expect("waitUntil should have completed");
+        })
+        .await;
+}
