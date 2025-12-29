@@ -68,6 +68,15 @@ impl Worker {
             TerminationReason::Exception(format!("Script evaluation failed: {}", e))
         })?;
 
+        // Setup ES Modules handler if `export default { fetch }` is used
+        // This takes priority over addEventListener('fetch', ...)
+        setup_es_modules_handler(&mut runtime).map_err(|e| {
+            TerminationReason::InitializationError(format!(
+                "Failed to setup ES modules handler: {}",
+                e
+            ))
+        })?;
+
         // Get stream_manager for event loop
         let stream_manager = runtime.stream_manager.clone();
 
@@ -886,6 +895,57 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
                 globalThis.__scheduledHandler = handler;
             }
         };
+    "#;
+
+    runtime.evaluate(code)
+}
+
+/// Setup ES Modules handler if `export default { fetch }` is used
+///
+/// This checks if the user script exported a default object with a fetch method.
+/// If so, it overrides __triggerFetch to use the ES Modules style (direct return)
+/// instead of the Service Worker style (event.respondWith).
+///
+/// ES Modules style takes priority over addEventListener.
+fn setup_es_modules_handler(runtime: &mut Runtime) -> Result<(), String> {
+    let code = r#"
+        // Check if ES Modules style is used: export default { fetch }
+        if (typeof globalThis.default === 'object' && typeof globalThis.default.fetch === 'function') {
+            const moduleHandler = globalThis.default;
+
+            // Override __triggerFetch for ES Modules style
+            globalThis.__triggerFetch = async function(request) {
+                try {
+                    // ES Modules style: fetch(request, env, ctx) returns Response directly
+                    const response = await moduleHandler.fetch(request, globalThis.env, {
+                        waitUntil: () => {},
+                        passThroughOnException: () => {}
+                    });
+
+                    // Process response body for streaming
+                    const processed = await __streamResponseBody(response);
+                    globalThis.__lastResponse = processed;
+                } catch (error) {
+                    console.error('[ES Modules] Error in fetch handler:', error);
+                    globalThis.__lastResponse = new Response(
+                        'Handler exception: ' + (error.message || error),
+                        { status: 500 }
+                    );
+                }
+            };
+        }
+
+        // Same for scheduled events
+        if (typeof globalThis.default === 'object' && typeof globalThis.default.scheduled === 'function') {
+            const moduleScheduled = globalThis.default.scheduled;
+
+            // Wrap to pass env and ctx
+            globalThis.__scheduledHandler = function(event) {
+                return moduleScheduled(event, globalThis.env, {
+                    waitUntil: () => {}
+                });
+            };
+        }
     "#;
 
     runtime.evaluate(code)
