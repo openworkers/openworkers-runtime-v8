@@ -1,6 +1,6 @@
 [package]
 name = "openworkers-runtime-v8"
-version = "0.5.10"
+version = "0.6.0"
 edition = "2024"
 
 [features]
@@ -10,7 +10,7 @@ actix = ["dep:actix-web", "openworkers-core/actix"]
 
 # Common types
 # openworkers-core = { path = "../openworkers-core", features = ["testing"] }
-openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.5.1", features = ["testing"] }
+openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.6.0", features = ["testing"] }
 
 # V8 JavaScript engine (v8 is the new name for rusty_v8)
 v8 = "142.2.0"
@@ -25,11 +25,10 @@ env_logger = "0.11"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0.147"
+serde_json = "1.0.148"
 
-# HTTP
+# HTTP types
 bytes = { version = "1.11", features = ["serde"] }
-reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "json", "stream"] }
 
 # Crypto
 ring = "0.17"
@@ -41,7 +40,7 @@ libc = "0.2.178"
 
 # Signal handling (for CPU time enforcement on Linux)
 [target.'cfg(target_os = "linux")'.dependencies]
-signal-hook = "0.3"
+signal-hook = "0.4.1"
 signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 
 # Optional dependencies
@@ -49,7 +48,7 @@ actix-web = { version = "4.12.1", features = ["macros"], optional = true }
 tokio-stream = "0.1"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.8.1", features = ["async_tokio"] }
 ntest = "0.9.5"
 
 [[bench]]

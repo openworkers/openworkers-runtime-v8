@@ -13,7 +13,7 @@ async fn test_fetch_forward_streaming() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -66,7 +66,7 @@ async fn test_string_response_is_streamed() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -103,7 +103,7 @@ async fn test_streaming_response_chunked() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -152,7 +152,7 @@ async fn test_processed_fetch_response() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,

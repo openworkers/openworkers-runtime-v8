@@ -74,7 +74,7 @@ async fn test_exec_cpu_time_measurement() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, Some(limits)).await.unwrap();
+    let mut worker = Worker::new(script, Some(limits)).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -126,7 +126,7 @@ async fn test_exec_cpu_time_excludes_async_wait() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, Some(limits)).await.unwrap();
+    let mut worker = Worker::new(script, Some(limits)).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -191,9 +191,7 @@ async fn test_exec_cpu_intensive_uses_more_cpu_time() {
 
     // Measure light
     let script = Script::new(light_code);
-    let mut worker = Worker::new(script, None, Some(limits.clone()))
-        .await
-        .unwrap();
+    let mut worker = Worker::new(script, Some(limits.clone())).await.unwrap();
     let req = HttpRequest {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
@@ -207,7 +205,7 @@ async fn test_exec_cpu_intensive_uses_more_cpu_time() {
 
     // Measure heavy
     let script = Script::new(heavy_code);
-    let mut worker = Worker::new(script, None, Some(limits)).await.unwrap();
+    let mut worker = Worker::new(script, Some(limits)).await.unwrap();
     let req = HttpRequest {
         method: HttpMethod::Get,
         url: "http://localhost/".to_string(),

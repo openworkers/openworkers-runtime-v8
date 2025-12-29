@@ -20,7 +20,7 @@ async fn test_blob_basic() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -53,7 +53,7 @@ async fn test_blob_array_buffer() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -84,7 +84,7 @@ async fn test_blob_slice() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -128,7 +128,7 @@ async fn test_file() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,

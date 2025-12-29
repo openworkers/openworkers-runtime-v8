@@ -11,7 +11,7 @@ async fn main() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,

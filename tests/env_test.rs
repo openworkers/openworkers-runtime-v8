@@ -19,7 +19,7 @@ async fn test_env_variables() {
         env,
     );
 
-    let mut worker = Worker::new(script, None, None)
+    let mut worker = Worker::new(script, None)
         .await
         .expect("Worker should initialize");
 
@@ -52,7 +52,7 @@ async fn test_env_empty() {
         "#,
     );
 
-    let mut worker = Worker::new(script, None, None)
+    let mut worker = Worker::new(script, None)
         .await
         .expect("Worker should initialize");
 
@@ -92,7 +92,7 @@ async fn test_env_readonly() {
         env,
     );
 
-    let mut worker = Worker::new(script, None, None)
+    let mut worker = Worker::new(script, None)
         .await
         .expect("Worker should initialize");
 

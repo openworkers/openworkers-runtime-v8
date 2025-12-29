@@ -33,7 +33,7 @@ async fn test_headers_basic() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -68,7 +68,7 @@ async fn test_headers_append() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -104,7 +104,7 @@ async fn test_headers_from_object() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -158,7 +158,7 @@ async fn test_headers_iteration() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -196,7 +196,7 @@ async fn test_response_with_headers() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -239,7 +239,7 @@ async fn test_headers_delete() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,

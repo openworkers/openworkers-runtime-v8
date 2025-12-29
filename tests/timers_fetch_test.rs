@@ -15,7 +15,7 @@ async fn test_set_timeout() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -56,7 +56,7 @@ async fn test_set_interval_and_clear() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -92,7 +92,7 @@ async fn test_clear_timeout() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -129,7 +129,7 @@ async fn test_async_response() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -173,7 +173,7 @@ async fn test_fetch_forward() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -220,7 +220,7 @@ async fn test_promise_rejection_handling() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -261,7 +261,7 @@ async fn test_multiple_async_operations() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -300,7 +300,7 @@ async fn test_custom_headers() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,

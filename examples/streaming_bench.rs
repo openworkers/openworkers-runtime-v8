@@ -24,7 +24,7 @@ async fn bench_local_stream(chunk_count: usize, chunk_size: usize) -> (Duration,
     );
 
     let script = Script::new(&code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -54,7 +54,7 @@ async fn bench_buffered_response(iterations: u32) -> Duration {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let start = Instant::now();
 
@@ -84,7 +84,7 @@ async fn bench_streaming_forward(iterations: u32) -> Duration {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let start = Instant::now();
 
@@ -120,7 +120,7 @@ async fn bench_large_streaming(size_kb: usize) -> (Duration, usize) {
     );
 
     let script = Script::new(&code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,

@@ -13,7 +13,7 @@ async fn bench_simple_response() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let iterations = 100;
     let start = Instant::now();
@@ -59,7 +59,7 @@ async fn bench_async_response() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let iterations = 50;
     let start = Instant::now();
@@ -104,7 +104,7 @@ async fn bench_worker_creation() {
 
     for _ in 0..iterations {
         let script = Script::new(code);
-        let _worker = Worker::new(script, None, None).await.unwrap();
+        let _worker = Worker::new(script, None).await.unwrap();
     }
 
     let elapsed = start.elapsed();
@@ -148,7 +148,7 @@ async fn bench_complex_scenario() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let iterations = 20;
     let start = Instant::now();

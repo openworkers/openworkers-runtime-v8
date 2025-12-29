@@ -1,6 +1,5 @@
 pub mod bindings;
 pub mod crypto;
-pub mod fetch;
 pub mod stream_manager;
 pub mod streams;
 pub mod text_encoding;
@@ -13,7 +12,10 @@ use tokio::sync::mpsc;
 use v8;
 
 use crate::security::CustomAllocator;
-use openworkers_core::{HttpRequest, HttpResponseMeta, LogSender, RuntimeLimits};
+use openworkers_core::{
+    DatabaseOp, DatabaseResult, HttpRequest, HttpResponseMeta, KvOp, KvResult, Operation,
+    OperationResult, OperationsHandle, ResponseBody, RuntimeLimits, StorageOp, StorageResult,
+};
 
 pub type CallbackId = u64;
 
@@ -22,8 +24,13 @@ pub enum SchedulerMessage {
     ScheduleInterval(CallbackId, u64),
     ClearTimer(CallbackId),
     FetchStreaming(CallbackId, HttpRequest), // Fetch with streaming (stream created internally)
+    BindingFetch(CallbackId, String, HttpRequest), // Fetch via binding (binding_name, request)
+    BindingStorage(CallbackId, String, StorageOp), // Storage operation (binding_name, op)
+    BindingKv(CallbackId, String, KvOp),     // KV operation (binding_name, op)
+    BindingDatabase(CallbackId, String, DatabaseOp), // Database operation (binding_name, op)
     StreamRead(CallbackId, stream_manager::StreamId), // Read next chunk from stream
     StreamCancel(stream_manager::StreamId),  // Cancel/close a stream
+    Log(openworkers_core::LogLevel, String), // Log message (fire-and-forget)
     Shutdown,
 }
 
@@ -33,6 +40,9 @@ pub enum CallbackMessage {
     FetchError(CallbackId, String),
     FetchStreamingSuccess(CallbackId, HttpResponseMeta, stream_manager::StreamId), // Fetch metadata + stream ID
     StreamChunk(CallbackId, stream_manager::StreamChunk), // Stream chunk ready
+    StorageResult(CallbackId, StorageResult),             // Storage operation result
+    KvResult(CallbackId, KvResult),                       // KV operation result
+    DatabaseResult(CallbackId, DatabaseResult),           // Database operation result
 }
 
 pub struct Runtime {
@@ -41,6 +51,7 @@ pub struct Runtime {
     pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     pub callback_rx: mpsc::UnboundedReceiver<CallbackMessage>,
     pub(crate) fetch_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    pub(crate) fetch_error_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
     pub(crate) stream_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
     pub(crate) _next_callback_id: Arc<Mutex<CallbackId>>,
     /// Channel for fetch response (set during fetch event execution)
@@ -58,7 +69,6 @@ pub struct Runtime {
 impl Runtime {
     pub fn new(
         limits: Option<RuntimeLimits>,
-        log_tx: Option<LogSender>,
     ) -> (
         Self,
         mpsc::UnboundedReceiver<SchedulerMessage>,
@@ -81,6 +91,7 @@ impl Runtime {
         let (callback_tx, callback_rx) = mpsc::unbounded_channel();
 
         let fetch_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let fetch_error_callbacks = Arc::new(Mutex::new(HashMap::new()));
         let stream_callbacks = Arc::new(Mutex::new(HashMap::new()));
         let next_callback_id = Arc::new(Mutex::new(1));
         let fetch_response_tx = Arc::new(Mutex::new(None));
@@ -134,13 +145,14 @@ impl Runtime {
             bindings::setup_global_aliases(scope);
 
             // Always setup native bindings (not in snapshot)
-            bindings::setup_console(scope, log_tx);
+            bindings::setup_console(scope, scheduler_tx.clone());
             bindings::setup_performance(scope);
             bindings::setup_timers(scope, scheduler_tx.clone());
             bindings::setup_fetch(
                 scope,
                 scheduler_tx.clone(),
                 fetch_callbacks.clone(),
+                fetch_error_callbacks.clone(),
                 next_callback_id.clone(),
             );
             bindings::setup_stream_ops(
@@ -177,6 +189,7 @@ impl Runtime {
             scheduler_tx,
             callback_rx,
             fetch_callbacks,
+            fetch_error_callbacks,
             stream_callbacks,
             _next_callback_id: next_callback_id,
             fetch_response_tx,
@@ -221,16 +234,24 @@ impl Runtime {
                     }
                 }
                 CallbackMessage::FetchError(callback_id, error_msg) => {
-                    let callback_opt = {
+                    // Remove from success callbacks (cleanup)
+                    {
                         let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        cbs.remove(&callback_id);
+                    }
+
+                    // Get error callback and call it
+                    let error_callback_opt = {
+                        let mut cbs = self.fetch_error_callbacks.lock().unwrap();
                         cbs.remove(&callback_id)
                     };
 
-                    if let Some(callback_global) = callback_opt {
-                        let error = v8::String::new(scope, &error_msg).unwrap();
+                    if let Some(callback_global) = error_callback_opt {
+                        let error_msg_val = v8::String::new(scope, &error_msg).unwrap();
+                        let error = v8::Exception::error(scope, error_msg_val);
                         let callback = v8::Local::new(scope, &callback_global);
                         let recv = v8::undefined(scope);
-                        callback.call(scope, recv.into(), &[error.into()]);
+                        callback.call(scope, recv.into(), &[error]);
                     }
                 }
                 CallbackMessage::FetchStreamingSuccess(callback_id, meta, stream_id) => {
@@ -239,6 +260,12 @@ impl Runtime {
                         let mut cbs = self.fetch_callbacks.lock().unwrap();
                         cbs.remove(&callback_id)
                     };
+
+                    // Cleanup error callback
+                    {
+                        let mut cbs = self.fetch_error_callbacks.lock().unwrap();
+                        cbs.remove(&callback_id);
+                    }
 
                     if let Some(callback_global) = callback_opt {
                         // Create metadata object for JS
@@ -319,6 +346,232 @@ impl Runtime {
                             }
                             stream_manager::StreamChunk::Error(err_msg) => {
                                 // {error: string}
+                                let error_key = v8::String::new(scope, "error").unwrap();
+                                let error_val = v8::String::new(scope, &err_msg).unwrap();
+                                result_obj.set(scope, error_key.into(), error_val.into());
+                            }
+                        }
+
+                        callback.call(scope, recv.into(), &[result_obj.into()]);
+                    }
+                }
+                CallbackMessage::StorageResult(callback_id, storage_result) => {
+                    // Storage operation result - call the JavaScript callback
+                    let callback_opt = {
+                        let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback_global) = callback_opt {
+                        let callback = v8::Local::new(scope, &callback_global);
+                        let recv = v8::undefined(scope);
+
+                        // Create result object based on StorageResult type
+                        let result_obj = v8::Object::new(scope);
+
+                        match storage_result {
+                            StorageResult::Body(maybe_body) => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, true).into(),
+                                );
+
+                                if let Some(body) = maybe_body {
+                                    let vec = body;
+                                    let len = vec.len();
+                                    let backing_store =
+                                        v8::ArrayBuffer::new_backing_store_from_vec(vec);
+                                    let array_buffer = v8::ArrayBuffer::with_backing_store(
+                                        scope,
+                                        &backing_store.make_shared(),
+                                    );
+                                    let uint8_array =
+                                        v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
+                                    let body_key = v8::String::new(scope, "body").unwrap();
+                                    result_obj.set(scope, body_key.into(), uint8_array.into());
+                                }
+                            }
+                            StorageResult::Head { size, etag } => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, true).into(),
+                                );
+
+                                let size_key = v8::String::new(scope, "size").unwrap();
+                                let size_val = v8::Number::new(scope, size as f64);
+                                result_obj.set(scope, size_key.into(), size_val.into());
+
+                                if let Some(etag_str) = etag {
+                                    let etag_key = v8::String::new(scope, "etag").unwrap();
+                                    let etag_val = v8::String::new(scope, &etag_str).unwrap();
+                                    result_obj.set(scope, etag_key.into(), etag_val.into());
+                                }
+                            }
+                            StorageResult::List { keys, truncated } => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, true).into(),
+                                );
+
+                                let arr = v8::Array::new(scope, keys.len() as i32);
+                                for (i, key) in keys.iter().enumerate() {
+                                    let key_val = v8::String::new(scope, key).unwrap();
+                                    arr.set_index(scope, i as u32, key_val.into());
+                                }
+                                let keys_key = v8::String::new(scope, "keys").unwrap();
+                                result_obj.set(scope, keys_key.into(), arr.into());
+
+                                let truncated_key = v8::String::new(scope, "truncated").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    truncated_key.into(),
+                                    v8::Boolean::new(scope, truncated).into(),
+                                );
+                            }
+                            StorageResult::Error(err_msg) => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, false).into(),
+                                );
+
+                                let error_key = v8::String::new(scope, "error").unwrap();
+                                let error_val = v8::String::new(scope, &err_msg).unwrap();
+                                result_obj.set(scope, error_key.into(), error_val.into());
+                            }
+                        }
+
+                        callback.call(scope, recv.into(), &[result_obj.into()]);
+                    }
+                }
+                CallbackMessage::KvResult(callback_id, kv_result) => {
+                    // KV operation result - call the JavaScript callback
+                    let callback_opt = {
+                        let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback_global) = callback_opt {
+                        let callback = v8::Local::new(scope, &callback_global);
+                        let recv = v8::undefined(scope);
+
+                        // Create result object based on KvResult type
+                        let result_obj = v8::Object::new(scope);
+
+                        match kv_result {
+                            KvResult::Value(maybe_value) => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, true).into(),
+                                );
+
+                                let value_key = v8::String::new(scope, "value").unwrap();
+                                if let Some(value) = maybe_value {
+                                    let value_val = v8::String::new(scope, &value).unwrap();
+                                    result_obj.set(scope, value_key.into(), value_val.into());
+                                } else {
+                                    result_obj.set(scope, value_key.into(), v8::null(scope).into());
+                                }
+                            }
+                            KvResult::Ok => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, true).into(),
+                                );
+                            }
+                            KvResult::Keys(keys) => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, true).into(),
+                                );
+
+                                // Create JS array from keys
+                                let keys_array =
+                                    v8::Array::new(scope, keys.len().try_into().unwrap());
+
+                                for (i, key) in keys.iter().enumerate() {
+                                    let key_val = v8::String::new(scope, key).unwrap();
+                                    keys_array.set_index(scope, i as u32, key_val.into());
+                                }
+
+                                let keys_key = v8::String::new(scope, "keys").unwrap();
+                                result_obj.set(scope, keys_key.into(), keys_array.into());
+                            }
+                            KvResult::Error(err_msg) => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, false).into(),
+                                );
+
+                                let error_key = v8::String::new(scope, "error").unwrap();
+                                let error_val = v8::String::new(scope, &err_msg).unwrap();
+                                result_obj.set(scope, error_key.into(), error_val.into());
+                            }
+                        }
+
+                        callback.call(scope, recv.into(), &[result_obj.into()]);
+                    }
+                }
+                CallbackMessage::DatabaseResult(callback_id, database_result) => {
+                    // Database operation result - call the JavaScript callback
+                    let callback_opt = {
+                        let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback_global) = callback_opt {
+                        let callback = v8::Local::new(scope, &callback_global);
+                        let recv = v8::undefined(scope);
+
+                        // Create result object based on DatabaseResult type
+                        let result_obj = v8::Object::new(scope);
+
+                        match database_result {
+                            DatabaseResult::Rows(rows_json) => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, true).into(),
+                                );
+
+                                // Parse the JSON rows and set as rows property
+                                let rows_key = v8::String::new(scope, "rows").unwrap();
+                                let rows_str = v8::String::new(scope, &rows_json).unwrap();
+
+                                // Parse JSON string to JS object
+                                let parsed = v8::json::parse(scope, rows_str.into());
+
+                                if let Some(parsed_value) = parsed {
+                                    result_obj.set(scope, rows_key.into(), parsed_value);
+                                } else {
+                                    // Fallback: return the raw string if parsing fails
+                                    result_obj.set(scope, rows_key.into(), rows_str.into());
+                                }
+                            }
+                            DatabaseResult::Error(err_msg) => {
+                                let success_key = v8::String::new(scope, "success").unwrap();
+                                result_obj.set(
+                                    scope,
+                                    success_key.into(),
+                                    v8::Boolean::new(scope, false).into(),
+                                );
+
                                 let error_key = v8::String::new(scope, "error").unwrap();
                                 let error_val = v8::String::new(scope, &err_msg).unwrap();
                                 result_obj.set(scope, error_key.into(), error_val.into());
@@ -428,6 +681,7 @@ pub async fn run_event_loop(
     mut scheduler_rx: mpsc::UnboundedReceiver<SchedulerMessage>,
     callback_tx: mpsc::UnboundedSender<CallbackMessage>,
     stream_manager: Arc<stream_manager::StreamManager>,
+    ops: OperationsHandle,
 ) {
     let mut running_tasks: HashMap<CallbackId, tokio::task::JoinHandle<()>> = HashMap::new();
 
@@ -435,7 +689,7 @@ pub async fn run_event_loop(
         match msg {
             SchedulerMessage::ScheduleTimeout(callback_id, delay_ms) => {
                 let callback_tx = callback_tx.clone();
-                let handle = tokio::spawn(async move {
+                let handle = tokio::task::spawn_local(async move {
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                     let _ = callback_tx.send(CallbackMessage::ExecuteTimeout(callback_id));
                 });
@@ -443,11 +697,13 @@ pub async fn run_event_loop(
             }
             SchedulerMessage::ScheduleInterval(callback_id, interval_ms) => {
                 let callback_tx = callback_tx.clone();
-                let handle = tokio::spawn(async move {
+                let handle = tokio::task::spawn_local(async move {
                     let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
                     interval.tick().await;
+
                     loop {
                         interval.tick().await;
+
                         if callback_tx
                             .send(CallbackMessage::ExecuteInterval(callback_id))
                             .is_err()
@@ -459,11 +715,15 @@ pub async fn run_event_loop(
                 running_tasks.insert(callback_id, handle);
             }
             SchedulerMessage::FetchStreaming(promise_id, request) => {
-                // Fetch with real-time streaming
+                // Fetch via runner's OperationsHandler
                 let callback_tx = callback_tx.clone();
                 let manager = stream_manager.clone();
-                tokio::spawn(async move {
-                    match fetch::execute_fetch_streaming(request, manager).await {
+                let ops = ops.clone();
+
+                tokio::task::spawn_local(async move {
+                    let result = execute_fetch_via_ops(request, manager, ops).await;
+
+                    match result {
                         Ok((meta, stream_id)) => {
                             let _ = callback_tx.send(CallbackMessage::FetchStreamingSuccess(
                                 promise_id, meta, stream_id,
@@ -475,11 +735,101 @@ pub async fn run_event_loop(
                     }
                 });
             }
+            SchedulerMessage::BindingFetch(promise_id, binding_name, request) => {
+                // Fetch via binding (runner injects auth)
+                let callback_tx = callback_tx.clone();
+                let manager = stream_manager.clone();
+                let ops = ops.clone();
+
+                tokio::task::spawn_local(async move {
+                    let result =
+                        execute_binding_fetch_via_ops(binding_name, request, manager, ops).await;
+
+                    match result {
+                        Ok((meta, stream_id)) => {
+                            let _ = callback_tx.send(CallbackMessage::FetchStreamingSuccess(
+                                promise_id, meta, stream_id,
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = callback_tx.send(CallbackMessage::FetchError(promise_id, e));
+                        }
+                    }
+                });
+            }
+            SchedulerMessage::BindingStorage(callback_id, binding_name, storage_op) => {
+                // Storage operation via binding
+                let callback_tx = callback_tx.clone();
+                let ops = ops.clone();
+
+                tokio::task::spawn_local(async move {
+                    let result = ops
+                        .handle(Operation::BindingStorage {
+                            binding: binding_name,
+                            op: storage_op,
+                        })
+                        .await;
+
+                    let storage_result = match result {
+                        OperationResult::Storage(r) => r,
+                        _ => StorageResult::Error("Unexpected result type".into()),
+                    };
+
+                    let _ = callback_tx
+                        .send(CallbackMessage::StorageResult(callback_id, storage_result));
+                });
+            }
+            SchedulerMessage::BindingKv(callback_id, binding_name, kv_op) => {
+                // KV operation via binding
+                let callback_tx = callback_tx.clone();
+                let ops = ops.clone();
+
+                tokio::task::spawn_local(async move {
+                    let result = ops
+                        .handle(Operation::BindingKv {
+                            binding: binding_name,
+                            op: kv_op,
+                        })
+                        .await;
+
+                    let kv_result = match result {
+                        OperationResult::Kv(r) => r,
+                        _ => KvResult::Error("Unexpected result type".into()),
+                    };
+
+                    let _ = callback_tx.send(CallbackMessage::KvResult(callback_id, kv_result));
+                });
+            }
+            SchedulerMessage::BindingDatabase(callback_id, binding_name, database_op) => {
+                // Database operation via binding
+                let callback_tx = callback_tx.clone();
+                let ops = ops.clone();
+
+                tokio::task::spawn_local(async move {
+                    let result = ops
+                        .handle(Operation::BindingDatabase {
+                            binding: binding_name,
+                            op: database_op,
+                        })
+                        .await;
+
+                    let database_result = match result {
+                        OperationResult::Database(r) => r,
+                        _ => DatabaseResult::Error("Unexpected result type".into()),
+                    };
+
+                    let _ = callback_tx.send(CallbackMessage::DatabaseResult(
+                        callback_id,
+                        database_result,
+                    ));
+                });
+            }
             SchedulerMessage::StreamRead(callback_id, stream_id) => {
                 // Read next chunk from a stream
                 let callback_tx = callback_tx.clone();
                 let manager = stream_manager.clone();
-                tokio::spawn(async move {
+
+                tokio::task::spawn_local(async move {
                     let chunk = match manager.read_chunk(stream_id).await {
                         Ok(chunk) => chunk,
                         Err(e) => stream_manager::StreamChunk::Error(e),
@@ -496,6 +846,13 @@ pub async fn run_event_loop(
                     handle.abort();
                 }
             }
+            SchedulerMessage::Log(level, message) => {
+                // Fire-and-forget log via ops
+                let ops = ops.clone();
+                tokio::task::spawn_local(async move {
+                    let _ = ops.handle(Operation::Log { level, message }).await;
+                });
+            }
             SchedulerMessage::Shutdown => {
                 for (_, handle) in running_tasks.drain() {
                     handle.abort();
@@ -504,6 +861,110 @@ pub async fn run_event_loop(
             }
         }
     }
+}
+
+/// Execute fetch via OperationsHandler, converting HttpResponse to StreamManager pattern
+async fn execute_fetch_via_ops(
+    request: HttpRequest,
+    stream_manager: Arc<stream_manager::StreamManager>,
+    ops: OperationsHandle,
+) -> Result<(HttpResponseMeta, stream_manager::StreamId), String> {
+    // Call the OperationsHandler with Fetch operation
+    let result = ops.handle(Operation::Fetch(request)).await;
+    convert_fetch_result_to_stream(result, stream_manager).await
+}
+
+/// Execute binding fetch via OperationsHandler
+async fn execute_binding_fetch_via_ops(
+    binding_name: String,
+    request: HttpRequest,
+    stream_manager: Arc<stream_manager::StreamManager>,
+    ops: OperationsHandle,
+) -> Result<(HttpResponseMeta, stream_manager::StreamId), String> {
+    // Call the OperationsHandler with BindingFetch operation
+    let result = ops
+        .handle(Operation::BindingFetch {
+            binding: binding_name,
+            request,
+        })
+        .await;
+    convert_fetch_result_to_stream(result, stream_manager).await
+}
+
+/// Convert OperationResult to (HttpResponseMeta, StreamId)
+async fn convert_fetch_result_to_stream(
+    result: OperationResult,
+    stream_manager: Arc<stream_manager::StreamManager>,
+) -> Result<(HttpResponseMeta, stream_manager::StreamId), String> {
+    // Extract the HTTP response
+    let response = match result {
+        OperationResult::Http(r) => r?,
+        OperationResult::Ack => return Err("Unexpected Ack result for fetch".into()),
+        OperationResult::Storage(_) => return Err("Unexpected Storage result for fetch".into()),
+        OperationResult::Kv(_) => return Err("Unexpected Kv result for fetch".into()),
+        OperationResult::Database(_) => return Err("Unexpected Database result for fetch".into()),
+    };
+
+    // Convert HttpResponse to (HttpResponseMeta, StreamId)
+    let meta = HttpResponseMeta {
+        status: response.status,
+        status_text: String::new(), // TODO: derive from status code
+        headers: response.headers.into_iter().collect(),
+    };
+
+    // Create a stream in the StreamManager
+    let stream_id = stream_manager.create_stream("ops_fetch".to_string());
+
+    // Handle the response body
+    match response.body {
+        ResponseBody::None => {
+            // No body - just signal done
+            let _ = stream_manager
+                .write_chunk(stream_id, stream_manager::StreamChunk::Done)
+                .await;
+        }
+        ResponseBody::Bytes(bytes) => {
+            // Buffered body - write all bytes then done
+            let _ = stream_manager
+                .write_chunk(stream_id, stream_manager::StreamChunk::Data(bytes))
+                .await;
+            let _ = stream_manager
+                .write_chunk(stream_id, stream_manager::StreamChunk::Done)
+                .await;
+        }
+        ResponseBody::Stream(mut rx) => {
+            // Streaming body - spawn task to forward chunks
+            let manager = stream_manager.clone();
+
+            tokio::task::spawn_local(async move {
+                while let Some(result) = rx.recv().await {
+                    match result {
+                        Ok(bytes) => {
+                            if manager
+                                .write_chunk(stream_id, stream_manager::StreamChunk::Data(bytes))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = manager
+                                .write_chunk(stream_id, stream_manager::StreamChunk::Error(e))
+                                .await;
+                            return;
+                        }
+                    }
+                }
+
+                let _ = manager
+                    .write_chunk(stream_id, stream_manager::StreamChunk::Done)
+                    .await;
+            });
+        }
+    }
+
+    Ok((meta, stream_id))
 }
 
 impl Drop for Runtime {

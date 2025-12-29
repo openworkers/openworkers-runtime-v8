@@ -29,7 +29,7 @@ async fn test_memory_limit_arraybuffer_allocation() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, Some(limits)).await.unwrap();
+    let mut worker = Worker::new(script, Some(limits)).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -74,7 +74,7 @@ async fn test_memory_limit_uint8array_allocation() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, Some(limits)).await.unwrap();
+    let mut worker = Worker::new(script, Some(limits)).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -125,7 +125,7 @@ async fn test_memory_limit_incremental_allocation() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, Some(limits)).await.unwrap();
+    let mut worker = Worker::new(script, Some(limits)).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -172,7 +172,7 @@ async fn test_memory_within_limit() {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, Some(limits)).await.unwrap();
+    let mut worker = Worker::new(script, Some(limits)).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,

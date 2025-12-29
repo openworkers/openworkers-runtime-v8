@@ -1,7 +1,7 @@
 use crate::runtime::{Runtime, run_event_loop};
 use crate::security::{CpuEnforcer, TimeoutGuard};
 use openworkers_core::{
-    HttpResponse, LogSender, RequestBody, ResponseBody, RuntimeLimits, Script, Task,
+    HttpResponse, OperationsHandle, RequestBody, ResponseBody, RuntimeLimits, Script, Task,
     TerminationReason,
 };
 use std::sync::Arc;
@@ -40,12 +40,15 @@ impl Worker {
 }
 
 impl Worker {
-    pub async fn new(
+    /// Create a new worker with an OperationsHandler
+    ///
+    /// All operations (fetch, log, etc.) go through the runner's OperationsHandler.
+    pub async fn new_with_ops(
         script: Script,
-        log_tx: Option<LogSender>,
         limits: Option<RuntimeLimits>,
+        ops: OperationsHandle,
     ) -> Result<Self, TerminationReason> {
-        let (mut runtime, scheduler_rx, callback_tx) = Runtime::new(limits, log_tx);
+        let (mut runtime, scheduler_rx, callback_tx) = Runtime::new(limits);
 
         // Setup addEventListener
         setup_event_listener(&mut runtime).map_err(|e| {
@@ -55,8 +58,8 @@ impl Worker {
             ))
         })?;
 
-        // Setup environment variables
-        setup_env(&mut runtime, &script.env).map_err(|e| {
+        // Setup environment variables and bindings
+        setup_env(&mut runtime, &script.env, &script.bindings).map_err(|e| {
             TerminationReason::InitializationError(format!("Failed to setup env: {}", e))
         })?;
 
@@ -68,9 +71,11 @@ impl Worker {
         // Get stream_manager for event loop
         let stream_manager = runtime.stream_manager.clone();
 
-        // Start event loop in background
-        let event_loop_handle = tokio::spawn(async move {
-            run_event_loop(scheduler_rx, callback_tx, stream_manager).await;
+        // Start event loop in background (with optional Operations handle)
+        // Use spawn_local to keep it in the same LocalSet as the V8 worker,
+        // which allows nested spawn_local calls in ops (like do_fetch streaming)
+        let event_loop_handle = tokio::task::spawn_local(async move {
+            run_event_loop(scheduler_rx, callback_tx, stream_manager, ops).await;
         });
 
         Ok(Self {
@@ -78,6 +83,18 @@ impl Worker {
             _event_loop_handle: event_loop_handle,
             aborted: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Create a new worker with default DirectOperations (for testing)
+    ///
+    /// Note: DirectOperations returns errors for fetch operations.
+    /// In production, use `new_with_ops` with a real OperationsHandler.
+    pub async fn new(
+        script: Script,
+        limits: Option<RuntimeLimits>,
+    ) -> Result<Self, TerminationReason> {
+        let ops: OperationsHandle = Arc::new(openworkers_core::DefaultOps);
+        Self::new_with_ops(script, limits, ops).await
     }
 
     /// Abort the worker execution
@@ -301,26 +318,39 @@ impl Worker {
             self.runtime.process_callbacks();
 
             // Check if response is available and body has been read
-            use std::pin::pin;
-            let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
-            let mut scope = scope.init();
-            let context = v8::Local::new(&scope, &self.runtime.context);
-            let scope = &mut v8::ContextScope::new(&mut scope, context);
-            let global = context.global(scope);
+            // CRITICAL: Wrap in explicit block to drop V8 scopes BEFORE the await below.
+            // V8 scopes (HandleScope, ContextScope) use RAII - they Enter on creation and Exit on drop.
+            // If scopes are alive during await, another worker on the same thread may run and corrupt
+            // V8's context stack, causing "Cannot exit non-entered context" crashes.
+            let response_ready = {
+                use std::pin::pin;
+                let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
+                let mut scope = scope.init();
+                let context = v8::Local::new(&scope, &self.runtime.context);
+                let scope = &mut v8::ContextScope::new(&mut scope, context);
+                let global = context.global(scope);
 
-            let resp_key = v8::String::new(scope, "__lastResponse").unwrap();
-            if let Some(resp_val) = global.get(scope, resp_key.into()) {
-                // Check if it's a valid Response object (not undefined, not a Promise)
-                if !resp_val.is_undefined() && !resp_val.is_null() && !resp_val.is_promise() {
-                    if let Some(resp_obj) = resp_val.to_object(scope) {
-                        // Check if it has a 'status' property (indicates it's a Response, not a Promise)
-                        let status_key = v8::String::new(scope, "status").unwrap();
-                        if resp_obj.get(scope, status_key.into()).is_some() {
-                            // Response is ready! (body is in the ReadableStream queue)
-                            break;
+                let resp_key = v8::String::new(scope, "__lastResponse").unwrap();
+                if let Some(resp_val) = global.get(scope, resp_key.into()) {
+                    // Check if it's a valid Response object (not undefined, not a Promise)
+                    if !resp_val.is_undefined() && !resp_val.is_null() && !resp_val.is_promise() {
+                        if let Some(resp_obj) = resp_val.to_object(scope) {
+                            // Check if it has a 'status' property (indicates it's a Response, not a Promise)
+                            let status_key = v8::String::new(scope, "status").unwrap();
+                            resp_obj.get(scope, status_key.into()).is_some()
+                        } else {
+                            false
                         }
+                    } else {
+                        false
                     }
+                } else {
+                    false
                 }
+            }; // <-- V8 scopes dropped here, BEFORE the await
+
+            if response_ready {
+                break;
             }
 
             // Adaptive sleep: fast for first checks, slower later
@@ -431,7 +461,7 @@ impl Worker {
                     let (tx, rx) = tokio::sync::mpsc::channel(16);
 
                     // Spawn task to convert StreamChunk -> Result<Bytes, String>
-                    tokio::spawn(async move {
+                    tokio::task::spawn_local(async move {
                         let mut receiver = receiver;
                         while let Some(chunk) = receiver.recv().await {
                             match chunk {
@@ -541,8 +571,9 @@ impl Worker {
 fn setup_env(
     runtime: &mut Runtime,
     env: &Option<std::collections::HashMap<String, String>>,
+    bindings: &[openworkers_core::BindingInfo],
 ) -> Result<(), String> {
-    // Build JSON string for env
+    // Build JSON string for env vars
     let env_json = if let Some(env_map) = env {
         let pairs: Vec<String> = env_map
             .iter()
@@ -559,15 +590,215 @@ fn setup_env(
         "{}".to_string()
     };
 
-    // Set globalThis.env as read-only
+    // Build binding object definitions
+    let binding_defs: Vec<String> = bindings
+        .iter()
+        .map(|b| {
+            let name = serde_json::to_string(&b.name).unwrap_or_else(|_| "\"\"".to_string());
+            match b.binding_type {
+                openworkers_core::BindingType::Assets => {
+                    // Assets binding has fetch() only
+                    format!(
+                        r#"{name}: {{
+                            fetch: function(path, options) {{
+                                options = options || {{}};
+                                return new Promise((resolve, reject) => {{
+                                    const fetchOptions = {{
+                                        url: path,
+                                        method: options.method || 'GET',
+                                        headers: options.headers || {{}},
+                                        body: options.body || null
+                                    }};
+                                    __nativeBindingFetch({name}, fetchOptions, (meta) => {{
+                                        const stream = __createNativeStream(meta.streamId);
+                                        const response = new Response(stream, {{
+                                            status: meta.status,
+                                            headers: meta.headers
+                                        }});
+                                        response.ok = meta.status >= 200 && meta.status < 300;
+                                        response.statusText = meta.statusText;
+                                        resolve(response);
+                                    }}, reject);
+                                }});
+                            }}
+                        }}"#,
+                    )
+                }
+                openworkers_core::BindingType::Storage => {
+                    // Storage binding has get/put/head/list/delete
+                    format!(
+                        r#"{name}: {{
+                            get: function(key) {{
+                                return new Promise((resolve, reject) => {{
+                                    __nativeBindingStorage({name}, 'get', {{ key }}, (result) => {{
+                                        if (!result.success) {{
+                                            reject(new Error(result.error));
+                                        }} else if (result.body) {{
+                                            resolve(new TextDecoder().decode(result.body));
+                                        }} else {{
+                                            resolve(null);
+                                        }}
+                                    }});
+                                }});
+                            }},
+                            put: function(key, value) {{
+                                return new Promise((resolve, reject) => {{
+                                    const body = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+                                    __nativeBindingStorage({name}, 'put', {{ key, body }}, (result) => {{
+                                        if (!result.success) {{
+                                            reject(new Error(result.error));
+                                        }} else {{
+                                            resolve();
+                                        }}
+                                    }});
+                                }});
+                            }},
+                            head: function(key) {{
+                                return new Promise((resolve, reject) => {{
+                                    __nativeBindingStorage({name}, 'head', {{ key }}, (result) => {{
+                                        if (!result.success) {{
+                                            reject(new Error(result.error));
+                                        }} else {{
+                                            resolve({{ size: result.size, etag: result.etag }});
+                                        }}
+                                    }});
+                                }});
+                            }},
+                            list: function(options) {{
+                                options = options || {{}};
+                                return new Promise((resolve, reject) => {{
+                                    __nativeBindingStorage({name}, 'list', {{ prefix: options.prefix, limit: options.limit }}, (result) => {{
+                                        if (!result.success) {{
+                                            reject(new Error(result.error));
+                                        }} else {{
+                                            resolve({{ keys: result.keys, truncated: result.truncated }});
+                                        }}
+                                    }});
+                                }});
+                            }},
+                            delete: function(key) {{
+                                return new Promise((resolve, reject) => {{
+                                    __nativeBindingStorage({name}, 'delete', {{ key }}, (result) => {{
+                                        if (!result.success) {{
+                                            reject(new Error(result.error));
+                                        }} else {{
+                                            resolve();
+                                        }}
+                                    }});
+                                }});
+                            }}
+                        }}"#,
+                    )
+                }
+                openworkers_core::BindingType::Kv => {
+                    // KV binding has get/put/delete/list
+                    // Use IIFE to capture binding name as a string constant
+                    format!(
+                        r#"{name}: (function() {{
+                            const __bindingName = {name};
+                            return {{
+                                get: function(key) {{
+                                    return new Promise((resolve, reject) => {{
+                                        __nativeBindingKv(__bindingName, 'get', {{ key }}, (result) => {{
+                                            if (!result.success) {{
+                                                reject(new Error(result.error));
+                                            }} else {{
+                                                resolve(result.value);
+                                            }}
+                                        }});
+                                    }});
+                                }},
+                                put: function(key, value, options) {{
+                                    return new Promise((resolve, reject) => {{
+                                        const params = {{ key, value }};
+                                        if (options && options.expiresIn) {{
+                                            params.expiresIn = options.expiresIn;
+                                        }}
+                                        __nativeBindingKv(__bindingName, 'put', params, (result) => {{
+                                            if (!result.success) {{
+                                                reject(new Error(result.error));
+                                            }} else {{
+                                                resolve();
+                                            }}
+                                        }});
+                                    }});
+                                }},
+                                delete: function(key) {{
+                                    return new Promise((resolve, reject) => {{
+                                        __nativeBindingKv(__bindingName, 'delete', {{ key }}, (result) => {{
+                                            if (!result.success) {{
+                                                reject(new Error(result.error));
+                                            }} else {{
+                                                resolve();
+                                            }}
+                                        }});
+                                    }});
+                                }},
+                                list: function(options) {{
+                                    return new Promise((resolve, reject) => {{
+                                        const params = {{}};
+                                        if (options) {{
+                                            if (options.prefix) params.prefix = options.prefix;
+                                            if (options.limit) params.limit = options.limit;
+                                        }}
+                                        __nativeBindingKv(__bindingName, 'list', params, (result) => {{
+                                            if (!result.success) {{
+                                                reject(new Error(result.error));
+                                            }} else {{
+                                                resolve(result.keys);
+                                            }}
+                                        }});
+                                    }});
+                                }}
+                            }};
+                        }})()"#,
+                    )
+                }
+                openworkers_core::BindingType::Database => {
+                    // Database binding has query method
+                    // Use IIFE to capture binding name as a string constant
+                    format!(
+                        r#"{name}: (function() {{
+                            const __bindingName = {name};
+                            return {{
+                                query: function(sql, params) {{
+                                    return new Promise((resolve, reject) => {{
+                                        const queryParams = {{
+                                            sql,
+                                            params: params || []
+                                        }};
+                                        __nativeBindingDatabase(__bindingName, 'query', queryParams, (result) => {{
+                                            if (!result.success) {{
+                                                reject(new Error(result.error));
+                                            }} else {{
+                                                resolve(result.rows);
+                                            }}
+                                        }});
+                                    }});
+                                }}
+                            }};
+                        }})()"#,
+                    )
+                }
+            }
+        })
+        .collect();
+
+    let bindings_json = if binding_defs.is_empty() {
+        String::new()
+    } else {
+        format!(", {{{}}}", binding_defs.join(","))
+    };
+
+    // Set globalThis.env as read-only with both env vars and bindings
     let code = format!(
         r#"Object.defineProperty(globalThis, 'env', {{
-            value: {},
+            value: Object.freeze(Object.assign({}{})),
             writable: false,
             enumerable: true,
             configurable: false
         }});"#,
-        env_json
+        env_json, bindings_json
     );
 
     runtime.evaluate(&code)
@@ -661,12 +892,8 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
 }
 
 impl openworkers_core::Worker for Worker {
-    async fn new(
-        script: Script,
-        log_tx: Option<LogSender>,
-        limits: Option<RuntimeLimits>,
-    ) -> Result<Self, TerminationReason> {
-        Worker::new(script, log_tx, limits).await
+    async fn new(script: Script, limits: Option<RuntimeLimits>) -> Result<Self, TerminationReason> {
+        Worker::new(script, limits).await
     }
 
     async fn exec(&mut self, task: Task) -> Result<(), TerminationReason> {
