@@ -730,6 +730,158 @@ pub fn setup_fetch(
         native_binding_database_fn.into(),
     );
 
+    // Create __nativeBindingWorker for worker-to-worker calls
+    let native_binding_worker_fn = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope,
+         args: v8::FunctionCallbackArguments,
+         mut _retval: v8::ReturnValue| {
+            let global = scope.get_current_context().global(scope);
+            let state_key = v8::String::new(scope, "__fetchState").unwrap();
+            let state_val = global.get(scope, state_key.into()).unwrap();
+
+            if !state_val.is_external() {
+                return;
+            }
+
+            let external: v8::Local<v8::External> = state_val.try_into().unwrap();
+            let state_ptr = external.value() as *mut FetchState;
+            let state = unsafe { &*state_ptr };
+
+            // Args: (bindingName, options, successCallback, errorCallback)
+            if args.length() < 4 {
+                return;
+            }
+
+            // Get binding name (arg 0)
+            let binding_name = match args.get(0).to_string(scope) {
+                Some(s) => s.to_rust_string_lossy(scope),
+                None => return,
+            };
+
+            // Parse fetch options (arg 1)
+            let options = match args.get(1).to_object(scope) {
+                Some(obj) => obj,
+                None => return,
+            };
+
+            // Get URL/path
+            let url_key = v8::String::new(scope, "url").unwrap();
+            let url = match options
+                .get(scope, url_key.into())
+                .and_then(|v| v.to_string(scope))
+            {
+                Some(s) => s.to_rust_string_lossy(scope),
+                None => return,
+            };
+
+            // Get method
+            let method_key = v8::String::new(scope, "method").unwrap();
+            let method_str = options
+                .get(scope, method_key.into())
+                .and_then(|v| v.to_string(scope))
+                .map(|s| s.to_rust_string_lossy(scope))
+                .unwrap_or_else(|| "GET".to_string());
+
+            let method = HttpMethod::from_str(&method_str).unwrap_or(HttpMethod::Get);
+
+            // Get headers
+            let mut headers = std::collections::HashMap::new();
+            let headers_key = v8::String::new(scope, "headers").unwrap();
+
+            if let Some(headers_val) = options.get(scope, headers_key.into())
+                && let Some(headers_obj) = headers_val.to_object(scope)
+                && let Some(props) = headers_obj.get_own_property_names(scope, Default::default())
+            {
+                for i in 0..props.length() {
+                    if let Some(key_val) = props.get_index(scope, i)
+                        && let Some(key_str) = key_val.to_string(scope)
+                    {
+                        let key = key_str.to_rust_string_lossy(scope);
+
+                        if let Some(val) = headers_obj.get(scope, key_val)
+                            && let Some(val_str) = val.to_string(scope)
+                        {
+                            let value = val_str.to_rust_string_lossy(scope);
+                            headers.insert(key, value);
+                        }
+                    }
+                }
+            }
+
+            // Get body
+            let body_key = v8::String::new(scope, "body").unwrap();
+            let body = if let Some(body_val) = options.get(scope, body_key.into())
+                && !body_val.is_null()
+                && !body_val.is_undefined()
+            {
+                if let Ok(uint8_array) = v8::Local::<v8::Uint8Array>::try_from(body_val) {
+                    let len = uint8_array.byte_length();
+                    let mut buffer = vec![0u8; len];
+                    uint8_array.copy_contents(&mut buffer);
+                    openworkers_core::RequestBody::Bytes(bytes::Bytes::from(buffer))
+                } else if let Some(body_str) = body_val.to_string(scope) {
+                    openworkers_core::RequestBody::Bytes(bytes::Bytes::from(
+                        body_str.to_rust_string_lossy(scope),
+                    ))
+                } else {
+                    openworkers_core::RequestBody::None
+                }
+            } else {
+                openworkers_core::RequestBody::None
+            };
+
+            let request = openworkers_core::HttpRequest {
+                url,
+                method,
+                headers,
+                body,
+            };
+
+            // Store callbacks
+            let success_cb = args.get(2);
+            let error_cb = args.get(3);
+
+            if !success_cb.is_function() || !error_cb.is_function() {
+                return;
+            }
+
+            let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
+            let error_fn: v8::Local<v8::Function> = error_cb.try_into().unwrap();
+
+            let callback_id = {
+                let mut id = state.next_id.lock().unwrap();
+                let current = *id;
+                *id += 1;
+                current
+            };
+
+            {
+                let mut cbs = state.callbacks.lock().unwrap();
+                cbs.insert(callback_id, v8::Global::new(scope, success_fn));
+            }
+
+            {
+                let mut error_cbs = state.error_callbacks.lock().unwrap();
+                error_cbs.insert(callback_id, v8::Global::new(scope, error_fn));
+            }
+
+            let _ = state.scheduler_tx.send(SchedulerMessage::BindingWorker(
+                callback_id,
+                binding_name,
+                request,
+            ));
+        },
+    )
+    .unwrap();
+
+    let native_binding_worker_key = v8::String::new(scope, "__nativeBindingWorker").unwrap();
+    global.set(
+        scope,
+        native_binding_worker_key.into(),
+        native_binding_worker_fn.into(),
+    );
+
     // JavaScript fetch implementation using Promises with streaming support
     let code = r#"
         // Helper to read entire ReadableStream into a string

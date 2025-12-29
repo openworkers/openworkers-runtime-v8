@@ -28,6 +28,7 @@ pub enum SchedulerMessage {
     BindingStorage(CallbackId, String, StorageOp), // Storage operation (binding_name, op)
     BindingKv(CallbackId, String, KvOp),     // KV operation (binding_name, op)
     BindingDatabase(CallbackId, String, DatabaseOp), // Database operation (binding_name, op)
+    BindingWorker(CallbackId, String, HttpRequest), // Worker binding (binding_name, request)
     StreamRead(CallbackId, stream_manager::StreamId), // Read next chunk from stream
     StreamCancel(stream_manager::StreamId),  // Cancel/close a stream
     Log(openworkers_core::LogLevel, String), // Log message (fire-and-forget)
@@ -822,6 +823,110 @@ pub async fn run_event_loop(
                         callback_id,
                         database_result,
                     ));
+                });
+            }
+            SchedulerMessage::BindingWorker(callback_id, binding_name, request) => {
+                // Worker binding - execute target worker
+                let callback_tx = callback_tx.clone();
+                let manager = stream_manager.clone();
+                let ops = ops.clone();
+
+                tokio::task::spawn_local(async move {
+                    let result = ops
+                        .handle(Operation::BindingWorker {
+                            binding: binding_name,
+                            request,
+                        })
+                        .await;
+
+                    // Worker binding returns HTTP response, same as fetch
+                    match result {
+                        OperationResult::Http(Ok(response)) => {
+                            // Convert to streaming response
+                            let meta = HttpResponseMeta {
+                                status: response.status,
+                                status_text: String::new(),
+                                headers: response.headers.into_iter().collect(),
+                            };
+
+                            let stream_id = manager.create_stream("worker_binding".to_string());
+
+                            // Handle the response body
+                            match response.body {
+                                ResponseBody::None => {
+                                    let _ = manager
+                                        .write_chunk(stream_id, stream_manager::StreamChunk::Done)
+                                        .await;
+                                }
+                                ResponseBody::Bytes(bytes) => {
+                                    let _ = manager
+                                        .write_chunk(
+                                            stream_id,
+                                            stream_manager::StreamChunk::Data(bytes),
+                                        )
+                                        .await;
+                                    let _ = manager
+                                        .write_chunk(stream_id, stream_manager::StreamChunk::Done)
+                                        .await;
+                                }
+                                ResponseBody::Stream(mut rx) => {
+                                    let mgr = manager.clone();
+
+                                    tokio::task::spawn_local(async move {
+                                        while let Some(result) = rx.recv().await {
+                                            match result {
+                                                Ok(bytes) => {
+                                                    if mgr
+                                                        .write_chunk(
+                                                            stream_id,
+                                                            stream_manager::StreamChunk::Data(
+                                                                bytes,
+                                                            ),
+                                                        )
+                                                        .await
+                                                        .is_err()
+                                                    {
+                                                        break;
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    let _ = mgr
+                                                        .write_chunk(
+                                                            stream_id,
+                                                            stream_manager::StreamChunk::Error(e),
+                                                        )
+                                                        .await;
+                                                    return;
+                                                }
+                                            }
+                                        }
+
+                                        let _ = mgr
+                                            .write_chunk(
+                                                stream_id,
+                                                stream_manager::StreamChunk::Done,
+                                            )
+                                            .await;
+                                    });
+                                }
+                            }
+
+                            let _ = callback_tx.send(CallbackMessage::FetchStreamingSuccess(
+                                callback_id,
+                                meta,
+                                stream_id,
+                            ));
+                        }
+                        OperationResult::Http(Err(e)) => {
+                            let _ = callback_tx.send(CallbackMessage::FetchError(callback_id, e));
+                        }
+                        _ => {
+                            let _ = callback_tx.send(CallbackMessage::FetchError(
+                                callback_id,
+                                "Unexpected result type for worker binding".into(),
+                            ));
+                        }
+                    }
                 });
             }
             SchedulerMessage::StreamRead(callback_id, stream_id) => {

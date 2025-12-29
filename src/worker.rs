@@ -854,6 +854,50 @@ fn setup_env(
                         }})()"#,
                     )
                 }
+                openworkers_core::BindingType::Worker => {
+                    // Worker binding has fetch method for worker-to-worker calls
+                    format!(
+                        r#"{name}: {{
+                            fetch: function(request) {{
+                                return new Promise((resolve, reject) => {{
+                                    // Convert Request to serializable format
+                                    const processRequest = async () => {{
+                                        let url, method, headers, body;
+                                        if (typeof request === 'string') {{
+                                            url = request;
+                                            method = 'GET';
+                                            headers = {{}};
+                                            body = null;
+                                        }} else if (request instanceof Request) {{
+                                            url = request.url;
+                                            method = request.method;
+                                            headers = Object.fromEntries(request.headers.entries());
+                                            body = request.body ? await request.text() : null;
+                                        }} else {{
+                                            url = request.url || '/';
+                                            method = request.method || 'GET';
+                                            headers = request.headers || {{}};
+                                            body = request.body || null;
+                                        }}
+                                        return {{ url, method, headers, body }};
+                                    }};
+                                    processRequest().then((fetchOptions) => {{
+                                        __nativeBindingWorker({name}, fetchOptions, (meta) => {{
+                                            const stream = __createNativeStream(meta.streamId);
+                                            const response = new Response(stream, {{
+                                                status: meta.status,
+                                                headers: meta.headers
+                                            }});
+                                            response.ok = meta.status >= 200 && meta.status < 300;
+                                            response.statusText = meta.statusText;
+                                            resolve(response);
+                                        }}, reject);
+                                    }}).catch(reject);
+                                }});
+                            }}
+                        }}"#,
+                    )
+                }
             }
         })
         .collect();
