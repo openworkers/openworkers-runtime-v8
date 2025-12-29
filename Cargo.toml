@@ -1,6 +1,6 @@
 [package]
 name = "openworkers-runtime-v8"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 
 [features]
@@ -40,7 +40,7 @@ libc = "0.2.178"
 
 # Signal handling (for CPU time enforcement on Linux)
 [target.'cfg(target_os = "linux")'.dependencies]
-signal-hook = "0.4.1"
+signal-hook = "0.3.18"
 signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
 
 # Optional dependencies
