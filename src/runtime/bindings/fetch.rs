@@ -6,6 +6,227 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use v8;
 
+/// Get FetchState from global scope
+fn get_fetch_state<'a>(scope: &mut v8::PinScope) -> Option<&'a FetchState> {
+    let global = scope.get_current_context().global(scope);
+    let state_key = v8::String::new(scope, "__fetchState").unwrap();
+    let state_val = global.get(scope, state_key.into())?;
+
+    if !state_val.is_external() {
+        return None;
+    }
+
+    let external: v8::Local<v8::External> = state_val.try_into().ok()?;
+    let state_ptr = external.value() as *mut FetchState;
+    Some(unsafe { &*state_ptr })
+}
+
+/// Parse JS options object into HttpRequest
+fn parse_http_request(
+    scope: &mut v8::PinScope,
+    options: v8::Local<v8::Object>,
+) -> Option<HttpRequest> {
+    // Get URL
+    let url_key = v8::String::new(scope, "url").unwrap();
+    let url = options
+        .get(scope, url_key.into())
+        .and_then(|v| v.to_string(scope))
+        .map(|s| s.to_rust_string_lossy(scope))?;
+
+    // Get method
+    let method_key = v8::String::new(scope, "method").unwrap();
+    let method_str = options
+        .get(scope, method_key.into())
+        .and_then(|v| v.to_string(scope))
+        .map(|s| s.to_rust_string_lossy(scope))
+        .unwrap_or_else(|| "GET".to_string());
+    let method = HttpMethod::from_str(&method_str).unwrap_or(HttpMethod::Get);
+
+    // Get headers
+    let mut headers = HashMap::new();
+    let headers_key = v8::String::new(scope, "headers").unwrap();
+
+    if let Some(headers_val) = options.get(scope, headers_key.into())
+        && let Some(headers_obj) = headers_val.to_object(scope)
+        && let Some(props) = headers_obj.get_own_property_names(scope, Default::default())
+    {
+        for i in 0..props.length() {
+            if let Some(key_val) = props.get_index(scope, i)
+                && let Some(key_str) = key_val.to_string(scope)
+            {
+                let key = key_str.to_rust_string_lossy(scope);
+
+                if let Some(val) = headers_obj.get(scope, key_val)
+                    && let Some(val_str) = val.to_string(scope)
+                {
+                    headers.insert(key, val_str.to_rust_string_lossy(scope));
+                }
+            }
+        }
+    }
+
+    // Get body
+    let body_key = v8::String::new(scope, "body").unwrap();
+    let body = if let Some(body_val) = options.get(scope, body_key.into())
+        && !body_val.is_null()
+        && !body_val.is_undefined()
+    {
+        if let Ok(uint8_array) = v8::Local::<v8::Uint8Array>::try_from(body_val) {
+            let len = uint8_array.byte_length();
+            let mut buffer = vec![0u8; len];
+            uint8_array.copy_contents(&mut buffer);
+            RequestBody::Bytes(bytes::Bytes::from(buffer))
+        } else if let Some(body_str) = body_val.to_string(scope) {
+            RequestBody::Bytes(bytes::Bytes::from(body_str.to_rust_string_lossy(scope)))
+        } else {
+            RequestBody::None
+        }
+    } else {
+        RequestBody::None
+    };
+
+    Some(HttpRequest {
+        url,
+        method,
+        headers,
+        body,
+    })
+}
+
+/// Register success callback and return callback ID
+fn register_callback(
+    state: &FetchState,
+    scope: &mut v8::PinScope,
+    success_fn: v8::Local<v8::Function>,
+) -> CallbackId {
+    let callback_id = {
+        let mut id = state.next_id.lock().unwrap();
+        let current = *id;
+        *id += 1;
+        current
+    };
+
+    state
+        .callbacks
+        .lock()
+        .unwrap()
+        .insert(callback_id, v8::Global::new(scope, success_fn));
+
+    callback_id
+}
+
+/// Register success and error callbacks and return callback ID
+fn register_callbacks_with_error(
+    state: &FetchState,
+    scope: &mut v8::PinScope,
+    success_fn: v8::Local<v8::Function>,
+    error_fn: v8::Local<v8::Function>,
+) -> CallbackId {
+    let callback_id = register_callback(state, scope, success_fn);
+
+    state
+        .error_callbacks
+        .lock()
+        .unwrap()
+        .insert(callback_id, v8::Global::new(scope, error_fn));
+
+    callback_id
+}
+
+/// Get string parameter from JS object
+fn get_string_param(
+    scope: &mut v8::PinScope,
+    obj: v8::Local<v8::Object>,
+    key: &str,
+) -> Option<String> {
+    let key_v8 = v8::String::new(scope, key).unwrap();
+    obj.get(scope, key_v8.into())
+        .and_then(|v| v.to_string(scope))
+        .map(|s| s.to_rust_string_lossy(scope))
+}
+
+/// Get optional string parameter (returns None if null/undefined)
+fn get_optional_string_param(
+    scope: &mut v8::PinScope,
+    obj: v8::Local<v8::Object>,
+    key: &str,
+) -> Option<String> {
+    let key_v8 = v8::String::new(scope, key).unwrap();
+    obj.get(scope, key_v8.into()).and_then(|v| {
+        if v.is_null() || v.is_undefined() {
+            None
+        } else {
+            v.to_string(scope).map(|s| s.to_rust_string_lossy(scope))
+        }
+    })
+}
+
+/// Get optional u32 parameter
+fn get_optional_u32_param(
+    scope: &mut v8::PinScope,
+    obj: v8::Local<v8::Object>,
+    key: &str,
+) -> Option<u32> {
+    let key_v8 = v8::String::new(scope, key).unwrap();
+    obj.get(scope, key_v8.into())
+        .filter(|v| !v.is_undefined() && !v.is_null())
+        .and_then(|v| v.uint32_value(scope))
+}
+
+/// Get optional u64 parameter
+fn get_optional_u64_param(
+    scope: &mut v8::PinScope,
+    obj: v8::Local<v8::Object>,
+    key: &str,
+) -> Option<u64> {
+    get_optional_u32_param(scope, obj, key).map(|v| v as u64)
+}
+
+/// Get bytes parameter (from Uint8Array or string)
+fn get_bytes_param(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, key: &str) -> Vec<u8> {
+    let key_v8 = v8::String::new(scope, key).unwrap();
+
+    if let Some(val) = obj.get(scope, key_v8.into()) {
+        if let Ok(uint8_array) = v8::Local::<v8::Uint8Array>::try_from(val) {
+            let len = uint8_array.byte_length();
+            let mut buffer = vec![0u8; len];
+            uint8_array.copy_contents(&mut buffer);
+            return buffer;
+        } else if let Some(s) = val.to_string(scope) {
+            return s.to_rust_string_lossy(scope).into_bytes();
+        }
+    }
+
+    vec![]
+}
+
+/// Get string array parameter
+fn get_string_array_param(
+    scope: &mut v8::PinScope,
+    obj: v8::Local<v8::Object>,
+    key: &str,
+) -> Vec<String> {
+    let key_v8 = v8::String::new(scope, key).unwrap();
+
+    if let Some(val) = obj.get(scope, key_v8.into())
+        && let Ok(array) = v8::Local::<v8::Array>::try_from(val)
+    {
+        let mut result = Vec::new();
+
+        for i in 0..array.length() {
+            if let Some(item) = array.get_index(scope, i)
+                && let Some(item_str) = item.to_string(scope)
+            {
+                result.push(item_str.to_rust_string_lossy(scope));
+            }
+        }
+
+        return result;
+    }
+
+    vec![]
+}
+
 pub fn setup_fetch(
     scope: &mut v8::PinScope,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
@@ -35,114 +256,28 @@ pub fn setup_fetch(
         |scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut _retval: v8::ReturnValue| {
-            let global = scope.get_current_context().global(scope);
-            let state_key = v8::String::new(scope, "__fetchState").unwrap();
-            let state_val = global.get(scope, state_key.into()).unwrap();
-
-            if !state_val.is_external() {
+            let Some(state) = get_fetch_state(scope) else {
                 return;
-            }
-
-            let external: v8::Local<v8::External> = state_val.try_into().unwrap();
-            let state_ptr = external.value() as *mut FetchState;
-            let state = unsafe { &*state_ptr };
-
+            };
             if args.length() < 3 {
                 return;
             }
 
-            // Parse fetch options (arg 0)
-            let options = match args.get(0).to_object(scope) {
-                Some(obj) => obj,
-                None => return,
+            let Some(options) = args.get(0).to_object(scope) else {
+                return;
+            };
+            let Some(request) = parse_http_request(scope, options) else {
+                return;
             };
 
-            // Get URL
-            let url_key = v8::String::new(scope, "url").unwrap();
-            let url = match options
-                .get(scope, url_key.into())
-                .and_then(|v| v.to_string(scope))
-            {
-                Some(s) => s.to_rust_string_lossy(scope),
-                None => return,
-            };
-
-            // Get method
-            let method_key = v8::String::new(scope, "method").unwrap();
-            let method_str = options
-                .get(scope, method_key.into())
-                .and_then(|v| v.to_string(scope))
-                .map(|s| s.to_rust_string_lossy(scope))
-                .unwrap_or_else(|| "GET".to_string());
-
-            let method = HttpMethod::from_str(&method_str).unwrap_or(HttpMethod::Get);
-
-            // Get headers
-            let mut headers = std::collections::HashMap::new();
-            let headers_key = v8::String::new(scope, "headers").unwrap();
-
-            if let Some(headers_val) = options.get(scope, headers_key.into())
-                && let Some(headers_obj) = headers_val.to_object(scope)
-                && let Some(props) = headers_obj.get_own_property_names(scope, Default::default())
-            {
-                for i in 0..props.length() {
-                    if let Some(key_val) = props.get_index(scope, i)
-                        && let Some(key_str) = key_val.to_string(scope)
-                    {
-                        let key = key_str.to_rust_string_lossy(scope);
-
-                        if let Some(val) = headers_obj.get(scope, key_val)
-                            && let Some(val_str) = val.to_string(scope)
-                        {
-                            let value = val_str.to_rust_string_lossy(scope);
-                            headers.insert(key, value);
-                        }
-                    }
-                }
-            }
-
-            // Get body
-            let body_key = v8::String::new(scope, "body").unwrap();
-            let body = options
-                .get(scope, body_key.into())
-                .filter(|v| !v.is_null() && !v.is_undefined())
-                .and_then(|v| v.to_string(scope))
-                .map(|s| RequestBody::Bytes(bytes::Bytes::from(s.to_rust_string_lossy(scope))))
-                .unwrap_or(RequestBody::None);
-
-            // Create HttpRequest
-            let request = HttpRequest {
-                method,
-                url,
-                headers,
-                body,
-            };
-
-            // Get resolve callback
             let resolve_val = args.get(1);
-
             if !resolve_val.is_function() {
                 return;
             }
-
             let resolve: v8::Local<v8::Function> = resolve_val.try_into().unwrap();
-            let resolve_global = v8::Global::new(scope.as_ref(), resolve);
 
-            // Generate callback ID
-            let callback_id = {
-                let mut next_id = state.next_id.lock().unwrap();
-                let id = *next_id;
-                *next_id += 1;
-                id
-            };
+            let callback_id = register_callback(state, scope, resolve);
 
-            // Store callback
-            {
-                let mut callbacks = state.callbacks.lock().unwrap();
-                callbacks.insert(callback_id, resolve_global);
-            }
-
-            // Send FetchStreaming message to scheduler
             let _ = state
                 .scheduler_tx
                 .send(SchedulerMessage::FetchStreaming(callback_id, request));
@@ -163,112 +298,28 @@ pub fn setup_fetch(
         |scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut _retval: v8::ReturnValue| {
-            let global = scope.get_current_context().global(scope);
-            let state_key = v8::String::new(scope, "__fetchState").unwrap();
-            let state_val = global.get(scope, state_key.into()).unwrap();
-
-            if !state_val.is_external() {
+            let Some(state) = get_fetch_state(scope) else {
                 return;
-            }
-
-            let external: v8::Local<v8::External> = state_val.try_into().unwrap();
-            let state_ptr = external.value() as *mut FetchState;
-            let state = unsafe { &*state_ptr };
-
-            // Args: (bindingName, options, successCallback, errorCallback)
+            };
             if args.length() < 4 {
                 return;
             }
 
-            // Get binding name (arg 0)
-            let binding_name = match args.get(0).to_string(scope) {
-                Some(s) => s.to_rust_string_lossy(scope),
-                None => return,
-            };
-
-            // Parse fetch options (arg 1)
-            let options = match args.get(1).to_object(scope) {
-                Some(obj) => obj,
-                None => return,
-            };
-
-            // Get URL/path
-            let url_key = v8::String::new(scope, "url").unwrap();
-            let url = match options
-                .get(scope, url_key.into())
-                .and_then(|v| v.to_string(scope))
-            {
-                Some(s) => s.to_rust_string_lossy(scope),
-                None => return,
-            };
-
-            // Get method
-            let method_key = v8::String::new(scope, "method").unwrap();
-            let method_str = options
-                .get(scope, method_key.into())
-                .and_then(|v| v.to_string(scope))
+            let Some(binding_name) = args
+                .get(0)
+                .to_string(scope)
                 .map(|s| s.to_rust_string_lossy(scope))
-                .unwrap_or_else(|| "GET".to_string());
-
-            let method = HttpMethod::from_str(&method_str).unwrap_or(HttpMethod::Get);
-
-            // Get headers
-            let mut headers = std::collections::HashMap::new();
-            let headers_key = v8::String::new(scope, "headers").unwrap();
-
-            if let Some(headers_val) = options.get(scope, headers_key.into())
-                && let Some(headers_obj) = headers_val.to_object(scope)
-                && let Some(props) = headers_obj.get_own_property_names(scope, Default::default())
-            {
-                for i in 0..props.length() {
-                    if let Some(key_val) = props.get_index(scope, i)
-                        && let Some(key_str) = key_val.to_string(scope)
-                    {
-                        let key = key_str.to_rust_string_lossy(scope);
-
-                        if let Some(val) = headers_obj.get(scope, key_val)
-                            && let Some(val_str) = val.to_string(scope)
-                        {
-                            let value = val_str.to_rust_string_lossy(scope);
-                            headers.insert(key, value);
-                        }
-                    }
-                }
-            }
-
-            // Get body
-            let body_key = v8::String::new(scope, "body").unwrap();
-            let body = if let Some(body_val) = options.get(scope, body_key.into())
-                && !body_val.is_null()
-                && !body_val.is_undefined()
-            {
-                if let Ok(uint8_array) = v8::Local::<v8::Uint8Array>::try_from(body_val) {
-                    let len = uint8_array.byte_length();
-                    let mut buffer = vec![0u8; len];
-                    uint8_array.copy_contents(&mut buffer);
-                    openworkers_core::RequestBody::Bytes(bytes::Bytes::from(buffer))
-                } else if let Some(body_str) = body_val.to_string(scope) {
-                    openworkers_core::RequestBody::Bytes(bytes::Bytes::from(
-                        body_str.to_rust_string_lossy(scope),
-                    ))
-                } else {
-                    openworkers_core::RequestBody::None
-                }
-            } else {
-                openworkers_core::RequestBody::None
+            else {
+                return;
+            };
+            let Some(options) = args.get(1).to_object(scope) else {
+                return;
+            };
+            let Some(request) = parse_http_request(scope, options) else {
+                return;
             };
 
-            let request = openworkers_core::HttpRequest {
-                url,
-                method,
-                headers,
-                body,
-            };
-
-            // Store callbacks
-            let success_cb = args.get(2);
-            let error_cb = args.get(3);
-
+            let (success_cb, error_cb) = (args.get(2), args.get(3));
             if !success_cb.is_function() || !error_cb.is_function() {
                 return;
             }
@@ -276,22 +327,7 @@ pub fn setup_fetch(
             let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
             let error_fn: v8::Local<v8::Function> = error_cb.try_into().unwrap();
 
-            let callback_id = {
-                let mut id = state.next_id.lock().unwrap();
-                let current = *id;
-                *id += 1;
-                current
-            };
-
-            {
-                let mut cbs = state.callbacks.lock().unwrap();
-                cbs.insert(callback_id, v8::Global::new(scope, success_fn));
-            }
-
-            {
-                let mut error_cbs = state.error_callbacks.lock().unwrap();
-                error_cbs.insert(callback_id, v8::Global::new(scope, error_fn));
-            }
+            let callback_id = register_callbacks_with_error(state, scope, success_fn, error_fn);
 
             let _ = state.scheduler_tx.send(SchedulerMessage::BindingFetch(
                 callback_id,
@@ -315,137 +351,64 @@ pub fn setup_fetch(
         |scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut _retval: v8::ReturnValue| {
-            let global = scope.get_current_context().global(scope);
-            let state_key = v8::String::new(scope, "__fetchState").unwrap();
-            let state_val = global.get(scope, state_key.into()).unwrap();
-
-            if !state_val.is_external() {
+            let Some(state) = get_fetch_state(scope) else {
                 return;
-            }
-
-            let external: v8::Local<v8::External> = state_val.try_into().unwrap();
-            let state_ptr = external.value() as *mut FetchState;
-            let state = unsafe { &*state_ptr };
-
-            // Args: (bindingName, operation, params, successCallback)
+            };
             if args.length() < 4 {
                 return;
             }
 
-            // Get binding name (arg 0)
-            let binding_name = match args.get(0).to_string(scope) {
-                Some(s) => s.to_rust_string_lossy(scope),
-                None => return,
+            let Some(binding_name) = args
+                .get(0)
+                .to_string(scope)
+                .map(|s| s.to_rust_string_lossy(scope))
+            else {
+                return;
+            };
+            let Some(operation) = args
+                .get(1)
+                .to_string(scope)
+                .map(|s| s.to_rust_string_lossy(scope))
+            else {
+                return;
+            };
+            let Some(params) = args.get(2).to_object(scope) else {
+                return;
             };
 
-            // Get operation name (arg 1)
-            let operation = match args.get(1).to_string(scope) {
-                Some(s) => s.to_rust_string_lossy(scope),
-                None => return,
-            };
-
-            // Get params object (arg 2)
-            let params = match args.get(2).to_object(scope) {
-                Some(obj) => obj,
-                None => return,
-            };
-
-            // Build StorageOp from operation name and params
             let storage_op = match operation.as_str() {
                 "get" => {
-                    let key_key = v8::String::new(scope, "key").unwrap();
-                    let key = params
-                        .get(scope, key_key.into())
-                        .and_then(|v| v.to_string(scope))
-                        .map(|s| s.to_rust_string_lossy(scope))
-                        .unwrap_or_default();
+                    let key = get_string_param(scope, params, "key").unwrap_or_default();
                     StorageOp::Get { key }
                 }
                 "put" => {
-                    let key_key = v8::String::new(scope, "key").unwrap();
-                    let key = params
-                        .get(scope, key_key.into())
-                        .and_then(|v| v.to_string(scope))
-                        .map(|s| s.to_rust_string_lossy(scope))
-                        .unwrap_or_default();
-
-                    let body_key = v8::String::new(scope, "body").unwrap();
-                    let body = if let Some(body_val) = params.get(scope, body_key.into()) {
-                        if let Ok(uint8_array) = v8::Local::<v8::Uint8Array>::try_from(body_val) {
-                            let len = uint8_array.byte_length();
-                            let mut buffer = vec![0u8; len];
-                            uint8_array.copy_contents(&mut buffer);
-                            buffer
-                        } else if let Some(body_str) = body_val.to_string(scope) {
-                            body_str.to_rust_string_lossy(scope).into_bytes()
-                        } else {
-                            vec![]
-                        }
-                    } else {
-                        vec![]
-                    };
-
+                    let key = get_string_param(scope, params, "key").unwrap_or_default();
+                    let body = get_bytes_param(scope, params, "body");
                     StorageOp::Put { key, body }
                 }
                 "head" => {
-                    let key_key = v8::String::new(scope, "key").unwrap();
-                    let key = params
-                        .get(scope, key_key.into())
-                        .and_then(|v| v.to_string(scope))
-                        .map(|s| s.to_rust_string_lossy(scope))
-                        .unwrap_or_default();
+                    let key = get_string_param(scope, params, "key").unwrap_or_default();
                     StorageOp::Head { key }
                 }
                 "list" => {
-                    let prefix_key = v8::String::new(scope, "prefix").unwrap();
-                    let prefix = params.get(scope, prefix_key.into()).and_then(|v| {
-                        if v.is_null() || v.is_undefined() {
-                            None
-                        } else {
-                            v.to_string(scope).map(|s| s.to_rust_string_lossy(scope))
-                        }
-                    });
-
-                    let limit_key = v8::String::new(scope, "limit").unwrap();
-                    let limit = params
-                        .get(scope, limit_key.into())
-                        .filter(|v| !v.is_undefined() && !v.is_null())
-                        .and_then(|v| v.uint32_value(scope));
-
+                    let prefix = get_optional_string_param(scope, params, "prefix");
+                    let limit = get_optional_u32_param(scope, params, "limit");
                     StorageOp::List { prefix, limit }
                 }
                 "delete" => {
-                    let key_key = v8::String::new(scope, "key").unwrap();
-                    let key = params
-                        .get(scope, key_key.into())
-                        .and_then(|v| v.to_string(scope))
-                        .map(|s| s.to_rust_string_lossy(scope))
-                        .unwrap_or_default();
+                    let key = get_string_param(scope, params, "key").unwrap_or_default();
                     StorageOp::Delete { key }
                 }
-                _ => return, // Unknown operation
+                _ => return,
             };
 
-            // Get success callback (arg 3)
             let success_cb = args.get(3);
-
             if !success_cb.is_function() {
                 return;
             }
-
             let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
 
-            let callback_id = {
-                let mut id = state.next_id.lock().unwrap();
-                let current = *id;
-                *id += 1;
-                current
-            };
-
-            {
-                let mut cbs = state.callbacks.lock().unwrap();
-                cbs.insert(callback_id, v8::Global::new(scope, success_fn));
-            }
+            let callback_id = register_callback(state, scope, success_fn);
 
             let _ = state.scheduler_tx.send(SchedulerMessage::BindingStorage(
                 callback_id,
@@ -469,75 +432,40 @@ pub fn setup_fetch(
         |scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut _retval: v8::ReturnValue| {
-            let global = scope.get_current_context().global(scope);
-            let state_key = v8::String::new(scope, "__fetchState").unwrap();
-            let state_val = global.get(scope, state_key.into()).unwrap();
-
-            if !state_val.is_external() {
+            let Some(state) = get_fetch_state(scope) else {
                 return;
-            }
-
-            let external: v8::Local<v8::External> = state_val.try_into().unwrap();
-            let state_ptr = external.value() as *mut FetchState;
-            let state = unsafe { &*state_ptr };
-
-            // Args: (bindingName, operation, params, successCallback)
+            };
             if args.length() < 4 {
                 return;
             }
 
-            // Get binding name (arg 0)
-            let binding_name = match args.get(0).to_string(scope) {
-                Some(s) => s.to_rust_string_lossy(scope),
-                None => return,
+            let Some(binding_name) = args
+                .get(0)
+                .to_string(scope)
+                .map(|s| s.to_rust_string_lossy(scope))
+            else {
+                return;
+            };
+            let Some(operation) = args
+                .get(1)
+                .to_string(scope)
+                .map(|s| s.to_rust_string_lossy(scope))
+            else {
+                return;
+            };
+            let Some(params) = args.get(2).to_object(scope) else {
+                return;
             };
 
-            // Get operation name (arg 1)
-            let operation = match args.get(1).to_string(scope) {
-                Some(s) => s.to_rust_string_lossy(scope),
-                None => return,
-            };
-
-            // Get params object (arg 2)
-            let params = match args.get(2).to_object(scope) {
-                Some(obj) => obj,
-                None => return,
-            };
-
-            // Build KvOp from operation name and params
             let kv_op = match operation.as_str() {
                 "get" => {
-                    let key_key = v8::String::new(scope, "key").unwrap();
-                    let key = params
-                        .get(scope, key_key.into())
-                        .and_then(|v| v.to_string(scope))
-                        .map(|s| s.to_rust_string_lossy(scope))
-                        .unwrap_or_default();
+                    let key = get_string_param(scope, params, "key").unwrap_or_default();
                     KvOp::Get { key }
                 }
                 "put" => {
-                    let key_key = v8::String::new(scope, "key").unwrap();
-                    let key = params
-                        .get(scope, key_key.into())
-                        .and_then(|v| v.to_string(scope))
-                        .map(|s| s.to_rust_string_lossy(scope))
-                        .unwrap_or_default();
-
-                    let value_key = v8::String::new(scope, "value").unwrap();
-                    let value = params
-                        .get(scope, value_key.into())
-                        .and_then(|v| v.to_string(scope))
-                        .map(|s| s.to_rust_string_lossy(scope))
-                        .unwrap_or_default();
-
-                    // Optional expiresIn (TTL in seconds)
-                    let expires_in_key = v8::String::new(scope, "expiresIn").unwrap();
-                    let expires_in = params
-                        .get(scope, expires_in_key.into())
-                        .filter(|v| !v.is_undefined() && !v.is_null())
-                        .and_then(|v| v.uint32_value(scope))
-                        .map(|v| v as u64);
-
+                    let key = get_string_param(scope, params, "key").unwrap_or_default();
+                    let value = get_string_param(scope, params, "value").unwrap_or_default();
+                    let expires_in = get_optional_u64_param(scope, params, "expiresIn");
                     KvOp::Put {
                         key,
                         value,
@@ -545,55 +473,24 @@ pub fn setup_fetch(
                     }
                 }
                 "delete" => {
-                    let key_key = v8::String::new(scope, "key").unwrap();
-                    let key = params
-                        .get(scope, key_key.into())
-                        .and_then(|v| v.to_string(scope))
-                        .map(|s| s.to_rust_string_lossy(scope))
-                        .unwrap_or_default();
+                    let key = get_string_param(scope, params, "key").unwrap_or_default();
                     KvOp::Delete { key }
                 }
                 "list" => {
-                    let prefix_key = v8::String::new(scope, "prefix").unwrap();
-                    let prefix = params.get(scope, prefix_key.into()).and_then(|v| {
-                        if v.is_null() || v.is_undefined() {
-                            None
-                        } else {
-                            v.to_string(scope).map(|s| s.to_rust_string_lossy(scope))
-                        }
-                    });
-
-                    let limit_key = v8::String::new(scope, "limit").unwrap();
-                    let limit = params
-                        .get(scope, limit_key.into())
-                        .filter(|v| !v.is_undefined() && !v.is_null())
-                        .and_then(|v| v.uint32_value(scope));
-
+                    let prefix = get_optional_string_param(scope, params, "prefix");
+                    let limit = get_optional_u32_param(scope, params, "limit");
                     KvOp::List { prefix, limit }
                 }
-                _ => return, // Unknown operation
+                _ => return,
             };
 
-            // Get success callback (arg 3)
             let success_cb = args.get(3);
-
             if !success_cb.is_function() {
                 return;
             }
-
             let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
 
-            let callback_id = {
-                let mut id = state.next_id.lock().unwrap();
-                let current = *id;
-                *id += 1;
-                current
-            };
-
-            {
-                let mut cbs = state.callbacks.lock().unwrap();
-                cbs.insert(callback_id, v8::Global::new(scope, success_fn));
-            }
+            let callback_id = register_callback(state, scope, success_fn);
 
             let _ = state.scheduler_tx.send(SchedulerMessage::BindingKv(
                 callback_id,
@@ -617,102 +514,50 @@ pub fn setup_fetch(
         |scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut _retval: v8::ReturnValue| {
-            let global = scope.get_current_context().global(scope);
-            let state_key = v8::String::new(scope, "__fetchState").unwrap();
-            let state_val = global.get(scope, state_key.into()).unwrap();
-
-            if !state_val.is_external() {
+            let Some(state) = get_fetch_state(scope) else {
                 return;
-            }
-
-            let external: v8::Local<v8::External> = state_val.try_into().unwrap();
-            let state_ptr = external.value() as *mut FetchState;
-            let state = unsafe { &*state_ptr };
-
-            // Args: (bindingName, operation, params, successCallback)
+            };
             if args.length() < 4 {
                 return;
             }
 
-            // Get binding name (arg 0)
-            let binding_name = match args.get(0).to_string(scope) {
-                Some(s) => s.to_rust_string_lossy(scope),
-                None => return,
+            let Some(binding_name) = args
+                .get(0)
+                .to_string(scope)
+                .map(|s| s.to_rust_string_lossy(scope))
+            else {
+                return;
+            };
+            let Some(operation) = args
+                .get(1)
+                .to_string(scope)
+                .map(|s| s.to_rust_string_lossy(scope))
+            else {
+                return;
+            };
+            let Some(params) = args.get(2).to_object(scope) else {
+                return;
             };
 
-            // Get operation name (arg 1)
-            let operation = match args.get(1).to_string(scope) {
-                Some(s) => s.to_rust_string_lossy(scope),
-                None => return,
-            };
-
-            // Get params object (arg 2)
-            let params = match args.get(2).to_object(scope) {
-                Some(obj) => obj,
-                None => return,
-            };
-
-            // Build DatabaseOp from operation name and params
             let database_op = match operation.as_str() {
                 "query" => {
-                    let sql_key = v8::String::new(scope, "sql").unwrap();
-                    let sql = params
-                        .get(scope, sql_key.into())
-                        .and_then(|v| v.to_string(scope))
-                        .map(|s| s.to_rust_string_lossy(scope))
-                        .unwrap_or_default();
-
-                    // Get params array
-                    let params_key = v8::String::new(scope, "params").unwrap();
-                    let query_params: Vec<String> =
-                        if let Some(params_val) = params.get(scope, params_key.into()) {
-                            if let Ok(params_array) = v8::Local::<v8::Array>::try_from(params_val) {
-                                let mut result = Vec::new();
-
-                                for i in 0..params_array.length() {
-                                    if let Some(item) = params_array.get_index(scope, i)
-                                        && let Some(item_str) = item.to_string(scope)
-                                    {
-                                        result.push(item_str.to_rust_string_lossy(scope));
-                                    }
-                                }
-
-                                result
-                            } else {
-                                Vec::new()
-                            }
-                        } else {
-                            Vec::new()
-                        };
-
+                    let sql = get_string_param(scope, params, "sql").unwrap_or_default();
+                    let query_params = get_string_array_param(scope, params, "params");
                     DatabaseOp::Query {
                         sql,
                         params: query_params,
                     }
                 }
-                _ => return, // Unknown operation
+                _ => return,
             };
 
-            // Get success callback (arg 3)
             let success_cb = args.get(3);
-
             if !success_cb.is_function() {
                 return;
             }
-
             let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
 
-            let callback_id = {
-                let mut id = state.next_id.lock().unwrap();
-                let current = *id;
-                *id += 1;
-                current
-            };
-
-            {
-                let mut cbs = state.callbacks.lock().unwrap();
-                cbs.insert(callback_id, v8::Global::new(scope, success_fn));
-            }
+            let callback_id = register_callback(state, scope, success_fn);
 
             let _ = state.scheduler_tx.send(SchedulerMessage::BindingDatabase(
                 callback_id,
@@ -736,112 +581,28 @@ pub fn setup_fetch(
         |scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut _retval: v8::ReturnValue| {
-            let global = scope.get_current_context().global(scope);
-            let state_key = v8::String::new(scope, "__fetchState").unwrap();
-            let state_val = global.get(scope, state_key.into()).unwrap();
-
-            if !state_val.is_external() {
+            let Some(state) = get_fetch_state(scope) else {
                 return;
-            }
-
-            let external: v8::Local<v8::External> = state_val.try_into().unwrap();
-            let state_ptr = external.value() as *mut FetchState;
-            let state = unsafe { &*state_ptr };
-
-            // Args: (bindingName, options, successCallback, errorCallback)
+            };
             if args.length() < 4 {
                 return;
             }
 
-            // Get binding name (arg 0)
-            let binding_name = match args.get(0).to_string(scope) {
-                Some(s) => s.to_rust_string_lossy(scope),
-                None => return,
-            };
-
-            // Parse fetch options (arg 1)
-            let options = match args.get(1).to_object(scope) {
-                Some(obj) => obj,
-                None => return,
-            };
-
-            // Get URL/path
-            let url_key = v8::String::new(scope, "url").unwrap();
-            let url = match options
-                .get(scope, url_key.into())
-                .and_then(|v| v.to_string(scope))
-            {
-                Some(s) => s.to_rust_string_lossy(scope),
-                None => return,
-            };
-
-            // Get method
-            let method_key = v8::String::new(scope, "method").unwrap();
-            let method_str = options
-                .get(scope, method_key.into())
-                .and_then(|v| v.to_string(scope))
+            let Some(binding_name) = args
+                .get(0)
+                .to_string(scope)
                 .map(|s| s.to_rust_string_lossy(scope))
-                .unwrap_or_else(|| "GET".to_string());
-
-            let method = HttpMethod::from_str(&method_str).unwrap_or(HttpMethod::Get);
-
-            // Get headers
-            let mut headers = std::collections::HashMap::new();
-            let headers_key = v8::String::new(scope, "headers").unwrap();
-
-            if let Some(headers_val) = options.get(scope, headers_key.into())
-                && let Some(headers_obj) = headers_val.to_object(scope)
-                && let Some(props) = headers_obj.get_own_property_names(scope, Default::default())
-            {
-                for i in 0..props.length() {
-                    if let Some(key_val) = props.get_index(scope, i)
-                        && let Some(key_str) = key_val.to_string(scope)
-                    {
-                        let key = key_str.to_rust_string_lossy(scope);
-
-                        if let Some(val) = headers_obj.get(scope, key_val)
-                            && let Some(val_str) = val.to_string(scope)
-                        {
-                            let value = val_str.to_rust_string_lossy(scope);
-                            headers.insert(key, value);
-                        }
-                    }
-                }
-            }
-
-            // Get body
-            let body_key = v8::String::new(scope, "body").unwrap();
-            let body = if let Some(body_val) = options.get(scope, body_key.into())
-                && !body_val.is_null()
-                && !body_val.is_undefined()
-            {
-                if let Ok(uint8_array) = v8::Local::<v8::Uint8Array>::try_from(body_val) {
-                    let len = uint8_array.byte_length();
-                    let mut buffer = vec![0u8; len];
-                    uint8_array.copy_contents(&mut buffer);
-                    openworkers_core::RequestBody::Bytes(bytes::Bytes::from(buffer))
-                } else if let Some(body_str) = body_val.to_string(scope) {
-                    openworkers_core::RequestBody::Bytes(bytes::Bytes::from(
-                        body_str.to_rust_string_lossy(scope),
-                    ))
-                } else {
-                    openworkers_core::RequestBody::None
-                }
-            } else {
-                openworkers_core::RequestBody::None
+            else {
+                return;
+            };
+            let Some(options) = args.get(1).to_object(scope) else {
+                return;
+            };
+            let Some(request) = parse_http_request(scope, options) else {
+                return;
             };
 
-            let request = openworkers_core::HttpRequest {
-                url,
-                method,
-                headers,
-                body,
-            };
-
-            // Store callbacks
-            let success_cb = args.get(2);
-            let error_cb = args.get(3);
-
+            let (success_cb, error_cb) = (args.get(2), args.get(3));
             if !success_cb.is_function() || !error_cb.is_function() {
                 return;
             }
@@ -849,22 +610,7 @@ pub fn setup_fetch(
             let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
             let error_fn: v8::Local<v8::Function> = error_cb.try_into().unwrap();
 
-            let callback_id = {
-                let mut id = state.next_id.lock().unwrap();
-                let current = *id;
-                *id += 1;
-                current
-            };
-
-            {
-                let mut cbs = state.callbacks.lock().unwrap();
-                cbs.insert(callback_id, v8::Global::new(scope, success_fn));
-            }
-
-            {
-                let mut error_cbs = state.error_callbacks.lock().unwrap();
-                error_cbs.insert(callback_id, v8::Global::new(scope, error_fn));
-            }
+            let callback_id = register_callbacks_with_error(state, scope, success_fn, error_fn);
 
             let _ = state.scheduler_tx.send(SchedulerMessage::BindingWorker(
                 callback_id,
