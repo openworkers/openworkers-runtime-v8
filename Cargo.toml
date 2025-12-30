@@ -1,6 +1,6 @@
 [package]
 name = "openworkers-runtime-v8"
-version = "0.6.4"
+version = "0.7.0"
 edition = "2024"
 
 [features]
@@ -9,8 +9,8 @@ actix = ["dep:actix-web", "openworkers-core/actix"]
 [dependencies]
 
 # Common types
-# openworkers-core = { path = "../openworkers-core", features = ["testing"] }
-openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.6.1", features = ["testing"] }
+# openworkers-core = { path = "../openworkers-core" }
+openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.7.0" }
 
 # V8 JavaScript engine (v8 is the new name for rusty_v8)
 v8 = "142.2.0"
@@ -48,9 +48,4 @@ actix-web = { version = "4.12.1", features = ["macros"], optional = true }
 tokio-stream = "0.1"
 
 [dev-dependencies]
-criterion = { version = "0.8.1", features = ["async_tokio"] }
 ntest = "0.9.5"
-
-[[bench]]
-name = "generic_benchmark"
-harness = false

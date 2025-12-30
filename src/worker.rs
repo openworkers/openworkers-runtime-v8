@@ -547,8 +547,9 @@ impl Worker {
 
         let _ = fetch_init.res_tx.send(response);
 
-        // Wait for waitUntil promises to complete (if any)
+        // Wait for waitUntil promises AND active response streams to complete
         // Response has already been sent, but we need to keep the worker alive
+        // to process callbacks (timers) that feed the response stream
         for iteration in 0..5000 {
             // Check if execution was terminated
             if self.runtime.isolate.is_execution_terminating()
@@ -561,11 +562,13 @@ impl Worker {
                 return Err("Execution terminated".to_string());
             }
 
-            // Process pending callbacks
+            // Process pending callbacks (CRITICAL: this runs timers that feed streams)
             self.runtime.process_callbacks();
 
-            // Check if request is fully complete (including waitUntil)
-            let request_complete = {
+            // Check if request is fully complete:
+            // 1. __requestComplete must be true (handler finished)
+            // 2. __activeResponseStreams must be 0 (all streams closed)
+            let can_exit = {
                 use std::pin::pin;
                 let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
                 let mut scope = scope.init();
@@ -573,14 +576,25 @@ impl Worker {
                 let scope = &mut v8::ContextScope::new(&mut scope, context);
                 let global = context.global(scope);
 
+                // Check __requestComplete
                 let complete_key = v8::String::new(scope, "__requestComplete").unwrap();
-                global
+                let request_complete = global
                     .get(scope, complete_key.into())
                     .map(|v| v.is_true())
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+
+                // Check __activeResponseStreams
+                let streams_key = v8::String::new(scope, "__activeResponseStreams").unwrap();
+                let active_streams = global
+                    .get(scope, streams_key.into())
+                    .and_then(|v| v.uint32_value(scope))
+                    .unwrap_or(0);
+
+                // Can only exit when request is complete AND no active streams
+                request_complete && active_streams == 0
             };
 
-            if request_complete {
+            if can_exit {
                 break;
             }
 
@@ -924,6 +938,9 @@ fn setup_env(
 
 fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
     let code = r#"
+        // Track active response streams - worker stays alive until all streams are closed
+        globalThis.__activeResponseStreams = 0;
+
         // Stream response body to Rust (stream all responses with body)
         async function __streamResponseBody(response) {
             if (!response.body) {
@@ -931,6 +948,7 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
             }
 
             // If it's a native stream (fetch forward), just mark it
+            // Native streams are managed by Rust, no need to track here
             if (response.body._nativeStreamId !== undefined) {
                 response._responseStreamId = response.body._nativeStreamId;
                 return response;
@@ -940,15 +958,42 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
             const streamId = __responseStreamCreate();
             response._responseStreamId = streamId;
 
+            // Increment active stream counter BEFORE starting async read
+            globalThis.__activeResponseStreams++;
+
+            // Helper to convert value to Uint8Array (handles strings and typed arrays)
+            const encoder = new TextEncoder();
+            function toUint8Array(value) {
+                if (typeof value === 'string') {
+                    return encoder.encode(value);
+                }
+
+                if (value instanceof Uint8Array) {
+                    return value;
+                }
+
+                if (ArrayBuffer.isView(value)) {
+                    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+                }
+
+                // Fallback: convert to string then encode
+                return encoder.encode(String(value));
+            }
+
             // Read and forward asynchronously
             (async () => {
                 try {
                     const reader = response.body.getReader();
+
                     while (true) {
                         const { value, done } = await reader.read();
+
                         if (done) break;
+
                         if (value && value.length > 0) {
-                            while (!__responseStreamWrite(streamId, value)) {
+                            const chunk = toUint8Array(value);
+
+                            while (!__responseStreamWrite(streamId, chunk)) {
                                 await new Promise(resolve => setTimeout(resolve, 1));
                             }
                         }
@@ -957,6 +1002,8 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
                     console.error('[streamResponseBody] Error:', error);
                 } finally {
                     __responseStreamEnd(streamId);
+                    // Decrement counter when stream is fully consumed
+                    globalThis.__activeResponseStreams--;
                 }
             })();
 

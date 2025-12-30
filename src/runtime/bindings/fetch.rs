@@ -40,7 +40,7 @@ fn parse_http_request(
         .and_then(|v| v.to_string(scope))
         .map(|s| s.to_rust_string_lossy(scope))
         .unwrap_or_else(|| "GET".to_string());
-    let method = HttpMethod::from_str(&method_str).unwrap_or(HttpMethod::Get);
+    let method = method_str.parse().unwrap_or(HttpMethod::Get);
 
     // Get headers
     let mut headers = HashMap::new();
