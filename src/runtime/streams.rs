@@ -63,52 +63,111 @@ pub fn setup_readable_stream(scope: &mut v8::PinScope) {
             }
 
             tee() {
-                if (this.locked) {
-                    throw new TypeError('Cannot tee a locked stream');
+                throw new Error('tee not implemented - use prototype method');
+            }
+        };
+
+        // Define tee on prototype after class is defined
+        ReadableStream.prototype.tee = function() {
+            const stream = this;
+
+            if (stream.locked) {
+                throw new TypeError('Cannot tee a locked stream');
+            }
+
+            const reader = stream.getReader();
+            let canceled1 = false;
+            let canceled2 = false;
+            let reason1;
+            let reason2;
+            let closedOrErrored = false;
+            let reading = false;
+
+            function cloneValue(value) {
+                if (value instanceof Uint8Array) {
+                    return new Uint8Array(value);
                 }
 
-                const reader = this.getReader();
-                let canceled1 = false;
-                let canceled2 = false;
-                let reason1;
-                let reason2;
-
-                const branch1 = new ReadableStream({
-                    pull: async (controller) => {
-                        const { done, value } = await reader.read();
-                        if (done) {
-                            if (!canceled1) controller.close();
-                            if (!canceled2) branch2._controller.close();
-                            reader.releaseLock();
-                            return;
-                        }
-                        if (!canceled1) controller.enqueue(value);
-                        if (!canceled2) branch2._controller.enqueue(value);
-                    },
-                    cancel: (reason) => {
-                        canceled1 = true;
-                        reason1 = reason;
-                        if (canceled2) {
-                            reader.cancel(reason1);
-                        }
-                    }
-                });
-
-                const branch2 = new ReadableStream({
-                    pull: async () => {
-                        // Pulling is handled by branch1
-                    },
-                    cancel: (reason) => {
-                        canceled2 = true;
-                        reason2 = reason;
-                        if (canceled1) {
-                            reader.cancel(reason2);
-                        }
-                    }
-                });
-
-                return [branch1, branch2];
+                return value;
             }
+
+            function pullBoth(controller1, controller2) {
+                if (reading || closedOrErrored) {
+                    return Promise.resolve();
+                }
+
+                reading = true;
+
+                return reader.read().then(({ done, value }) => {
+                    reading = false;
+
+                    if (done) {
+                        closedOrErrored = true;
+
+                        try { controller1.close(); } catch (e) {}
+                        try { controller2.close(); } catch (e) {}
+
+                        reader.releaseLock();
+                        return;
+                    }
+
+                    if (!canceled1) {
+                        controller1.enqueue(value);
+                    }
+
+                    if (!canceled2) {
+                        controller2.enqueue(cloneValue(value));
+                    }
+                }).catch(e => {
+                    reading = false;
+
+                    try { controller1.error(e); } catch (err) {}
+                    try { controller2.error(e); } catch (err) {}
+                });
+            }
+
+            let ctrl1 = null;
+            let ctrl2 = null;
+
+            const branch1 = new ReadableStream({
+                start(controller) {
+                    ctrl1 = controller;
+                },
+                pull(controller) {
+                    return pullBoth(controller, ctrl2);
+                },
+                cancel(reason) {
+                    canceled1 = true;
+                    reason1 = reason;
+
+                    if (canceled2) {
+                        return reader.cancel(reason1);
+                    }
+
+                    return Promise.resolve();
+                }
+            });
+
+            const branch2 = new ReadableStream({
+                start(controller) {
+                    ctrl2 = controller;
+                },
+                pull(controller) {
+                    return pullBoth(ctrl1, controller);
+                },
+                cancel(reason) {
+                    canceled2 = true;
+                    reason2 = reason;
+
+                    if (canceled1) {
+                        return reader.cancel(reason2);
+                    }
+
+                    return Promise.resolve();
+                }
+            });
+
+            return [branch1, branch2];
         };
 
         // ReadableStreamDefaultController
