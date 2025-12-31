@@ -477,8 +477,12 @@ impl Runtime {
 
                                 let value_key = v8::String::new(scope, "value").unwrap();
                                 if let Some(value) = maybe_value {
-                                    let value_val = v8::String::new(scope, &value).unwrap();
-                                    result_obj.set(scope, value_key.into(), value_val.into());
+                                    // Convert serde_json::Value to V8 value via JSON.parse
+                                    let json_str = serde_json::to_string(&value).unwrap();
+                                    let json_v8_str = v8::String::new(scope, &json_str).unwrap();
+                                    let parsed = v8::json::parse(scope, json_v8_str.into())
+                                        .unwrap_or_else(|| v8::null(scope).into());
+                                    result_obj.set(scope, value_key.into(), parsed);
                                 } else {
                                     result_obj.set(scope, value_key.into(), v8::null(scope).into());
                                 }

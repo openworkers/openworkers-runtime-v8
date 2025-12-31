@@ -464,7 +464,21 @@ pub fn setup_fetch(
                 }
                 "put" => {
                     let key = get_string_param(scope, params, "key").unwrap_or_default();
-                    let value = get_string_param(scope, params, "value").unwrap_or_default();
+
+                    // Get value as JSON - convert any JS value to serde_json::Value
+                    let value_key = v8::String::new(scope, "value").unwrap();
+                    let value_v8 = params
+                        .get(scope, value_key.into())
+                        .unwrap_or_else(|| v8::undefined(scope).into());
+
+                    let value: serde_json::Value =
+                        if let Some(json_str) = v8::json::stringify(scope, value_v8) {
+                            let rust_str = json_str.to_rust_string_lossy(scope);
+                            serde_json::from_str(&rust_str).unwrap_or(serde_json::Value::Null)
+                        } else {
+                            serde_json::Value::Null
+                        };
+
                     let expires_in = get_optional_u64_param(scope, params, "expiresIn");
                     KvOp::Put {
                         key,

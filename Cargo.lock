@@ -1267,19 +1267,20 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openworkers-core"
-version = "0.7.0"
-source = "git+https://github.com/openworkers/openworkers-core?tag=v0.7.0#2b0cb27e86321d045c6e04ee7756e0d954f735a3"
+version = "0.7.1"
+source = "git+https://github.com/openworkers/openworkers-core?tag=v0.7.1#8de42cd6785b2df290fd24deff764ac96d5b5203"
 dependencies = [
  "actix-web",
  "bytes",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-stream",
 ]
 
 [[package]]
 name = "openworkers-runtime-v8"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "actix-web",
  "bytes",
