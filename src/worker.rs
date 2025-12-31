@@ -37,6 +37,20 @@ impl Worker {
     {
         f(&mut self.runtime)
     }
+
+    /// Read a global variable as u32 (for testing/debugging)
+    pub fn get_global_u32(&mut self, name: &str) -> Option<u32> {
+        use std::pin::pin;
+        let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
+        let mut scope = scope.init();
+        let context = v8::Local::new(&scope, &self.runtime.context);
+        let scope = &mut v8::ContextScope::new(&mut scope, context);
+        let global = context.global(scope);
+
+        let key = v8::String::new(scope, name)?;
+        let value = global.get(scope, key.into())?;
+        value.uint32_value(scope)
+    }
 }
 
 impl Worker {
@@ -475,22 +489,44 @@ impl Worker {
                         // Create a channel that converts StreamChunk to Result<Bytes, String>
                         let (tx, rx) = tokio::sync::mpsc::channel(16);
 
+                        // Clone stream_manager to use in the spawned task
+                        let stream_manager = self.runtime.stream_manager.clone();
+
                         // Spawn task to convert StreamChunk -> Result<Bytes, String>
+                        // Uses select! to detect client disconnect immediately via tx.closed()
                         tokio::task::spawn_local(async move {
                             let mut receiver = receiver;
 
-                            while let Some(chunk) = receiver.recv().await {
-                                match chunk {
-                                    StreamChunk::Data(bytes) => {
-                                        if tx.send(Ok(bytes)).await.is_err() {
-                                            break;
+                            loop {
+                                tokio::select! {
+                                    // Wait for next chunk from JS (via StreamManager)
+                                    chunk = receiver.recv() => {
+                                        match chunk {
+                                            Some(StreamChunk::Data(bytes)) => {
+                                                if tx.send(Ok(bytes)).await.is_err() {
+                                                    // Client disconnected while sending
+                                                    stream_manager.close_stream(stream_id);
+                                                    break;
+                                                }
+                                            }
+                                            Some(StreamChunk::Done) => {
+                                                break;
+                                            }
+                                            Some(StreamChunk::Error(e)) => {
+                                                let _ = tx.send(Err(e)).await;
+                                                break;
+                                            }
+                                            None => {
+                                                // Channel closed unexpectedly
+                                                break;
+                                            }
                                         }
                                     }
-                                    StreamChunk::Done => {
-                                        break;
-                                    }
-                                    StreamChunk::Error(e) => {
-                                        let _ = tx.send(Err(e)).await;
+
+                                    // Detect client disconnect immediately when actix drops receiver
+                                    _ = tx.closed() => {
+                                        // Client disconnected - close stream so JS can detect via has_sender()
+                                        stream_manager.close_stream(stream_id);
                                         break;
                                     }
                                 }
@@ -550,6 +586,8 @@ impl Worker {
         // Wait for waitUntil promises AND active response streams to complete
         // Response has already been sent, but we need to keep the worker alive
         // to process callbacks (timers) that feed the response stream
+        let mut signal_aborted_at: Option<usize> = None;
+
         for iteration in 0..5000 {
             // Check if execution was terminated
             if self.runtime.isolate.is_execution_terminating()
@@ -568,6 +606,10 @@ impl Worker {
             // Check if request is fully complete:
             // 1. __requestComplete must be true (handler finished)
             // 2. __activeResponseStreams must be 0 (all streams closed)
+            //
+            // Note: For streaming responses, we check if any streams have been cancelled
+            // (client disconnected). If so, we signal the abort and continue processing
+            // to allow the JS to clean up.
             let can_exit = {
                 use std::pin::pin;
                 let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
@@ -590,8 +632,58 @@ impl Worker {
                     .and_then(|v| v.uint32_value(scope))
                     .unwrap_or(0);
 
-                // Can only exit when request is complete AND no active streams
-                request_complete && active_streams == 0
+                // Check if response stream was cancelled (client disconnected)
+                // If so, signal abort to JS
+                if active_streams > 0 {
+                    let stream_id_key = v8::String::new(scope, "__lastResponseStreamId").unwrap();
+
+                    if let Some(stream_id_val) = global.get(scope, stream_id_key.into())
+                        && !stream_id_val.is_undefined()
+                        && !stream_id_val.is_null()
+                    {
+                        if let Some(stream_id) = stream_id_val.uint32_value(scope) {
+                            let stream_id = stream_id as u64;
+
+                            // Check if this stream's consumer has disconnected
+                            if !self.runtime.stream_manager.has_sender(stream_id) {
+                                // Track when we first detected disconnect
+                                if signal_aborted_at.is_none() {
+                                    signal_aborted_at = Some(iteration);
+
+                                    // Abort the signal to inform user code
+                                    let code = r#"
+                                        (function() {
+                                            if (globalThis.__lastResponse && globalThis.__lastResponse.body && globalThis.__lastResponse.body._controller) {
+                                                const ctrl = globalThis.__lastResponse.body._controller;
+                                                if (ctrl._abortController && !ctrl.signal.aborted) {
+                                                    ctrl._abortController.abort('Client disconnected');
+                                                }
+                                            }
+                                        })();
+                                        "#;
+                                    let code_str = v8::String::new(scope, &code).unwrap();
+
+                                    if let Some(script) = v8::Script::compile(scope, code_str, None)
+                                    {
+                                        let _ = script.run(scope);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Can exit when:
+                // - Request complete AND no active streams, OR
+                // - Signal was aborted and worker hasn't closed stream after grace period
+                //   (prevents infinite resource waste if worker ignores the signal)
+                // Grace period: ~100 iterations = ~100ms (first 10 are 1µs, next 90 are 1ms)
+                // This gives the worker time to see signal.aborted and close the stream
+                let grace_period_exceeded = signal_aborted_at
+                    .map(|aborted_at| iteration - aborted_at > 100)
+                    .unwrap_or(false);
+
+                request_complete && (active_streams == 0 || grace_period_exceeded)
             };
 
             if can_exit {
@@ -958,6 +1050,15 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
             const streamId = __responseStreamCreate();
             response._responseStreamId = streamId;
 
+            // Store the stream ID globally so exec() can detect cancellation
+            globalThis.__lastResponseStreamId = streamId;
+
+            // Connect the controller to the stream ID so enqueue() can detect disconnect
+            // The controller is on the ReadableStream, which is response.body
+            if (response.body._controller) {
+                response.body._controller._responseStreamId = streamId;
+            }
+
             // Increment active stream counter BEFORE starting async read
             globalThis.__activeResponseStreams++;
 
@@ -982,8 +1083,11 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
 
             // Read and forward asynchronously
             (async () => {
+                let reader = null;
+                let cancelled = false;
+
                 try {
-                    const reader = response.body.getReader();
+                    reader = response.body.getReader();
 
                     while (true) {
                         const { value, done } = await reader.read();
@@ -993,14 +1097,34 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
                         if (value && value.length > 0) {
                             const chunk = toUint8Array(value);
 
+                            // Try to write, with backpressure handling
                             while (!__responseStreamWrite(streamId, chunk)) {
+                                // Check if stream was closed (client disconnected)
+                                if (__responseStreamIsClosed(streamId)) {
+                                    console.log('[streamResponseBody] Client disconnected, cancelling stream');
+                                    cancelled = true;
+                                    break;
+                                }
+
+                                // Buffer full, wait and retry
                                 await new Promise(resolve => setTimeout(resolve, 1));
                             }
+
+                            if (cancelled) break;
                         }
                     }
                 } catch (error) {
                     console.error('[streamResponseBody] Error:', error);
                 } finally {
+                    // Cancel the reader to trigger the source's cancel() callback
+                    if (reader && cancelled) {
+                        try {
+                            await reader.cancel('Client disconnected');
+                        } catch (e) {
+                            // Ignore cancel errors
+                        }
+                    }
+
                     __responseStreamEnd(streamId);
                     // Decrement counter when stream is fully consumed
                     globalThis.__activeResponseStreams--;

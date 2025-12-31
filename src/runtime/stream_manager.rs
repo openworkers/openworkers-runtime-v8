@@ -72,6 +72,7 @@ impl StreamManager {
 
     /// Write a chunk to a stream (async - waits if buffer is full for backpressure)
     /// Called by Rust when data arrives from upstream
+    /// When the channel is closed (receiver dropped), removes the sender from the map
     pub async fn write_chunk(&self, stream_id: StreamId, chunk: StreamChunk) -> Result<(), String> {
         // Get a clone of the sender (so we don't hold the lock during await)
         let tx = {
@@ -80,9 +81,14 @@ impl StreamManager {
         };
 
         if let Some(tx) = tx {
-            tx.send(chunk)
-                .await
-                .map_err(|_| "Stream channel closed".to_string())
+            match tx.send(chunk).await {
+                Ok(()) => Ok(()),
+                Err(_) => {
+                    // Receiver was dropped (client disconnected) - remove sender from map
+                    self.senders.lock().unwrap().remove(&stream_id);
+                    Err("Stream channel closed".to_string())
+                }
+            }
         } else {
             Err(format!("Stream {} not found", stream_id))
         }
@@ -90,16 +96,23 @@ impl StreamManager {
 
     /// Try to write a chunk without waiting (returns error if buffer is full)
     /// Useful for non-async contexts
+    /// When the channel is closed (receiver dropped), removes the sender from the map
     pub fn try_write_chunk(&self, stream_id: StreamId, chunk: StreamChunk) -> Result<(), String> {
-        let senders = self.senders.lock().unwrap();
+        let mut senders = self.senders.lock().unwrap();
 
         if let Some(tx) = senders.get(&stream_id) {
-            tx.try_send(chunk).map_err(|e| match e {
-                mpsc::error::TrySendError::Full(_) => {
-                    "Stream buffer full (backpressure)".to_string()
+            match tx.try_send(chunk) {
+                Ok(()) => Ok(()),
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    Err("Stream buffer full (backpressure)".to_string())
                 }
-                mpsc::error::TrySendError::Closed(_) => "Stream channel closed".to_string(),
-            })
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    // Receiver was dropped (client disconnected) - remove sender from map
+                    // This makes has_sender() return false, which __responseStreamIsClosed uses
+                    senders.remove(&stream_id);
+                    Err("Stream channel closed".to_string())
+                }
+            }
         } else {
             Err(format!("Stream {} not found", stream_id))
         }
@@ -159,6 +172,11 @@ impl StreamManager {
     /// Count active streams
     pub fn active_count(&self) -> usize {
         self.senders.lock().unwrap().len()
+    }
+
+    /// Check if a stream has an active sender (not closed)
+    pub fn has_sender(&self, stream_id: StreamId) -> bool {
+        self.senders.lock().unwrap().contains_key(&stream_id)
     }
 }
 

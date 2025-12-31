@@ -284,4 +284,42 @@ pub fn setup_response_stream_ops(
 
     let end_key = v8::String::new(scope, "__responseStreamEnd").unwrap();
     global.set(scope, end_key.into(), end_fn.into());
+
+    // __responseStreamIsClosed(stream_id) -> boolean
+    // Returns true if the stream's consumer has disconnected (channel closed)
+    let is_closed_fn = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope,
+         args: v8::FunctionCallbackArguments,
+         mut retval: v8::ReturnValue| {
+            let global = scope.get_current_context().global(scope);
+            let state_key = v8::String::new(scope, "__responseStreamManager").unwrap();
+            let state_val = global.get(scope, state_key.into()).unwrap();
+
+            if !state_val.is_external() {
+                retval.set(v8::Boolean::new(scope, true).into());
+                return;
+            }
+
+            let external: v8::Local<v8::External> = state_val.try_into().unwrap();
+            let manager_ptr = external.value() as *const stream_manager::StreamManager;
+            let manager = unsafe { &*manager_ptr };
+
+            // Get stream_id
+            let stream_id = if let Some(id_val) = args.get(0).to_uint32(scope) {
+                id_val.value() as u64
+            } else {
+                retval.set(v8::Boolean::new(scope, true).into());
+                return;
+            };
+
+            // Check if stream is closed by checking if sender exists
+            let is_closed = !manager.has_sender(stream_id);
+            retval.set(v8::Boolean::new(scope, is_closed).into());
+        },
+    )
+    .unwrap();
+
+    let is_closed_key = v8::String::new(scope, "__responseStreamIsClosed").unwrap();
+    global.set(scope, is_closed_key.into(), is_closed_fn.into());
 }

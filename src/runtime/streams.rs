@@ -44,6 +44,11 @@ pub fn setup_readable_stream(scope: &mut v8::PinScope) {
 
                 this._state = 'closed';
 
+                // Abort the controller's signal to notify user code
+                if (this._controller && this._controller._abortController) {
+                    this._controller._abortController.abort(reason || 'Stream cancelled');
+                }
+
                 // Clear reader
                 if (this._reader) {
                     this._reader._closePending();
@@ -176,14 +181,32 @@ pub fn setup_readable_stream(scope: &mut v8::PinScope) {
                 this._stream = stream;
                 this._queue = [];
                 this._closeRequested = false;
+                // AbortController for signaling cancellation to user code
+                this._abortController = new AbortController();
+            }
+
+            // Expose signal so user code can check controller.signal.aborted
+            get signal() {
+                return this._abortController.signal;
             }
 
             enqueue(chunk) {
                 if (this._closeRequested) {
                     throw new TypeError('Cannot enqueue after close');
                 }
+
                 if (this._stream._state !== 'readable') {
                     throw new TypeError('Stream is not in readable state');
+                }
+
+                // Check if the associated response stream is closed (client disconnected)
+                // This is set by __streamResponseBody when streaming starts
+                if (this._responseStreamId !== undefined &&
+                    typeof __responseStreamIsClosed === 'function' &&
+                    __responseStreamIsClosed(this._responseStreamId)) {
+                    // Client disconnected - abort signal and throw
+                    this._abortController.abort('Client disconnected');
+                    throw new TypeError('Cannot enqueue: client disconnected');
                 }
 
                 this._queue.push({ type: 'chunk', value: chunk });
@@ -210,6 +233,9 @@ pub fn setup_readable_stream(scope: &mut v8::PinScope) {
 
                 this._stream._state = 'errored';
                 this._stream._storedError = error;
+
+                // Abort the signal to notify user code
+                this._abortController.abort(error);
 
                 // Reject all pending reads
                 if (this._stream._reader) {
