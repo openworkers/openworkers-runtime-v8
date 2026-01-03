@@ -1,6 +1,6 @@
 [package]
 name = "openworkers-runtime-v8"
-version = "0.7.3"
+version = "0.7.4"
 edition = "2024"
 
 [features]
@@ -16,7 +16,7 @@ openworkers-core = { git = "https://github.com/openworkers/openworkers-core", ta
 v8 = "142.2.0"
 
 # Async runtime
-tokio = { version = "1.43", features = ["full"] }
+tokio = { version = "1.49.0", features = ["full"] }
 futures = "0.3"
 
 # Logging
@@ -36,12 +36,12 @@ uuid = { version = "1", features = ["v4"] }
 
 # CPU time measurement (Unix only)
 [target.'cfg(unix)'.dependencies]
-libc = "0.2.178"
+libc = "0.2.179"
 
 # Signal handling (for CPU time enforcement on Linux)
 [target.'cfg(target_os = "linux")'.dependencies]
-signal-hook = "0.3.18"
-signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
+signal-hook = "0.4.1"
+signal-hook-tokio = { version = "0.4.0", features = ["futures-v0_3"] }
 
 # Optional dependencies
 actix-web = { version = "4.12.1", features = ["macros"], optional = true }

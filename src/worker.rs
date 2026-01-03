@@ -270,12 +270,19 @@ impl Worker {
                 let headers_key = v8::String::new(scope, "headers").unwrap();
                 init_obj.set(scope, headers_key.into(), headers_obj.into());
 
-                // Add body if present (convert Bytes to string)
+                // Add body if present (as Uint8Array for binary support)
                 if let RequestBody::Bytes(body_bytes) = &req.body {
-                    if let Ok(body_str) = std::str::from_utf8(body_bytes) {
+                    if !body_bytes.is_empty() {
+                        let len = body_bytes.len();
+                        let backing_store =
+                            v8::ArrayBuffer::new_backing_store_from_vec(body_bytes.to_vec())
+                                .make_shared();
+                        let array_buffer =
+                            v8::ArrayBuffer::with_backing_store(scope, &backing_store);
+                        let uint8_array = v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
+
                         let body_key = v8::String::new(scope, "body").unwrap();
-                        let body_val = v8::String::new(scope, body_str).unwrap();
-                        init_obj.set(scope, body_key.into(), body_val.into());
+                        init_obj.set(scope, body_key.into(), uint8_array.into());
                     }
                 }
 
