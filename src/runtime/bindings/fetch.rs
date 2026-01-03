@@ -664,14 +664,65 @@ pub fn setup_fetch(
             return new TextDecoder().decode(result);
         }
 
+        // Serialize FormData to multipart/form-data
+        async function __serializeFormData(formData) {
+            const boundary = '----OpenWorkersBoundary' + Math.random().toString(36).slice(2);
+            const CRLF = '\r\n';
+            const parts = [];
+
+            for (const [name, value, filename] of formData._entries) {
+                let part = '--' + boundary + CRLF;
+
+                if (value instanceof Blob) {
+                    const fname = filename || (value.name ? value.name : 'blob');
+                    part += 'Content-Disposition: form-data; name="' + name + '"; filename="' + fname + '"' + CRLF;
+                    part += 'Content-Type: ' + (value.type || 'application/octet-stream') + CRLF + CRLF;
+
+                    const headerBytes = new TextEncoder().encode(part);
+                    const blobBytes = value._getBytes();
+                    const crlfBytes = new TextEncoder().encode(CRLF);
+
+                    parts.push(headerBytes);
+                    parts.push(blobBytes);
+                    parts.push(crlfBytes);
+                } else {
+                    part += 'Content-Disposition: form-data; name="' + name + '"' + CRLF + CRLF;
+                    part += String(value) + CRLF;
+                    parts.push(new TextEncoder().encode(part));
+                }
+            }
+
+            parts.push(new TextEncoder().encode('--' + boundary + '--' + CRLF));
+
+            // Concatenate all parts
+            const totalLength = parts.reduce((sum, p) => sum + p.length, 0);
+            const result = new Uint8Array(totalLength);
+            let offset = 0;
+
+            for (const part of parts) {
+                result.set(part, offset);
+                offset += part.length;
+            }
+
+            return { body: result, boundary: boundary };
+        }
+
         globalThis.fetch = async function(url, options) {
             options = options || {};
             let body = options.body || null;
+            let contentType = null;
 
             // If body is a ReadableStream, buffer it first
             if (body instanceof ReadableStream) {
                 console.warn('[fetch] ReadableStream body detected - buffering entire stream before sending');
                 body = await __bufferReadableStream(body);
+            }
+
+            // If body is FormData, serialize to multipart/form-data
+            if (body instanceof FormData) {
+                const serialized = await __serializeFormData(body);
+                body = serialized.body;
+                contentType = 'multipart/form-data; boundary=' + serialized.boundary;
             }
 
             return new Promise((resolve, reject) => {
@@ -685,6 +736,11 @@ pub fn setup_fetch(
                     }
                 } else if (h && typeof h === 'object') {
                     headersObj = h;
+                }
+
+                // Set Content-Type for FormData if not already set
+                if (contentType && !headersObj['Content-Type'] && !headersObj['content-type']) {
+                    headersObj['Content-Type'] = contentType;
                 }
 
                 const fetchOptions = {
