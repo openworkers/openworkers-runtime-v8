@@ -1,17 +1,14 @@
 [package]
 name = "openworkers-runtime-v8"
-version = "0.7.5"
+version = "0.7.6"
 edition = "2024"
 license = "MIT"
-
-[features]
-actix = ["dep:actix-web", "openworkers-core/actix"]
 
 [dependencies]
 
 # Common types
 # openworkers-core = { path = "../openworkers-core" }
-openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.7.1" }
+openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.7.2" }
 
 # V8 JavaScript engine (v8 is the new name for rusty_v8)
 v8 = "142.2.0"
@@ -44,8 +41,6 @@ libc = "0.2.179"
 signal-hook = "0.4.1"
 signal-hook-tokio = { version = "0.4.0", features = ["futures-v0_3"] }
 
-# Optional dependencies
-actix-web = { version = "4.12.1", features = ["macros"], optional = true }
 tokio-stream = "0.1"
 
 [dev-dependencies]
