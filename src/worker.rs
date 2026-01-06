@@ -8,6 +8,43 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use v8;
 
+/// Condition to check for exiting the event loop
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum EventLoopExit {
+    /// Wait for __lastResponse to be a valid Response object (has status property)
+    ResponseReady,
+    /// Wait for __requestComplete to be true (handler finished, including async work)
+    HandlerComplete,
+    /// Wait for __requestComplete && __activeResponseStreams == 0 (fully complete)
+    FullyComplete,
+}
+
+/// Optional abort handling configuration for event loop.
+///
+/// When enabled, the event loop will:
+/// 1. Detect client disconnects via stream_manager
+/// 2. Signal the disconnect to JS via __signalClientDisconnect
+/// 3. Allow a grace period for JS to react before force-exiting
+#[derive(Clone)]
+pub(crate) struct AbortConfig {
+    /// Grace period after signaling abort before force-exit
+    pub grace_period: tokio::time::Duration,
+}
+
+impl AbortConfig {
+    pub fn new(grace_period_ms: u64) -> Self {
+        Self {
+            grace_period: tokio::time::Duration::from_millis(grace_period_ms),
+        }
+    }
+}
+
+impl Default for AbortConfig {
+    fn default() -> Self {
+        Self::new(100) // 100ms grace period
+    }
+}
+
 pub struct Worker {
     pub(crate) runtime: Runtime,
     _event_loop_handle: tokio::task::JoinHandle<()>,
@@ -164,7 +201,7 @@ impl Worker {
                 let scheduled_init = init.take().ok_or(TerminationReason::Other(
                     "ScheduledInit already consumed".to_string(),
                 ))?;
-                self.trigger_scheduled_event(scheduled_init)
+                self.trigger_scheduled_event(scheduled_init, &wall_guard, &cpu_guard)
                     .await
                     .map(|_| HttpResponse {
                         status: 200,
@@ -228,6 +265,118 @@ impl Worker {
             }
             Err(e) => Err(TerminationReason::Exception(e)),
         }
+    }
+
+    /// Calculate maximum event loop iterations based on wall-clock timeout.
+    ///
+    /// Formula: 100 base iterations + 1 per 100ms of wall-clock timeout.
+    /// This ensures we have enough iterations for long-running async operations
+    /// while still having a safety limit.
+    #[inline]
+    fn max_event_loop_iterations(&self) -> usize {
+        100 + (self.runtime.limits.max_wall_clock_time_ms / 100) as usize
+    }
+
+    /// Check if execution should be terminated.
+    ///
+    /// Returns true if any termination condition is met:
+    /// - V8 isolate is terminating (e.g., from terminate_execution())
+    /// - Wall-clock timeout was triggered
+    /// - CPU time limit was exceeded (Linux only)
+    #[inline]
+    fn is_terminated(&self, wall_guard: &TimeoutGuard, cpu_guard: &Option<CpuEnforcer>) -> bool {
+        self.runtime.isolate.is_execution_terminating()
+            || wall_guard.was_triggered()
+            || cpu_guard
+                .as_ref()
+                .map(|g| g.was_terminated())
+                .unwrap_or(false)
+    }
+
+    /// Run the event loop until a condition is met or timeout/termination occurs.
+    ///
+    /// This is the core loop for processing async operations (Promises, timers, fetch).
+    /// It checks termination guards, processes callbacks, and waits for the exit condition.
+    ///
+    /// When `abort_config` is provided, the loop also:
+    /// - Detects client disconnects via stream_manager
+    /// - Signals the disconnect to JS
+    /// - Allows a grace period before force-exiting (even with active streams)
+    async fn await_event_loop(
+        &mut self,
+        wall_guard: &TimeoutGuard,
+        cpu_guard: &Option<CpuEnforcer>,
+        exit_condition: EventLoopExit,
+        abort_config: Option<AbortConfig>,
+    ) -> Result<(), String> {
+        let max_iterations = self.max_event_loop_iterations();
+        let mut abort_signaled_at: Option<tokio::time::Instant> = None;
+
+        for _iteration in 0..max_iterations {
+            if self.is_terminated(wall_guard, cpu_guard) {
+                return Err("Execution terminated".to_string());
+            }
+
+            // Process pending callbacks and microtasks
+            self.runtime.process_callbacks();
+
+            // Check exit condition
+            // CRITICAL: Wrap in explicit block to drop V8 scopes BEFORE the await below.
+            // V8 scopes use RAII - if alive during await, another worker on the same thread
+            // may run and corrupt V8's context stack.
+            let should_exit = {
+                use std::pin::pin;
+                let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
+                let mut scope = scope.init();
+                let context = v8::Local::new(&scope, &self.runtime.context);
+                let scope = &mut v8::ContextScope::new(&mut scope, context);
+                let global = context.global(scope);
+
+                // Basic exit condition check
+                let base_exit = check_exit_condition(scope, global, exit_condition);
+
+                // If abort detection is enabled, handle client disconnects
+                if let Some(ref config) = abort_config {
+                    let (request_complete, active_streams) = get_completion_state(scope, global);
+
+                    // Detect client disconnect and signal abort to JS
+                    if active_streams > 0 && abort_signaled_at.is_none() {
+                        if let Some(stream_id) = get_response_stream_id(scope, global) {
+                            if !self.runtime.stream_manager.has_sender(stream_id) {
+                                abort_signaled_at = Some(tokio::time::Instant::now());
+                                signal_client_disconnect(scope);
+                            }
+                        }
+                    }
+
+                    // Check grace period
+                    let grace_exceeded = abort_signaled_at
+                        .map(|t| t.elapsed() > config.grace_period)
+                        .unwrap_or(false);
+
+                    // Exit if base condition met, OR if request complete and grace exceeded
+                    base_exit || (request_complete && grace_exceeded)
+                } else {
+                    base_exit
+                }
+            }; // V8 scopes dropped here, BEFORE the await
+
+            if should_exit {
+                return Ok(());
+            }
+
+            // Wait for scheduler to signal callback ready, or timeout to check guards
+            tokio::select! {
+                _ = self.runtime.callback_notify.notified() => {
+                    // Callback ready, loop will process it
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                    // Periodic check for wall_guard timeout (checked at loop start)
+                }
+            }
+        }
+
+        Err("Max event loop iterations reached".to_string())
     }
 
     async fn trigger_fetch_event(
@@ -339,78 +488,9 @@ impl Worker {
             }
         }
 
-        // Process callbacks to allow async operations (Promises, timers, fetch) to complete
-        // Safety limit: base iterations + wall_clock_ms / 100 (one iteration per 100ms timeout)
-        let max_iterations = 100 + (self.runtime.limits.max_wall_clock_time_ms / 100) as usize;
-        let mut response_ready = false;
-
-        for _iteration in 0..max_iterations {
-            // Check if execution was terminated (CPU/wall-clock timeout)
-            if self.runtime.isolate.is_execution_terminating()
-                || wall_guard.was_triggered()
-                || cpu_guard
-                    .as_ref()
-                    .map(|g| g.was_terminated())
-                    .unwrap_or(false)
-            {
-                return Err("Execution terminated".to_string());
-            }
-
-            // Process pending callbacks and microtasks
-            self.runtime.process_callbacks();
-
-            // Check if response is available and body has been read
-            // CRITICAL: Wrap in explicit block to drop V8 scopes BEFORE the await below.
-            // V8 scopes (HandleScope, ContextScope) use RAII - they Enter on creation and Exit on drop.
-            // If scopes are alive during await, another worker on the same thread may run and corrupt
-            // V8's context stack, causing "Cannot exit non-entered context" crashes.
-            response_ready = {
-                use std::pin::pin;
-                let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
-                let mut scope = scope.init();
-                let context = v8::Local::new(&scope, &self.runtime.context);
-                let scope = &mut v8::ContextScope::new(&mut scope, context);
-                let global = context.global(scope);
-
-                let resp_key = v8::String::new(scope, "__lastResponse").unwrap();
-                if let Some(resp_val) = global.get(scope, resp_key.into()) {
-                    // Check if it's a valid Response object (not undefined, not a Promise)
-                    if !resp_val.is_undefined() && !resp_val.is_null() && !resp_val.is_promise() {
-                        if let Some(resp_obj) = resp_val.to_object(scope) {
-                            // Check if it has a 'status' property (indicates it's a Response, not a Promise)
-                            let status_key = v8::String::new(scope, "status").unwrap();
-                            resp_obj.get(scope, status_key.into()).is_some()
-                        } else {
-                            false
-                        }
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            }; // <-- V8 scopes dropped here, BEFORE the await
-
-            if response_ready {
-                break;
-            }
-
-            // Wait for scheduler to signal callback ready, or timeout to check guards
-            // This replaces the old adaptive sleep with event-driven wake-up
-            tokio::select! {
-                _ = self.runtime.callback_notify.notified() => {
-                    // Callback ready, loop will process it
-                }
-                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
-                    // Periodic check for wall_guard timeout (checked at loop start)
-                }
-            }
-        }
-
-        // Check if we exited the loop without a response (max iterations reached)
-        if !response_ready {
-            return Err("Max event loop iterations reached".to_string());
-        }
+        // Wait for response to be ready (no abort detection needed yet)
+        self.await_event_loop(wall_guard, cpu_guard, EventLoopExit::ResponseReady, None)
+            .await?;
 
         // Read response from global __lastResponse
         // Wrap in block to drop V8 scopes before the waitUntil loop
@@ -446,58 +526,8 @@ impl Worker {
                         }
                     });
 
-                // Extract headers first (needed for both paths)
-                // Headers can be a Headers instance (with _map) or a plain object
-                let mut headers = vec![];
-                let headers_key = v8::String::new(scope, "headers").unwrap();
-
-                if let Some(headers_val) = resp_obj.get(scope, headers_key.into())
-                    && let Some(headers_obj) = headers_val.to_object(scope)
-                {
-                    // Check if this is a Headers instance (has _map)
-                    let map_key = v8::String::new(scope, "_map").unwrap();
-
-                    if let Some(map_val) = headers_obj.get(scope, map_key.into())
-                        && let Ok(map_obj) = v8::Local::<v8::Map>::try_from(map_val)
-                    {
-                        // Headers instance - iterate over _map
-                        let entries = map_obj.as_array(scope);
-                        let len = entries.length();
-                        let mut i = 0;
-
-                        while i < len {
-                            if let Some(key_val) = entries.get_index(scope, i)
-                                && let Some(val_val) = entries.get_index(scope, i + 1)
-                                && let Some(key_str) = key_val.to_string(scope)
-                                && let Some(val_str) = val_val.to_string(scope)
-                            {
-                                let key = key_str.to_rust_string_lossy(scope);
-                                let value = val_str.to_rust_string_lossy(scope);
-                                headers.push((key, value));
-                            }
-
-                            i += 2; // Map.as_array returns [key, value, key, value, ...]
-                        }
-                    } else if let Some(props) =
-                        headers_obj.get_own_property_names(scope, Default::default())
-                    {
-                        // Plain object - use property iteration
-                        for i in 0..props.length() {
-                            if let Some(key_val) = props.get_index(scope, i)
-                                && let Some(key_str) = key_val.to_string(scope)
-                            {
-                                let key = key_str.to_rust_string_lossy(scope);
-
-                                if let Some(val) = headers_obj.get(scope, key_val)
-                                    && let Some(val_str) = val.to_string(scope)
-                                {
-                                    let value = val_str.to_rust_string_lossy(scope);
-                                    headers.push((key, value));
-                                }
-                            }
-                        }
-                    }
-                }
+                // Extract headers (handles both Headers instance and plain object)
+                let headers = extract_headers_from_response(scope, resp_obj);
 
                 // Determine body type: streaming or buffered
                 let body = if let Some(stream_id) = response_stream_id {
@@ -608,122 +638,14 @@ impl Worker {
         let _ = fetch_init.res_tx.send(response);
 
         // Wait for waitUntil promises AND active response streams to complete.
-        // Response channel is bounded (default 1024) to prevent memory exhaustion.
-        // JS streams larger than buffer will hit backpressure and timeout via wall clock.
-        let mut signal_aborted_at: Option<tokio::time::Instant> = None;
-        const GRACE_PERIOD: tokio::time::Duration = tokio::time::Duration::from_millis(100);
-
-        for _iteration in 0..max_iterations {
-            // Check if execution was terminated
-            if self.runtime.isolate.is_execution_terminating()
-                || wall_guard.was_triggered()
-                || cpu_guard
-                    .as_ref()
-                    .map(|g| g.was_terminated())
-                    .unwrap_or(false)
-            {
-                return Err("Execution terminated".to_string());
-            }
-
-            // Process pending callbacks (CRITICAL: this runs timers that feed streams)
-            self.runtime.process_callbacks();
-
-            // Check if request is fully complete:
-            // 1. __requestComplete must be true (handler finished)
-            // 2. __activeResponseStreams must be 0 (all streams closed)
-            //
-            // Note: For streaming responses, we check if any streams have been cancelled
-            // (client disconnected). If so, we signal the abort and continue processing
-            // to allow the JS to clean up.
-            let can_exit = {
-                use std::pin::pin;
-                let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
-                let mut scope = scope.init();
-                let context = v8::Local::new(&scope, &self.runtime.context);
-                let scope = &mut v8::ContextScope::new(&mut scope, context);
-                let global = context.global(scope);
-
-                // Check __requestComplete
-                let complete_key = v8::String::new(scope, "__requestComplete").unwrap();
-                let request_complete = global
-                    .get(scope, complete_key.into())
-                    .map(|v| v.is_true())
-                    .unwrap_or(false);
-
-                // Check __activeResponseStreams
-                let streams_key = v8::String::new(scope, "__activeResponseStreams").unwrap();
-                let active_streams = global
-                    .get(scope, streams_key.into())
-                    .and_then(|v| v.uint32_value(scope))
-                    .unwrap_or(0);
-
-                // Check if response stream was cancelled (client disconnected)
-                // If so, signal abort to JS
-                if active_streams > 0 {
-                    let stream_id_key = v8::String::new(scope, "__lastResponseStreamId").unwrap();
-
-                    if let Some(stream_id_val) = global.get(scope, stream_id_key.into())
-                        && !stream_id_val.is_undefined()
-                        && !stream_id_val.is_null()
-                    {
-                        if let Some(stream_id) = stream_id_val.uint32_value(scope) {
-                            let stream_id = stream_id as u64;
-
-                            // Check if this stream's consumer has disconnected
-                            if !self.runtime.stream_manager.has_sender(stream_id) {
-                                // Track when we first detected disconnect
-                                if signal_aborted_at.is_none() {
-                                    signal_aborted_at = Some(tokio::time::Instant::now());
-
-                                    // Abort the signal to inform user code
-                                    let code = r#"
-                                        (function() {
-                                            if (globalThis.__lastResponse && globalThis.__lastResponse.body && globalThis.__lastResponse.body._controller) {
-                                                const ctrl = globalThis.__lastResponse.body._controller;
-                                                if (ctrl._abortController && !ctrl.signal.aborted) {
-                                                    ctrl._abortController.abort('Client disconnected');
-                                                }
-                                            }
-                                        })();
-                                        "#;
-                                    let code_str = v8::String::new(scope, &code).unwrap();
-
-                                    if let Some(script) = v8::Script::compile(scope, code_str, None)
-                                    {
-                                        let _ = script.run(scope);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Can exit when:
-                // - Request complete AND no active streams, OR
-                // - Signal was aborted and worker hasn't closed stream after grace period
-                //   (prevents infinite resource waste if worker ignores the signal)
-                // Grace period: 100ms to give the worker time to see signal.aborted and close the stream
-                let grace_period_exceeded = signal_aborted_at
-                    .map(|aborted_at| aborted_at.elapsed() > GRACE_PERIOD)
-                    .unwrap_or(false);
-
-                request_complete && (active_streams == 0 || grace_period_exceeded)
-            };
-
-            if can_exit {
-                break;
-            }
-
-            // Wait for scheduler to signal callback ready, or timeout to check guards
-            tokio::select! {
-                _ = self.runtime.callback_notify.notified() => {
-                    // Callback ready, loop will process it
-                }
-                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
-                    // Periodic check for wall_guard timeout
-                }
-            }
-        }
+        // With abort detection: signals client disconnect and allows grace period.
+        self.await_event_loop(
+            wall_guard,
+            cpu_guard,
+            EventLoopExit::FullyComplete,
+            Some(AbortConfig::default()),
+        )
+        .await?;
 
         // Return success indicator (body already sent via channel)
         Ok(HttpResponse {
@@ -736,7 +658,10 @@ impl Worker {
     async fn trigger_scheduled_event(
         &mut self,
         scheduled_init: openworkers_core::ScheduledInit,
+        wall_guard: &TimeoutGuard,
+        cpu_guard: &Option<CpuEnforcer>,
     ) -> Result<(), String> {
+        // Trigger scheduled handler
         {
             use std::pin::pin;
             let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
@@ -744,7 +669,6 @@ impl Worker {
             let context = v8::Local::new(&scope, &self.runtime.context);
             let scope = &mut v8::ContextScope::new(&mut scope, context);
 
-            // Trigger scheduled handler
             let global = context.global(scope);
             let handler_key = v8::String::new(scope, "__scheduledHandler").unwrap();
 
@@ -759,15 +683,193 @@ impl Worker {
                 let time_val = v8::Number::new(scope, scheduled_init.time as f64);
                 event_obj.set(scope, time_key.into(), time_val.into());
 
-                handler_fn.call(scope, global.into(), &[event_obj.into()]);
+                let result = handler_fn.call(scope, global.into(), &[event_obj.into()]);
+
+                // If call returned None, V8 was terminated (CPU/wall-clock timeout)
+                if result.is_none() {
+                    return Err("Execution terminated".to_string());
+                }
             }
         }
 
-        // Process callbacks
-        self.runtime.process_callbacks();
+        // Wait for handler to complete (including async work and waitUntil promises)
+        // No abort detection needed for scheduled events (no streaming response)
+        self.await_event_loop(wall_guard, cpu_guard, EventLoopExit::HandlerComplete, None)
+            .await?;
 
         let _ = scheduled_init.res_tx.send(());
         Ok(())
+    }
+}
+
+/// Check if the specified exit condition is met (free function to avoid borrow conflicts)
+fn check_exit_condition(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    global: v8::Local<v8::Object>,
+    condition: EventLoopExit,
+) -> bool {
+    match condition {
+        EventLoopExit::ResponseReady => {
+            // Check __lastResponse is a valid Response object (not undefined, not a Promise)
+            let resp_key = v8::String::new(scope, "__lastResponse").unwrap();
+
+            if let Some(resp_val) = global.get(scope, resp_key.into()) {
+                if !resp_val.is_undefined() && !resp_val.is_null() && !resp_val.is_promise() {
+                    if let Some(resp_obj) = resp_val.to_object(scope) {
+                        // Check if it has a 'status' property (indicates it's a Response)
+                        let status_key = v8::String::new(scope, "status").unwrap();
+                        return resp_obj.get(scope, status_key.into()).is_some();
+                    }
+                }
+            }
+
+            false
+        }
+
+        EventLoopExit::HandlerComplete => {
+            // Check __requestComplete == true
+            let complete_key = v8::String::new(scope, "__requestComplete").unwrap();
+            global
+                .get(scope, complete_key.into())
+                .map(|v| v.is_true())
+                .unwrap_or(false)
+        }
+
+        EventLoopExit::FullyComplete => {
+            // Check __requestComplete && __activeResponseStreams == 0
+            let complete_key = v8::String::new(scope, "__requestComplete").unwrap();
+            let request_complete = global
+                .get(scope, complete_key.into())
+                .map(|v| v.is_true())
+                .unwrap_or(false);
+
+            if !request_complete {
+                return false;
+            }
+
+            let streams_key = v8::String::new(scope, "__activeResponseStreams").unwrap();
+            let active_streams = global
+                .get(scope, streams_key.into())
+                .and_then(|v| v.uint32_value(scope))
+                .unwrap_or(0);
+
+            active_streams == 0
+        }
+    }
+}
+
+/// Get the completion state: (request_complete, active_streams)
+#[inline]
+fn get_completion_state(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    global: v8::Local<v8::Object>,
+) -> (bool, u32) {
+    let complete_key = v8::String::new(scope, "__requestComplete").unwrap();
+    let request_complete = global
+        .get(scope, complete_key.into())
+        .map(|v| v.is_true())
+        .unwrap_or(false);
+
+    let streams_key = v8::String::new(scope, "__activeResponseStreams").unwrap();
+    let active_streams = global
+        .get(scope, streams_key.into())
+        .and_then(|v| v.uint32_value(scope))
+        .unwrap_or(0);
+
+    (request_complete, active_streams)
+}
+
+/// Get the response stream ID if present
+#[inline]
+fn get_response_stream_id(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    global: v8::Local<v8::Object>,
+) -> Option<u64> {
+    let stream_id_key = v8::String::new(scope, "__lastResponseStreamId").unwrap();
+    let stream_id_val = global.get(scope, stream_id_key.into())?;
+
+    if stream_id_val.is_undefined() || stream_id_val.is_null() {
+        return None;
+    }
+
+    stream_id_val.uint32_value(scope).map(|id| id as u64)
+}
+
+/// Extract headers from a Response object.
+///
+/// Headers can be either:
+/// - A Headers instance (with internal _map: Map<string, string>)
+/// - A plain object with string properties
+fn extract_headers_from_response(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    resp_obj: v8::Local<v8::Object>,
+) -> Vec<(String, String)> {
+    let mut headers = vec![];
+    let headers_key = v8::String::new(scope, "headers").unwrap();
+
+    let Some(headers_val) = resp_obj.get(scope, headers_key.into()) else {
+        return headers;
+    };
+
+    let Some(headers_obj) = headers_val.to_object(scope) else {
+        return headers;
+    };
+
+    // Check if this is a Headers instance (has _map)
+    let map_key = v8::String::new(scope, "_map").unwrap();
+
+    if let Some(map_val) = headers_obj.get(scope, map_key.into())
+        && let Ok(map_obj) = v8::Local::<v8::Map>::try_from(map_val)
+    {
+        // Headers instance - iterate over _map
+        let entries = map_obj.as_array(scope);
+        let len = entries.length();
+        let mut i = 0;
+
+        while i < len {
+            if let Some(key_val) = entries.get_index(scope, i)
+                && let Some(val_val) = entries.get_index(scope, i + 1)
+                && let Some(key_str) = key_val.to_string(scope)
+                && let Some(val_str) = val_val.to_string(scope)
+            {
+                headers.push((
+                    key_str.to_rust_string_lossy(scope),
+                    val_str.to_rust_string_lossy(scope),
+                ));
+            }
+
+            i += 2; // Map.as_array returns [key, value, key, value, ...]
+        }
+    } else if let Some(props) = headers_obj.get_own_property_names(scope, Default::default()) {
+        // Plain object - use property iteration
+        for i in 0..props.length() {
+            if let Some(key_val) = props.get_index(scope, i)
+                && let Some(key_str) = key_val.to_string(scope)
+                && let Some(val) = headers_obj.get(scope, key_val)
+                && let Some(val_str) = val.to_string(scope)
+            {
+                headers.push((
+                    key_str.to_rust_string_lossy(scope),
+                    val_str.to_rust_string_lossy(scope),
+                ));
+            }
+        }
+    }
+
+    headers
+}
+
+/// Signal to JS that the client has disconnected.
+/// Calls __signalClientDisconnect() which is always defined in setup_event_listener.
+#[inline]
+fn signal_client_disconnect(scope: &mut v8::ContextScope<v8::HandleScope>) {
+    let global = scope.get_current_context().global(scope);
+    let fn_key = v8::String::new(scope, "__signalClientDisconnect").unwrap();
+
+    if let Some(fn_val) = global.get(scope, fn_key.into())
+        && let Ok(func) = v8::Local::<v8::Function>::try_from(fn_val)
+    {
+        let _ = func.call(scope, global.into(), &[]);
     }
 }
 
@@ -777,21 +879,10 @@ fn setup_env(
     bindings: &[openworkers_core::BindingInfo],
 ) -> Result<(), String> {
     // Build JSON string for env vars
-    let env_json = if let Some(env_map) = env {
-        let pairs: Vec<String> = env_map
-            .iter()
-            .map(|(k, v)| {
-                format!(
-                    "{}:{}",
-                    serde_json::to_string(k).unwrap_or_else(|_| "\"\"".to_string()),
-                    serde_json::to_string(v).unwrap_or_else(|_| "\"\"".to_string())
-                )
-            })
-            .collect();
-        format!("{{{}}}", pairs.join(","))
-    } else {
-        "{}".to_string()
-    };
+    let env_json = env
+        .as_ref()
+        .map(|m| serde_json::to_string(m).unwrap_or_else(|_| "{}".to_string()))
+        .unwrap_or_else(|| "{}".to_string());
 
     // Build binding object definitions
     let binding_defs: Vec<String> = bindings
@@ -1056,6 +1147,18 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
         // Track active response streams - worker stays alive until all streams are closed
         globalThis.__activeResponseStreams = 0;
 
+        // Signal client disconnect to abort response streams
+        // Called from Rust when consumer disconnects
+        globalThis.__signalClientDisconnect = function() {
+            const resp = globalThis.__lastResponse;
+            if (resp?.body?._controller?._abortController) {
+                const ctrl = resp.body._controller;
+                if (!ctrl.signal.aborted) {
+                    ctrl._abortController.abort('Client disconnected');
+                }
+            }
+        };
+
         // Stream response body to Rust (stream all responses with body)
         async function __streamResponseBody(response) {
             if (!response.body) {
@@ -1225,11 +1328,15 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
                         waitUntilPromises.push(Promise.resolve(promise));
                     };
 
-                    await handler(event);
+                    try {
+                        await handler(event);
 
-                    // Wait for all waitUntil promises to complete
-                    if (waitUntilPromises.length > 0) {
-                        await Promise.all(waitUntilPromises);
+                        // Wait for all waitUntil promises to complete
+                        if (waitUntilPromises.length > 0) {
+                            await Promise.all(waitUntilPromises);
+                        }
+                    } finally {
+                        globalThis.__requestComplete = true;
                     }
                 };
             }
@@ -1306,11 +1413,15 @@ fn setup_es_modules_handler(runtime: &mut Runtime) -> Result<(), String> {
                     }
                 };
 
-                await moduleScheduled(event, globalThis.env, ctx);
+                try {
+                    await moduleScheduled(event, globalThis.env, ctx);
 
-                // Wait for all waitUntil promises to complete
-                if (waitUntilPromises.length > 0) {
-                    await Promise.all(waitUntilPromises);
+                    // Wait for all waitUntil promises to complete
+                    if (waitUntilPromises.length > 0) {
+                        await Promise.all(waitUntilPromises);
+                    }
+                } finally {
+                    globalThis.__requestComplete = true;
                 }
             };
         }
