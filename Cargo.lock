@@ -735,8 +735,8 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openworkers-core"
-version = "0.7.2"
-source = "git+https://github.com/openworkers/openworkers-core?tag=v0.7.2#5c4544aa5820725e89bb77d5876fe5d34c758b02"
+version = "0.7.3"
+source = "git+https://github.com/openworkers/openworkers-core?tag=v0.7.3#2023c54e7a26f79be56a17900aaf35ab9bea2893"
 dependencies = [
  "bytes",
  "serde",
@@ -746,7 +746,7 @@ dependencies = [
 
 [[package]]
 name = "openworkers-runtime-v8"
-version = "0.7.6"
+version = "0.7.7"
 dependencies = [
  "bytes",
  "env_logger",

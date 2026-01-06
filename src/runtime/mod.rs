@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use v8;
 
 use crate::security::CustomAllocator;
@@ -18,6 +18,32 @@ use openworkers_core::{
 };
 
 pub type CallbackId = u64;
+
+/// Wrapper that sends a callback message AND notifies the exec() loop
+#[derive(Clone)]
+pub struct CallbackSender {
+    tx: mpsc::UnboundedSender<CallbackMessage>,
+    notify: Arc<Notify>,
+}
+
+impl CallbackSender {
+    pub fn new(tx: mpsc::UnboundedSender<CallbackMessage>, notify: Arc<Notify>) -> Self {
+        Self { tx, notify }
+    }
+
+    pub fn send(
+        &self,
+        msg: CallbackMessage,
+    ) -> Result<(), mpsc::error::SendError<CallbackMessage>> {
+        let result = self.tx.send(msg);
+
+        if result.is_ok() {
+            self.notify.notify_one();
+        }
+
+        result
+    }
+}
 
 pub enum SchedulerMessage {
     ScheduleTimeout(CallbackId, u64),
@@ -65,6 +91,8 @@ pub struct Runtime {
     pub(crate) memory_limit_hit: Arc<AtomicBool>,
     /// Runtime resource limits (CPU, wall-clock, memory)
     pub(crate) limits: RuntimeLimits,
+    /// Notify to wake up exec() loop when callbacks are ready
+    pub(crate) callback_notify: Arc<Notify>,
 }
 
 impl Runtime {
@@ -74,6 +102,7 @@ impl Runtime {
         Self,
         mpsc::UnboundedReceiver<SchedulerMessage>,
         mpsc::UnboundedSender<CallbackMessage>,
+        Arc<Notify>,
     ) {
         let limits = limits.unwrap_or_default();
 
@@ -90,6 +119,7 @@ impl Runtime {
 
         let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel();
         let (callback_tx, callback_rx) = mpsc::unbounded_channel();
+        let callback_notify = Arc::new(Notify::new());
 
         let fetch_callbacks = Arc::new(Mutex::new(HashMap::new()));
         let fetch_error_callbacks = Arc::new(Mutex::new(HashMap::new()));
@@ -198,9 +228,10 @@ impl Runtime {
             stream_manager,
             memory_limit_hit,
             limits,
+            callback_notify: callback_notify.clone(),
         };
 
-        (runtime, scheduler_rx, callback_tx)
+        (runtime, scheduler_rx, callback_tx, callback_notify)
     }
 
     pub fn process_callbacks(&mut self) {
@@ -685,9 +716,13 @@ impl Runtime {
 pub async fn run_event_loop(
     mut scheduler_rx: mpsc::UnboundedReceiver<SchedulerMessage>,
     callback_tx: mpsc::UnboundedSender<CallbackMessage>,
+    callback_notify: Arc<Notify>,
     stream_manager: Arc<stream_manager::StreamManager>,
     ops: OperationsHandle,
 ) {
+    // Wrap sender with notify for automatic wake-up
+    let callback_tx = CallbackSender::new(callback_tx, callback_notify);
+
     let mut running_tasks: HashMap<CallbackId, tokio::task::JoinHandle<()>> = HashMap::new();
 
     while let Some(msg) = scheduler_rx.recv().await {

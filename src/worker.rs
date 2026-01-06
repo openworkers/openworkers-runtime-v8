@@ -62,7 +62,7 @@ impl Worker {
         limits: Option<RuntimeLimits>,
         ops: OperationsHandle,
     ) -> Result<Self, TerminationReason> {
-        let (mut runtime, scheduler_rx, callback_tx) = Runtime::new(limits);
+        let (mut runtime, scheduler_rx, callback_tx, callback_notify) = Runtime::new(limits);
 
         // Setup addEventListener
         setup_event_listener(&mut runtime).map_err(|e| {
@@ -98,7 +98,14 @@ impl Worker {
         // Use spawn_local to keep it in the same LocalSet as the V8 worker,
         // which allows nested spawn_local calls in ops (like do_fetch streaming)
         let event_loop_handle = tokio::task::spawn_local(async move {
-            run_event_loop(scheduler_rx, callback_tx, stream_manager, ops).await;
+            run_event_loop(
+                scheduler_rx,
+                callback_tx,
+                callback_notify,
+                stream_manager,
+                ops,
+            )
+            .await;
         });
 
         Ok(Self {
@@ -216,6 +223,9 @@ impl Worker {
         // Finally check execution result
         match result {
             Ok(_) => Ok(()),
+            Err(e) if e.contains("Max event loop iterations") => {
+                Err(TerminationReason::MaxIterationsReached)
+            }
             Err(e) => Err(TerminationReason::Exception(e)),
         }
     }
@@ -330,9 +340,10 @@ impl Worker {
         }
 
         // Process callbacks to allow async operations (Promises, timers, fetch) to complete
-        // Strategy: Check frequently with minimal sleep for fast responses,
-        // but support long-running async operations (up to 5 seconds)
-        for iteration in 0..5000 {
+        // Safety limit: 100 iterations should be way more than enough for any normal worker
+        let mut response_ready = false;
+
+        for _iteration in 0..100 {
             // Check if execution was terminated (CPU/wall-clock timeout)
             if self.runtime.isolate.is_execution_terminating()
                 || wall_guard.was_triggered()
@@ -352,7 +363,7 @@ impl Worker {
             // V8 scopes (HandleScope, ContextScope) use RAII - they Enter on creation and Exit on drop.
             // If scopes are alive during await, another worker on the same thread may run and corrupt
             // V8's context stack, causing "Cannot exit non-entered context" crashes.
-            let response_ready = {
+            response_ready = {
                 use std::pin::pin;
                 let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
                 let mut scope = scope.init();
@@ -383,20 +394,21 @@ impl Worker {
                 break;
             }
 
-            // Adaptive sleep: fast for first checks, slower later
-            // This allows fast responses (<1ms) while supporting slow operations
-            let sleep_duration = if iteration < 10 {
-                // First 10 iterations: no sleep (for immediate sync responses)
-                tokio::time::Duration::from_micros(1)
-            } else if iteration < 100 {
-                // Next 90 iterations: 1ms sleep (for fast async < 100ms)
-                tokio::time::Duration::from_millis(1)
-            } else {
-                // After 100ms: 10ms sleep (for slow operations)
-                tokio::time::Duration::from_millis(10)
-            };
+            // Wait for scheduler to signal callback ready, or timeout to check guards
+            // This replaces the old adaptive sleep with event-driven wake-up
+            tokio::select! {
+                _ = self.runtime.callback_notify.notified() => {
+                    // Callback ready, loop will process it
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                    // Periodic check for wall_guard timeout (checked at loop start)
+                }
+            }
+        }
 
-            tokio::time::sleep(sleep_duration).await;
+        // Check if we exited the loop without a response (max iterations reached)
+        if !response_ready {
+            return Err("Max event loop iterations reached".to_string());
         }
 
         // Read response from global __lastResponse
@@ -593,9 +605,10 @@ impl Worker {
         // Wait for waitUntil promises AND active response streams to complete
         // Response has already been sent, but we need to keep the worker alive
         // to process callbacks (timers) that feed the response stream
-        let mut signal_aborted_at: Option<usize> = None;
+        let mut signal_aborted_at: Option<tokio::time::Instant> = None;
+        const GRACE_PERIOD: tokio::time::Duration = tokio::time::Duration::from_millis(100);
 
-        for iteration in 0..5000 {
+        for _iteration in 0..100 {
             // Check if execution was terminated
             if self.runtime.isolate.is_execution_terminating()
                 || wall_guard.was_triggered()
@@ -655,7 +668,7 @@ impl Worker {
                             if !self.runtime.stream_manager.has_sender(stream_id) {
                                 // Track when we first detected disconnect
                                 if signal_aborted_at.is_none() {
-                                    signal_aborted_at = Some(iteration);
+                                    signal_aborted_at = Some(tokio::time::Instant::now());
 
                                     // Abort the signal to inform user code
                                     let code = r#"
@@ -684,10 +697,9 @@ impl Worker {
                 // - Request complete AND no active streams, OR
                 // - Signal was aborted and worker hasn't closed stream after grace period
                 //   (prevents infinite resource waste if worker ignores the signal)
-                // Grace period: ~100 iterations = ~100ms (first 10 are 1µs, next 90 are 1ms)
-                // This gives the worker time to see signal.aborted and close the stream
+                // Grace period: 100ms to give the worker time to see signal.aborted and close the stream
                 let grace_period_exceeded = signal_aborted_at
-                    .map(|aborted_at| iteration - aborted_at > 100)
+                    .map(|aborted_at| aborted_at.elapsed() > GRACE_PERIOD)
                     .unwrap_or(false);
 
                 request_complete && (active_streams == 0 || grace_period_exceeded)
@@ -697,16 +709,15 @@ impl Worker {
                 break;
             }
 
-            // Adaptive sleep
-            let sleep_duration = if iteration < 10 {
-                tokio::time::Duration::from_micros(1)
-            } else if iteration < 100 {
-                tokio::time::Duration::from_millis(1)
-            } else {
-                tokio::time::Duration::from_millis(10)
-            };
-
-            tokio::time::sleep(sleep_duration).await;
+            // Wait for scheduler to signal callback ready, or timeout to check guards
+            tokio::select! {
+                _ = self.runtime.callback_notify.notified() => {
+                    // Callback ready, loop will process it
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                    // Periodic check for wall_guard timeout
+                }
+            }
         }
 
         // Return success indicator (body already sent via channel)
