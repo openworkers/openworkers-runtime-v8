@@ -340,10 +340,15 @@ impl Worker {
         }
 
         // Process callbacks to allow async operations (Promises, timers, fetch) to complete
-        // Safety limit: 100 iterations should be way more than enough for any normal worker
+        // Safety limit: base iterations + wall_clock_ms / 100 (one iteration per 100ms timeout)
+        // This counter is shared between the main loop and the waitUntil loop
+        let max_iterations =
+            100 + (self.runtime.limits.max_wall_clock_time_ms / 100) as usize;
+        let mut iteration = 0;
         let mut response_ready = false;
 
-        for _iteration in 0..100 {
+        while iteration < max_iterations {
+            iteration += 1;
             // Check if execution was terminated (CPU/wall-clock timeout)
             if self.runtime.isolate.is_execution_terminating()
                 || wall_guard.was_triggered()
@@ -605,10 +610,12 @@ impl Worker {
         // Wait for waitUntil promises AND active response streams to complete
         // Response has already been sent, but we need to keep the worker alive
         // to process callbacks (timers) that feed the response stream
+        // Continues using the shared iteration counter from the main loop
         let mut signal_aborted_at: Option<tokio::time::Instant> = None;
         const GRACE_PERIOD: tokio::time::Duration = tokio::time::Duration::from_millis(100);
 
-        for _iteration in 0..100 {
+        while iteration < max_iterations {
+            iteration += 1;
             // Check if execution was terminated
             if self.runtime.isolate.is_execution_terminating()
                 || wall_guard.was_triggered()
