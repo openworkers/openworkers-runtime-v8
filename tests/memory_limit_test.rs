@@ -16,7 +16,7 @@ async fn test_memory_limit_arraybuffer_allocation() {
             heap_max_mb: 1,
             max_cpu_time_ms: 0,
             max_wall_clock_time_ms: 0,
-            stream_buffer_size: 16,
+            ..Default::default()
         };
 
         // Try to allocate 10MB - should fail
@@ -66,7 +66,7 @@ async fn test_memory_limit_uint8array_allocation() {
             heap_max_mb: 2,
             max_cpu_time_ms: 0,
             max_wall_clock_time_ms: 0,
-            stream_buffer_size: 16,
+            ..Default::default()
         };
 
         // Try to allocate 20MB via Uint8Array - should fail
@@ -115,7 +115,7 @@ async fn test_memory_limit_incremental_allocation() {
             heap_max_mb: 4,
             max_cpu_time_ms: 0,
             max_wall_clock_time_ms: 0,
-            stream_buffer_size: 16,
+            ..Default::default()
         };
 
         // Allocate incrementally until we hit the limit
@@ -170,7 +170,7 @@ async fn test_memory_within_limit() {
             heap_max_mb: 64,
             max_cpu_time_ms: 0,
             max_wall_clock_time_ms: 0,
-            stream_buffer_size: 16,
+            ..Default::default()
         };
 
         // Allocate small buffer - should succeed
