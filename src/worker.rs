@@ -341,14 +341,10 @@ impl Worker {
 
         // Process callbacks to allow async operations (Promises, timers, fetch) to complete
         // Safety limit: base iterations + wall_clock_ms / 100 (one iteration per 100ms timeout)
-        // This counter is shared between the main loop and the waitUntil loop
-        let max_iterations =
-            100 + (self.runtime.limits.max_wall_clock_time_ms / 100) as usize;
-        let mut iteration = 0;
+        let max_iterations = 100 + (self.runtime.limits.max_wall_clock_time_ms / 100) as usize;
         let mut response_ready = false;
 
-        while iteration < max_iterations {
-            iteration += 1;
+        for _iteration in 0..max_iterations {
             // Check if execution was terminated (CPU/wall-clock timeout)
             if self.runtime.isolate.is_execution_terminating()
                 || wall_guard.was_triggered()
@@ -510,8 +506,12 @@ impl Worker {
                     use crate::runtime::stream_manager::StreamChunk;
 
                     if let Some(receiver) = self.runtime.stream_manager.take_receiver(stream_id) {
-                        // Create a channel that converts StreamChunk to Result<Bytes, String>
-                        let (tx, rx) = tokio::sync::mpsc::channel(16);
+                        // Use bounded channel with configurable size.
+                        // Large buffer (default 1024) allows most JS streams to complete.
+                        // For streams larger than buffer: they'll hit backpressure and
+                        // eventually timeout via wall clock (safer than memory exhaustion).
+                        let buffer_size = self.runtime.limits.stream_buffer_size;
+                        let (tx, rx) = tokio::sync::mpsc::channel(buffer_size);
 
                         // Clone stream_manager to use in the spawned task
                         let stream_manager = self.runtime.stream_manager.clone();
@@ -607,15 +607,13 @@ impl Worker {
 
         let _ = fetch_init.res_tx.send(response);
 
-        // Wait for waitUntil promises AND active response streams to complete
-        // Response has already been sent, but we need to keep the worker alive
-        // to process callbacks (timers) that feed the response stream
-        // Continues using the shared iteration counter from the main loop
+        // Wait for waitUntil promises AND active response streams to complete.
+        // Response channel is bounded (default 1024) to prevent memory exhaustion.
+        // JS streams larger than buffer will hit backpressure and timeout via wall clock.
         let mut signal_aborted_at: Option<tokio::time::Instant> = None;
         const GRACE_PERIOD: tokio::time::Duration = tokio::time::Duration::from_millis(100);
 
-        while iteration < max_iterations {
-            iteration += 1;
+        for _iteration in 0..max_iterations {
             // Check if execution was terminated
             if self.runtime.isolate.is_execution_terminating()
                 || wall_guard.was_triggered()

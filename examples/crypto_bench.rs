@@ -2,24 +2,31 @@
 use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
+use tokio::task::LocalSet;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
-    println!("=== Crypto Benchmark ===\n");
+    let local = LocalSet::new();
 
-    // Benchmark SHA-256
-    benchmark_sha256().await;
+    local
+        .run_until(async {
+            println!("=== Crypto Benchmark ===\n");
 
-    // Benchmark HMAC
-    benchmark_hmac().await;
+            // Benchmark SHA-256
+            benchmark_sha256().await;
 
-    // Benchmark ECDSA
-    benchmark_ecdsa().await;
+            // Benchmark HMAC
+            benchmark_hmac().await;
 
-    // Benchmark RSA
-    benchmark_rsa().await;
+            // Benchmark ECDSA
+            benchmark_ecdsa().await;
 
-    println!();
+            // Benchmark RSA
+            benchmark_rsa().await;
+
+            println!();
+        })
+        .await;
 }
 
 async fn benchmark_hmac() {

@@ -1,4 +1,6 @@
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody, ResponseBody, Script, Task};
+use openworkers_core::{
+    HttpMethod, HttpRequest, RequestBody, ResponseBody, RuntimeLimits, Script, Task,
+};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -24,7 +26,14 @@ async fn bench_local_stream(chunk_count: usize, chunk_size: usize) -> (Duration,
     );
 
     let script = Script::new(&code);
-    let mut worker = Worker::new(script, None).await.unwrap();
+
+    // Use larger stream buffer for benchmarks with many chunks
+    let limits = RuntimeLimits {
+        stream_buffer_size: 1024,
+        ..Default::default()
+    };
+
+    let mut worker = Worker::new(script, Some(limits)).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,

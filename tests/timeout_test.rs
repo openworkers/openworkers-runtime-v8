@@ -21,6 +21,7 @@ async fn test_wall_clock_timeout_infinite_loop() {
             heap_max_mb: 64,
             max_cpu_time_ms: 0, // Disabled
             max_wall_clock_time_ms: 500,
+            stream_buffer_size: 16,
         };
 
         // Infinite loop - will be terminated by wall-clock timeout
@@ -69,6 +70,7 @@ async fn test_wall_clock_timeout_async_loop() {
             heap_max_mb: 64,
             max_cpu_time_ms: 0,
             max_wall_clock_time_ms: 500,
+            stream_buffer_size: 16,
         };
 
         // Loop that includes promises - still should be terminated
@@ -117,6 +119,7 @@ async fn test_fast_execution_no_timeout() {
             heap_max_mb: 64,
             max_cpu_time_ms: 0,
             max_wall_clock_time_ms: 5000,
+            stream_buffer_size: 16,
         };
 
         // Fast code - should complete well before timeout
@@ -166,6 +169,7 @@ async fn test_disabled_timeout_allows_long_execution() {
             heap_max_mb: 64,
             max_cpu_time_ms: 0,
             max_wall_clock_time_ms: 0, // Disabled
+            stream_buffer_size: 16,
         };
 
         // Long-running but finite computation
@@ -313,6 +317,7 @@ mod cpu_tests {
                 heap_max_mb: 64,
                 max_cpu_time_ms: 100,
                 max_wall_clock_time_ms: 2000,
+                stream_buffer_size: 16,
             };
 
             // Sleep for 500ms (wall clock) but use minimal CPU

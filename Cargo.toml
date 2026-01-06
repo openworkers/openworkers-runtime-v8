@@ -1,6 +1,6 @@
 [package]
 name = "openworkers-runtime-v8"
-version = "0.7.8"
+version = "0.7.9"
 edition = "2024"
 license = "MIT"
 
@@ -8,7 +8,7 @@ license = "MIT"
 
 # Common types
 # openworkers-core = { path = "../openworkers-core" }
-openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.7.3" }
+openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.7.4" }
 
 # V8 JavaScript engine (v8 is the new name for rusty_v8)
 v8 = "142.2.0"

@@ -64,6 +64,7 @@ async fn test_exec_cpu_time_measurement() {
             heap_max_mb: 64,
             max_cpu_time_ms: 0,
             max_wall_clock_time_ms: 0,
+            stream_buffer_size: 16,
         };
 
         // Code that does some computation
@@ -122,6 +123,7 @@ async fn test_exec_cpu_time_excludes_async_wait() {
             heap_max_mb: 64,
             max_cpu_time_ms: 0,
             max_wall_clock_time_ms: 5000,
+            stream_buffer_size: 16,
         };
 
         // Code that sleeps (async wait, not CPU)
@@ -176,6 +178,7 @@ async fn test_exec_cpu_intensive_uses_more_cpu_time() {
             heap_max_mb: 64,
             max_cpu_time_ms: 0,
             max_wall_clock_time_ms: 5000,
+            stream_buffer_size: 16,
         };
 
         // Light computation
