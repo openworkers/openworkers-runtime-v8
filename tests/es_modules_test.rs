@@ -3,7 +3,8 @@
 mod common;
 
 use common::run_in_local;
-use openworkers_runtime_v8::{HttpMethod, HttpRequest, RequestBody, Script, Task, Worker};
+use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task, WorkerCode};
+use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
 #[tokio::test(flavor = "current_thread")]
@@ -60,7 +61,7 @@ async fn test_es_modules_with_env() {
         env.insert("TEST_VAR".to_string(), "hello".to_string());
 
         let script = Script {
-            code: code.to_string(),
+            code: WorkerCode::JavaScript(code.to_string()),
             env: Some(env),
             bindings: vec![],
         };

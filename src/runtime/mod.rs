@@ -15,6 +15,7 @@ use crate::security::CustomAllocator;
 use openworkers_core::{
     DatabaseOp, DatabaseResult, HttpRequest, HttpResponseMeta, KvOp, KvResult, Operation,
     OperationResult, OperationsHandle, ResponseBody, RuntimeLimits, StorageOp, StorageResult,
+    WorkerCode,
 };
 
 pub type CallbackId = u64;
@@ -639,12 +640,22 @@ impl Runtime {
         }
     }
 
-    pub fn evaluate(&mut self, script: &str) -> Result<(), String> {
+    pub fn evaluate(&mut self, worker_code: &WorkerCode) -> Result<(), String> {
         use std::pin::pin;
         let scope = pin!(v8::HandleScope::new(&mut self.isolate));
         let mut scope = scope.init();
         let context = v8::Local::new(&scope, &self.context);
         let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+        let script = match worker_code {
+            WorkerCode::JavaScript(code) => code,
+            WorkerCode::Snapshot(_) => {
+                return Err("Snapshot worker code evaluation not supported yet".to_string());
+            }
+            WorkerCode::WebAssembly(_) => {
+                return Err("WASM worker code evaluation not implemented".to_string());
+            }
+        };
 
         let code = v8::String::new(scope, script).ok_or("Failed to create script string")?;
 

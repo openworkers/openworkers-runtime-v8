@@ -25,7 +25,7 @@ async fn bench_local_stream(chunk_count: usize, chunk_size: usize) -> (Duration,
         chunk_size, chunk_count
     );
 
-    let script = Script::new(&code);
+    let script = Script::new(code);
 
     // Use larger stream buffer for benchmarks with many chunks
     let limits = RuntimeLimits {
@@ -130,7 +130,7 @@ async fn bench_large_streaming(size_kb: usize) -> (Duration, usize) {
         size_kb * 1024
     );
 
-    let script = Script::new(&code);
+    let script = Script::new(code);
     let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {

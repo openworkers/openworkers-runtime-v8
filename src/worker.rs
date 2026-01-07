@@ -2,7 +2,7 @@ use crate::runtime::{Runtime, run_event_loop};
 use crate::security::{CpuEnforcer, TimeoutGuard};
 use openworkers_core::{
     HttpResponse, OperationsHandle, RequestBody, ResponseBody, RuntimeLimits, Script, Task,
-    TerminationReason,
+    TerminationReason, WorkerCode,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -64,7 +64,8 @@ impl Worker {
 
     /// Evaluate JavaScript code (for testing/advanced use)
     pub fn evaluate(&mut self, code: &str) -> Result<(), String> {
-        self.runtime.evaluate(code)
+        self.runtime
+            .evaluate(&WorkerCode::JavaScript(code.to_string()))
     }
 
     /// Get access to the V8 isolate and context (for advanced testing)
@@ -1139,7 +1140,7 @@ fn setup_env(
         env_json, bindings_json
     );
 
-    runtime.evaluate(&code)
+    runtime.evaluate(&WorkerCode::JavaScript(code))
 }
 
 fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
@@ -1343,7 +1344,7 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
         };
     "#;
 
-    runtime.evaluate(code)
+    runtime.evaluate(&WorkerCode::JavaScript(code.to_string()))
 }
 
 /// Setup ES Modules handler if `export default { fetch }` is used
@@ -1427,7 +1428,7 @@ fn setup_es_modules_handler(runtime: &mut Runtime) -> Result<(), String> {
         }
     "#;
 
-    runtime.evaluate(code)
+    runtime.evaluate(&WorkerCode::JavaScript(code.to_string()))
 }
 
 impl openworkers_core::Worker for Worker {
