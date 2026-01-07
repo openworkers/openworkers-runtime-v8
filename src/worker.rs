@@ -1399,8 +1399,8 @@ fn setup_es_modules_handler(runtime: &mut Runtime) -> Result<(), String> {
             };
         }
 
-        // If export default exists but no fetch, create a handler that throws
-        if (typeof globalThis.default === 'object' && globalThis.default !== null && typeof globalThis.default.fetch !== 'function') {
+        // If export default exists but no fetch, and no addEventListener handler, create a handler that returns 501
+        if (typeof globalThis.default === 'object' && globalThis.default !== null && typeof globalThis.default.fetch !== 'function' && typeof globalThis.__triggerFetch !== 'function') {
             globalThis.__triggerFetch = function(request) {
                 globalThis.__lastResponse = new Response('Worker does not implement fetch handler', { status: 501 });
                 globalThis.__requestComplete = true;
@@ -1435,8 +1435,8 @@ fn setup_es_modules_handler(runtime: &mut Runtime) -> Result<(), String> {
             };
         }
 
-        // If export default exists but no scheduled, create a handler that throws
-        if (typeof globalThis.default === 'object' && globalThis.default !== null && typeof globalThis.default.scheduled !== 'function') {
+        // If export default exists but no scheduled, and no addEventListener handler, create a handler that throws
+        if (typeof globalThis.default === 'object' && globalThis.default !== null && typeof globalThis.default.scheduled !== 'function' && typeof globalThis.__scheduledHandler !== 'function') {
             globalThis.__scheduledHandler = async function(event) {
                 throw new Error('Worker does not implement scheduled handler');
             };
