@@ -736,7 +736,6 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 [[package]]
 name = "openworkers-core"
 version = "0.8.0"
-source = "git+https://github.com/openworkers/openworkers-core?tag=v0.8.0#db406edec93aeccf146dc52e1b100404c23a0203"
 dependencies = [
  "bytes",
  "serde",

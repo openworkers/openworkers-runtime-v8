@@ -7,8 +7,8 @@ license = "MIT"
 [dependencies]
 
 # Common types
-# openworkers-core = { path = "../openworkers-core" }
-openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.8.0" }
+openworkers-core = { path = "../openworkers-core" }
+# openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.8.0" }
 
 # V8 JavaScript engine (v8 is the new name for rusty_v8)
 v8 = "142.2.0"

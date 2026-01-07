@@ -647,13 +647,15 @@ impl Runtime {
         let context = v8::Local::new(&scope, &self.context);
         let scope = &mut v8::ContextScope::new(&mut scope, context);
 
+        // Catch-all handles WebAssembly (behind wasm feature flag) and future variants
+        #[allow(unreachable_patterns)]
         let script = match worker_code {
             WorkerCode::JavaScript(code) => code,
             WorkerCode::Snapshot(_) => {
                 return Err("Snapshot worker code evaluation not supported yet".to_string());
             }
-            WorkerCode::WebAssembly(_) => {
-                return Err("WASM worker code evaluation not implemented".to_string());
+            _ => {
+                return Err("V8 runtime only supports JavaScript code".to_string());
             }
         };
 
