@@ -1301,7 +1301,36 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
                     // Run async to track completion
                     (async () => {
                         try {
-                            handler(event);
+                            // Call handler and capture return value
+                            const result = handler(event);
+
+                            // If handler returns a Response or Promise<Response>, use it
+                            // ONLY if respondWith() was not already called (respondWith has priority)
+                            // (Service Worker / Cloudflare Workers compatibility)
+                            if (!responsePromise && result instanceof Response) {
+                                responsePromise = __streamResponseBody(result)
+                                    .then(response => {
+                                        globalThis.__lastResponse = response;
+                                    });
+                            } else if (!responsePromise && result && typeof result.then === 'function') {
+                                // Handler returned a Promise - could be Promise<Response>
+                                responsePromise = result
+                                    .then(response => {
+                                        if (response instanceof Response) {
+                                            return __streamResponseBody(response)
+                                                .then(processed => {
+                                                    globalThis.__lastResponse = processed;
+                                                });
+                                        }
+                                    })
+                                    .catch(error => {
+                                        console.error('[addEventListener] Handler promise rejected:', error);
+                                        globalThis.__lastResponse = new Response(
+                                            'Handler promise rejected: ' + (error.message || error),
+                                            { status: 500 }
+                                        );
+                                    });
+                            }
 
                             // Wait for response to be set first
                             if (responsePromise) {
@@ -1439,6 +1468,19 @@ fn setup_es_modules_handler(runtime: &mut Runtime) -> Result<(), String> {
         if (typeof globalThis.default === 'object' && globalThis.default !== null && typeof globalThis.default.scheduled !== 'function' && typeof globalThis.__scheduledHandler !== 'function') {
             globalThis.__scheduledHandler = async function(event) {
                 throw new Error('Worker does not implement scheduled handler');
+            };
+        }
+
+        // Final fallback: if __triggerFetch is still not defined (no addEventListener, no valid export default),
+        // create a 501 handler. This handles cases like:
+        // - globalThis.default = null
+        // - globalThis.default = 42
+        // - globalThis.default = "string"
+        // - No handler defined at all
+        if (typeof globalThis.__triggerFetch !== 'function') {
+            globalThis.__triggerFetch = function(request) {
+                globalThis.__lastResponse = new Response('Worker does not implement fetch handler', { status: 501 });
+                globalThis.__requestComplete = true;
             };
         }
     "#;
