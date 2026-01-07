@@ -1357,7 +1357,7 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
 fn setup_es_modules_handler(runtime: &mut Runtime) -> Result<(), String> {
     let code = r#"
         // Check if ES Modules style is used: export default { fetch }
-        if (typeof globalThis.default === 'object' && typeof globalThis.default.fetch === 'function') {
+        if (typeof globalThis.default === 'object' && globalThis.default !== null && typeof globalThis.default.fetch === 'function') {
             const moduleHandler = globalThis.default;
 
             // Override __triggerFetch for ES Modules style
@@ -1399,8 +1399,16 @@ fn setup_es_modules_handler(runtime: &mut Runtime) -> Result<(), String> {
             };
         }
 
+        // If export default exists but no fetch, create a handler that throws
+        if (typeof globalThis.default === 'object' && globalThis.default !== null && typeof globalThis.default.fetch !== 'function') {
+            globalThis.__triggerFetch = function(request) {
+                globalThis.__lastResponse = new Response('Worker does not implement fetch handler', { status: 501 });
+                globalThis.__requestComplete = true;
+            };
+        }
+
         // Same for scheduled events
-        if (typeof globalThis.default === 'object' && typeof globalThis.default.scheduled === 'function') {
+        if (typeof globalThis.default === 'object' && globalThis.default !== null && typeof globalThis.default.scheduled === 'function') {
             const moduleScheduled = globalThis.default.scheduled;
 
             // Wrap to pass env and ctx
@@ -1424,6 +1432,13 @@ fn setup_es_modules_handler(runtime: &mut Runtime) -> Result<(), String> {
                 } finally {
                     globalThis.__requestComplete = true;
                 }
+            };
+        }
+
+        // If export default exists but no scheduled, create a handler that throws
+        if (typeof globalThis.default === 'object' && globalThis.default !== null && typeof globalThis.default.scheduled !== 'function') {
+            globalThis.__scheduledHandler = async function(event) {
+                throw new Error('Worker does not implement scheduled handler');
             };
         }
     "#;
