@@ -1,10 +1,14 @@
+pub mod execution_context;
 pub mod runtime;
 pub mod security;
+pub mod shared_isolate;
 pub mod snapshot;
 pub mod worker;
 
 // Core API
+pub use execution_context::ExecutionContext;
 pub use runtime::Runtime;
+pub use shared_isolate::SharedIsolate;
 pub use worker::Worker;
 
 // Re-export common types from openworkers-common
