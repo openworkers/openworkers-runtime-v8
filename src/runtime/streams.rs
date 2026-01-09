@@ -86,7 +86,7 @@ pub fn setup_readable_stream(scope: &mut v8::PinScope) {
             let reason1;
             let reason2;
             let closedOrErrored = false;
-            let reading = false;
+            let readPromise = null;
 
             function cloneValue(value) {
                 if (value instanceof Uint8Array) {
@@ -97,14 +97,18 @@ pub fn setup_readable_stream(scope: &mut v8::PinScope) {
             }
 
             function pullBoth(controller1, controller2) {
-                if (reading || closedOrErrored) {
+                if (closedOrErrored) {
                     return Promise.resolve();
                 }
 
-                reading = true;
+                // If a read is already in progress, return that same promise
+                // This ensures both branches wait for the same read to complete
+                if (readPromise) {
+                    return readPromise;
+                }
 
-                return reader.read().then(({ done, value }) => {
-                    reading = false;
+                readPromise = reader.read().then(({ done, value }) => {
+                    readPromise = null;
 
                     if (done) {
                         closedOrErrored = true;
@@ -124,11 +128,13 @@ pub fn setup_readable_stream(scope: &mut v8::PinScope) {
                         controller2.enqueue(cloneValue(value));
                     }
                 }).catch(e => {
-                    reading = false;
+                    readPromise = null;
 
                     try { controller1.error(e); } catch (err) {}
                     try { controller2.error(e); } catch (err) {}
                 });
+
+                return readPromise;
             }
 
             let ctrl1 = null;
