@@ -5,8 +5,8 @@
 //! - Many disposable Contexts (cheap to create, ~100µs, ~10KB)
 //! - Each request gets a fresh Context with complete isolation
 
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use v8;
 
 use crate::security::CustomAllocator;
@@ -105,7 +105,11 @@ mod tests {
         let isolate = SharedIsolate::new(limits);
 
         // Isolate should be created successfully
-        assert!(!isolate.memory_limit_hit.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(
+            !isolate
+                .memory_limit_hit
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
     }
 
     #[test]
@@ -117,7 +121,15 @@ mod tests {
         let isolate2 = SharedIsolate::new(limits);
 
         // Both should be valid
-        assert!(!isolate1.memory_limit_hit.load(std::sync::atomic::Ordering::Relaxed));
-        assert!(!isolate2.memory_limit_hit.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(
+            !isolate1
+                .memory_limit_hit
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        assert!(
+            !isolate2
+                .memory_limit_hit
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
     }
 }
