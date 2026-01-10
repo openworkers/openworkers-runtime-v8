@@ -20,45 +20,45 @@ This document explains the technical implementation of the isolate pool with v8:
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                     openworkers-runner                            │
-│                                                                    │
-│  bin/main.rs:                                                     │
+│                     openworkers-runner                           │
+│                                                                  │
+│  bin/main.rs:                                                    │
 │    ├─ init_pool(max_size, limits)  ← Called once at startup      │
-│    └─ GET /admin/pool               ← Monitoring endpoint         │
-│                                                                    │
-│  task_executor.rs:                                                │
+│    └─ GET /admin/pool               ← Monitoring endpoint        │
+│                                                                  │
+│  task_executor.rs:                                               │
 │    └─ execute_pooled(worker_id, script, ops, task)               │
-│                          │                                         │
-└──────────────────────────┼─────────────────────────────────────────┘
+│                          │                                       │
+└──────────────────────────┼───────────────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│               openworkers-runtime-v8                              │
-│                                                                    │
+│               openworkers-runtime-v8                             │
+│                                                                  │
 │  pooled_execution.rs (public API):                               │
 │    └─ execute_pooled()                                           │
 │         └─ pool.acquire(worker_id)                               │
 │              └─ pooled.with_lock_async(|isolate| { ... })        │
-│                                                                    │
+│                                                                  │
 │  isolate_pool.rs (core implementation):                          │
 │    ├─ IsolatePool       ← LRU cache                              │
 │    ├─ PooledIsolate     ← RAII guard for pool entry              │
 │    └─ IsolateEntry      ← Wrapper around LockerManagedIsolate    │
-│                                                                    │
+│                                                                  │
 │  locker_managed_isolate.rs:                                      │
 │    └─ LockerManagedIsolate ← Wraps v8::UnenteredIsolate          │
-│                                                                    │
-│  execution_context.rs:                                            │
+│                                                                  │
+│  execution_context.rs:                                           │
 │    └─ ExecutionContext ← Executes JS code in isolate             │
 └──────────────────────────────────────────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                      rusty_v8                                     │
-│                                                                    │
+│                      rusty_v8                                    │
+│                                                                  │
 │  v8::UnenteredIsolate    ← No auto-enter/exit                    │
-│  v8::Locker              ← Thread-safe exclusive access           │
-│  v8::Unlocker            ← Temporary release                      │
+│  v8::Locker              ← Thread-safe exclusive access          │
+│  v8::Unlocker            ← Temporary release                     │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -79,12 +79,14 @@ pub struct IsolatePool {
 ```
 
 **Responsibilities:**
+
 - Manage LRU cache of isolates
 - Create new isolates on demand
 - Evict least-recently-used isolates when full
 - Track statistics (cache hits, total requests)
 
 **Key methods:**
+
 ```rust
 // Initialize pool (called once at startup)
 pub fn init_pool(max_size: usize, limits: RuntimeLimits);
@@ -109,6 +111,7 @@ pub struct PooledIsolate {
 **Purpose:** RAII guard that ensures isolate is returned to pool when dropped.
 
 **Key method:**
+
 ```rust
 pub async fn with_lock_async<F, Fut, R>(&self, f: F) -> R
 where
@@ -128,6 +131,7 @@ where
 ```
 
 **Drop behavior:**
+
 ```rust
 impl Drop for PooledIsolate {
     fn drop(&mut self) {
@@ -164,11 +168,13 @@ pub struct LockerManagedIsolate {
 ```
 
 **Purpose:**
+
 - Wraps `v8::UnenteredIsolate` (no auto-enter/exit)
 - Compatible with `v8::Locker` (unlike `v8::OwnedIsolate`)
 - Manages V8 platform and heap limits
 
 **Key difference from OwnedIsolate:**
+
 - `OwnedIsolate` auto-enters on creation → incompatible with Locker
 - `UnenteredIsolate` never auto-enters → must use Locker for access
 
@@ -246,6 +252,7 @@ Arc<Mutex<LruCache<WorkerId, Arc<Mutex<IsolateEntry>>>>>
 ```
 
 **Purpose:**
+
 - Protect LRU cache operations (get, put, evict)
 - Prevent race conditions on cache structure
 
@@ -258,6 +265,7 @@ let _locker = v8::Locker::new(isolate);
 ```
 
 **Purpose:**
+
 - Guarantee exclusive access to V8 isolate
 - Required by V8's threading model
 - Prevents concurrent V8 API calls
@@ -267,11 +275,13 @@ let _locker = v8::Locker::new(isolate);
 ### Why Two Locks?
 
 **Rust Mutex alone is not enough:**
+
 - V8 isolates are **not thread-safe** - concurrent access causes corruption
 - V8 expects only ONE thread to use an isolate at a time
 - `v8::Locker` enforces this at the V8 C++ level
 
 **V8 Locker alone is not enough:**
+
 - Need to protect LRU cache structure (Rust data)
 - Need to track metadata (created_at, last_accessed, etc.)
 
@@ -289,6 +299,7 @@ pub struct Locker {
 - Rust compiler prevents accidentally sending Locker to another thread
 
 **This guarantees:**
+
 - Locker is always paired with isolate usage
 - No isolate access without Locker
 - No Locker outliving its scope (RAII)
@@ -312,6 +323,7 @@ let isolate = LockerManagedIsolate::new(limits);
 ```
 
 **Cold start time:**
+
 - With snapshot: ~100µs
 - Without snapshot: ~3-5ms
 
@@ -346,6 +358,7 @@ if pool.cache.len() >= pool.max_size {
 ```
 
 **Note:** Isolate is only destroyed when:
+
 1. Evicted from cache AND
 2. No active `PooledIsolate` references exist
 
@@ -383,25 +396,31 @@ Memory usage:
 ### Lock Contention Scenarios
 
 **Scenario 1: Different workers, same time**
+
 ```
 Thread 1: worker-A → Lock A → Execute (no contention)
 Thread 2: worker-B → Lock B → Execute (no contention)
 Thread 3: worker-C → Lock C → Execute (no contention)
 ```
+
 ✅ **No contention** - Different isolates
 
 **Scenario 2: Same worker, sequential**
+
 ```
 Thread 1: worker-A → Lock A → Execute → Unlock A
 Thread 2: worker-A → Lock A → Execute (reuses, <10µs)
 ```
+
 ✅ **Fast** - Cache hit, no waiting
 
 **Scenario 3: Same worker, concurrent**
+
 ```
 Thread 1: worker-A → Lock A → Execute (5ms)
 Thread 2: worker-A → WAIT for Lock A... → Execute
 ```
+
 ⚠️ **Contention** - Thread 2 blocks until Thread 1 finishes
 
 **Mitigation:** In practice, requests to the same worker are rare in concurrent scenarios. Most workloads have high worker diversity.
@@ -424,6 +443,7 @@ cargo test --lib unentered_isolate_test
 See [../../POOL_TESTING.md](../../POOL_TESTING.md) for full testing procedures.
 
 **Quick test:**
+
 ```bash
 # Start runner
 cd openworkers-runner
@@ -471,6 +491,7 @@ pub struct PoolStats {
 ```
 
 **GET /admin/pool** response:
+
 ```json
 {
   "total": 1000,
@@ -495,11 +516,13 @@ pub struct PoolStats {
 ### Logging
 
 Enable debug logs to see pool activity:
+
 ```bash
 RUST_LOG=debug,openworkers_runtime_v8=debug cargo run
 ```
 
 **Example logs:**
+
 ```
 DEBUG Isolate pool config: max_size=1000, heap_initial=10MB, heap_max=50MB
 INFO  Isolate pool initialized: max_size=1000
@@ -515,10 +538,12 @@ INFO  Isolate LRU eviction: worker old-worker evicted (cache full at 1000)
 ### Issue: High lock contention
 
 **Symptoms:**
+
 - High latency for specific workers
 - Many threads blocked waiting for locks
 
 **Solution:**
+
 - Increase pool size (more isolates = less contention)
 - Reduce request concurrency per worker
 - Check if many requests truly target the same worker
@@ -526,9 +551,11 @@ INFO  Isolate LRU eviction: worker old-worker evicted (cache full at 1000)
 ### Issue: High memory usage
 
 **Symptoms:**
+
 - Memory usage exceeds expected `pool_size × heap_max_mb`
 
 **Solution:**
+
 - Enable pointer compression (`v8_enable_pointer_compression`)
 - Reduce `ISOLATE_POOL_SIZE`
 - Reduce `ISOLATE_HEAP_MAX_MB`
@@ -536,9 +563,11 @@ INFO  Isolate LRU eviction: worker old-worker evicted (cache full at 1000)
 ### Issue: Low cache hit rate
 
 **Symptoms:**
+
 - `hit_rate` consistently <90%
 
 **Solution:**
+
 - Increase pool size (more workers can be cached)
 - Check if worker IDs are stable (not randomly generated)
 - Verify request routing (should route same worker to same pool)

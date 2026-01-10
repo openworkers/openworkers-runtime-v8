@@ -6,8 +6,10 @@
     "microtasks",
     "oneshot",
     "openworkers",
+    "ptrcomp",
     "reqwest",
     "rustls",
-    "serde"
+    "serde",
+    "usize"
   ]
 }
