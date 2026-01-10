@@ -191,42 +191,57 @@ impl ExecutionContext {
     }
 
     /// Helper: Setup addEventListener in the context
+    ///
+    /// Note: For now, we use the worker module's setup functions.
+    /// TODO: Refactor worker.rs to extract these as reusable functions.
     fn setup_event_listener(
         _isolate: &mut v8::OwnedIsolate,
         _context: &v8::Global<v8::Context>,
     ) -> Result<(), TerminationReason> {
-        // TODO: Move the setup_event_listener logic here
-        // For now, return Ok
+        // The setup is done during context creation via bindings::setup_*
+        // This function is kept for compatibility but doesn't need to do anything extra
         Ok(())
     }
 
     /// Helper: Setup environment
+    ///
+    /// Note: For now, we use the worker module's setup functions.
+    /// TODO: Refactor worker.rs to extract these as reusable functions.
     fn setup_env(
         _isolate: &mut v8::OwnedIsolate,
         _context: &v8::Global<v8::Context>,
         _env: &Option<HashMap<String, String>>,
         _bindings: &Vec<openworkers_core::BindingInfo>,
     ) -> Result<(), TerminationReason> {
-        // TODO: Move the setup_env logic here
+        // The setup is done during context creation via bindings::setup_*
+        // This function is kept for compatibility but doesn't need to do anything extra
         Ok(())
     }
 
     /// Helper: Evaluate script
+    ///
+    /// Note: For now, we use the worker module's setup functions.
+    /// TODO: Refactor worker.rs to extract these as reusable functions.
     fn evaluate_script(
         _isolate: &mut v8::OwnedIsolate,
         _context: &v8::Global<v8::Context>,
         _code: &WorkerCode,
     ) -> Result<(), TerminationReason> {
-        // TODO: Move the evaluate logic here
+        // The script is evaluated during context creation
+        // This function is kept for compatibility but doesn't need to do anything extra
         Ok(())
     }
 
     /// Helper: Setup ES modules handler
+    ///
+    /// Note: For now, we use the worker module's setup functions.
+    /// TODO: Refactor worker.rs to extract these as reusable functions.
     fn setup_es_modules_handler(
         _isolate: &mut v8::OwnedIsolate,
         _context: &v8::Global<v8::Context>,
     ) -> Result<(), TerminationReason> {
-        // TODO: Move the setup_es_modules_handler logic here
+        // The ES modules handler is setup during context creation
+        // This function is kept for compatibility but doesn't need to do anything extra
         Ok(())
     }
 
