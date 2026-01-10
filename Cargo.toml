@@ -11,7 +11,8 @@ license = "MIT"
 openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.8.1" }
 
 # V8 JavaScript engine (v8 is the new name for rusty_v8)
-v8 = "142.2.0"
+# v8 = "142.2.0"
+v8 = { git = "https://github.com/max-lt/rusty_v8.git", tag = "v142.2.0-locker.6", features = ["v8_enable_pointer_compression"] }
 
 # Async runtime
 tokio = { version = "1.49.0", features = ["full"] }
