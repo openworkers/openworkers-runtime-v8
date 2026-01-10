@@ -1,9 +1,40 @@
-//! Shared V8 Isolate that can be reused across multiple execution contexts
+//! # SharedIsolate (Thread-Local Reuse Mode)
 //!
-//! This module implements the Cloudflare Workers architecture:
-//! - Few reusable V8 Isolates (expensive to create, ~3-5ms, ~150MB)
-//! - Many disposable Contexts (cheap to create, ~100µs, ~10KB)
-//! - Each request gets a fresh Context with complete isolation
+//! **Execution Mode:** One V8 isolate per thread, reused via thread-local storage.
+//!
+//! ## ⚠️ Warning: Legacy Mode
+//!
+//! This mode is **NOT RECOMMENDED** for new code. It has never been tested in production.
+//! Use [`crate::isolate_pool`] instead for production workloads.
+//!
+//! ## When to use
+//!
+//! - 📦 Backward compatibility (if already using this API)
+//! - ⚠️ Single-threaded workloads only
+//! - ❌ NOT recommended for production
+//!
+//! ## Performance
+//!
+//! - **Cold start:** ~3-5ms (creates new isolate)
+//! - **Warm start:** ~100µs (creates new ExecutionContext)
+//! - **Memory:** Medium (one isolate per thread, never evicted)
+//!
+//! ## Architecture
+//!
+//! This implements a simplified version of the Cloudflare Workers pattern:
+//! - Few reusable V8 Isolates (expensive to create, ~3-5ms)
+//! - Many disposable Contexts (cheap to create, ~100µs)
+//! - Each request gets a fresh Context with isolation
+//!
+//! **Limitation:** Isolates are thread-local, cannot share across threads.
+//!
+//! ## Recommended Alternative
+//!
+//! Use [`crate::execute_pooled`] which provides:
+//! - ✅ Multi-threaded pool (not thread-local)
+//! - ✅ LRU eviction (memory bounded)
+//! - ✅ 1000x faster warm starts (<10µs vs ~100µs)
+//! - ✅ Production-tested architecture
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;

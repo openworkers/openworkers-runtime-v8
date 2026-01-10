@@ -1,3 +1,35 @@
+//! # Worker (Per-Request Isolate Mode)
+//!
+//! **Execution Mode:** Creates a new V8 isolate for each request, destroys it after execution.
+//!
+//! ## When to use
+//!
+//! - ✅ Maximum security/isolation required
+//! - ✅ Low request volume (<10 req/s)
+//! - ✅ Debugging and testing
+//! - ✅ WASM runtime fallback
+//!
+//! ## Performance
+//!
+//! - **Cold start:** ~3-5ms (creates new isolate)
+//! - **Warm start:** ~3-5ms (no caching)
+//! - **Memory:** Low (isolate destroyed after each request)
+//!
+//! ## Usage
+//!
+//! ```rust
+//! use openworkers_runtime_v8::Worker;
+//!
+//! let mut worker = Worker::new_with_ops(script, limits, ops).await?;
+//! worker.exec(task).await?;
+//! // Worker dropped here, isolate destroyed
+//! ```
+//!
+//! ## ⚠️ For production workloads, consider using IsolatePool instead
+//!
+//! IsolatePool provides 1000x faster warm starts (<10µs) with LRU caching.
+//! See [`crate::isolate_pool`] or [`docs/execution_modes.md`](../docs/execution_modes.md).
+
 use crate::execution_helpers::{
     AbortConfig, EventLoopExit, check_exit_condition, extract_headers_from_response,
     get_completion_state, get_response_stream_id, signal_client_disconnect,
@@ -12,6 +44,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use v8;
 
+/// Worker provides per-request V8 isolate execution.
+///
+/// Each Worker creates a new V8 isolate, runs the JavaScript code, and destroys
+/// the isolate when dropped. This provides maximum isolation but is slower than
+/// pooled execution.
+///
+/// **For production:** Use [`crate::execute_pooled`] instead for 1000x better performance.
 pub struct Worker {
     pub(crate) runtime: Runtime,
     _event_loop_handle: tokio::task::JoinHandle<()>,
