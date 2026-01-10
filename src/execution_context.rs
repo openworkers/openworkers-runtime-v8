@@ -7,17 +7,23 @@
 //! The context is cheap to create (~100µs) compared to an isolate (~3-5ms).
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, mpsc};
 use v8;
 
+use crate::execution_helpers::{
+    AbortConfig, EventLoopExit, check_exit_condition, extract_headers_from_response,
+    get_completion_state, get_response_stream_id, signal_client_disconnect,
+};
 use crate::runtime::stream_manager;
 use crate::runtime::{CallbackId, CallbackMessage, SchedulerMessage};
 use crate::runtime::{bindings, crypto, streams, text_encoding};
+use crate::security::{CpuEnforcer, TimeoutGuard};
 use crate::shared_isolate::SharedIsolate;
 use openworkers_core::{
-    OperationsHandle, RuntimeLimits, Script, Task, TerminationReason, WorkerCode,
+    HttpResponse, OperationsHandle, RequestBody, ResponseBody, RuntimeLimits, Script, Task,
+    TerminationReason, WorkerCode,
 };
 
 /// A disposable execution context for running a worker script
@@ -421,11 +427,133 @@ impl ExecutionContext {
     }
 
     /// Execute a task in this context
-    pub async fn exec(&mut self, _task: Task) -> Result<(), TerminationReason> {
-        // TODO: Implement full task execution
-        // For now, this is a placeholder that will be implemented
-        // similar to Worker::exec but using self.context
-        Ok(())
+    pub async fn exec(&mut self, mut task: Task) -> Result<(), TerminationReason> {
+        // Check if aborted before starting
+        if self.aborted.load(Ordering::SeqCst) {
+            return Err(TerminationReason::Aborted);
+        }
+
+        // Get isolate handle for security guards
+        let isolate_handle = unsafe { (*self.isolate).thread_safe_handle() };
+
+        // Setup security guards:
+        // 1. Wall-clock timeout (all platforms) - prevents hanging on I/O
+        let wall_guard =
+            TimeoutGuard::new(isolate_handle.clone(), self.limits.max_wall_clock_time_ms);
+
+        // 2. CPU time limit (Linux only) - prevents CPU-bound infinite loops
+        let cpu_guard = CpuEnforcer::new(isolate_handle, self.limits.max_cpu_time_ms);
+
+        // Execute the task
+        let result = match task {
+            Task::Fetch(ref mut init) => {
+                let fetch_init = init.take().ok_or(TerminationReason::Other(
+                    "FetchInit already consumed".to_string(),
+                ))?;
+                self.trigger_fetch_event(fetch_init, &wall_guard, &cpu_guard)
+                    .await
+            }
+            Task::Scheduled(ref mut init) => {
+                let scheduled_init = init.take().ok_or(TerminationReason::Other(
+                    "ScheduledInit already consumed".to_string(),
+                ))?;
+                self.trigger_scheduled_event(scheduled_init, &wall_guard, &cpu_guard)
+                    .await
+                    .map(|_| HttpResponse {
+                        status: 200,
+                        headers: vec![],
+                        body: ResponseBody::None,
+                    })
+            }
+        };
+
+        // Determine termination reason by checking guards (in priority order)
+        self.check_termination_reason(
+            result,
+            cpu_guard
+                .as_ref()
+                .map(|g| g.was_terminated())
+                .unwrap_or(false),
+            wall_guard.was_triggered(),
+        )
+        // Guards are dropped here, cancelling any pending watchdogs
+    }
+
+    /// Check termination reason based on execution result and guard states
+    fn check_termination_reason(
+        &self,
+        result: Result<HttpResponse, String>,
+        cpu_limit_hit: bool,
+        wall_timeout_hit: bool,
+    ) -> Result<(), TerminationReason> {
+        // Check guards first (they caused termination)
+        if cpu_limit_hit {
+            return Err(TerminationReason::CpuTimeLimit);
+        }
+
+        if wall_timeout_hit {
+            return Err(TerminationReason::WallClockTimeout);
+        }
+
+        // Check memory limit flag
+        if self.memory_limit_hit.load(Ordering::SeqCst) {
+            return Err(TerminationReason::MemoryLimit);
+        }
+
+        // Check if aborted
+        if self.aborted.load(Ordering::SeqCst) {
+            return Err(TerminationReason::Aborted);
+        }
+
+        // Finally check execution result
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) if e.contains("Max event loop iterations") => {
+                Err(TerminationReason::MaxIterationsReached)
+            }
+            Err(e) => Err(TerminationReason::Exception(e)),
+        }
+    }
+
+    /// Calculate maximum event loop iterations based on wall-clock timeout
+    #[inline]
+    fn max_event_loop_iterations(&self) -> usize {
+        100 + (self.limits.max_wall_clock_time_ms / 100) as usize
+    }
+
+    /// Check if execution should be terminated
+    #[inline]
+    fn is_terminated(&self, wall_guard: &TimeoutGuard, cpu_guard: &Option<CpuEnforcer>) -> bool {
+        unsafe {
+            (*self.isolate).is_execution_terminating()
+                || wall_guard.was_triggered()
+                || cpu_guard
+                    .as_ref()
+                    .map(|g| g.was_terminated())
+                    .unwrap_or(false)
+        }
+    }
+
+    /// Trigger a fetch event (placeholder - to be implemented)
+    async fn trigger_fetch_event(
+        &mut self,
+        _fetch_init: openworkers_core::FetchInit,
+        _wall_guard: &TimeoutGuard,
+        _cpu_guard: &Option<CpuEnforcer>,
+    ) -> Result<HttpResponse, String> {
+        // TODO: Implement trigger_fetch_event similar to Worker
+        Err("fetch event not yet implemented in ExecutionContext".to_string())
+    }
+
+    /// Trigger a scheduled event (placeholder - to be implemented)
+    async fn trigger_scheduled_event(
+        &mut self,
+        _scheduled_init: openworkers_core::ScheduledInit,
+        _wall_guard: &TimeoutGuard,
+        _cpu_guard: &Option<CpuEnforcer>,
+    ) -> Result<(), String> {
+        // TODO: Implement trigger_scheduled_event similar to Worker
+        Err("scheduled event not yet implemented in ExecutionContext".to_string())
     }
 
     /// Abort execution
