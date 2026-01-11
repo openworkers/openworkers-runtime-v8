@@ -32,6 +32,9 @@ bytes = { version = "1.11", features = ["serde"] }
 ring = "0.17"
 uuid = { version = "1", features = ["v4"] }
 
+# LRU cache for isolate pool
+lru = "0.12"
+
 # CPU time measurement (Unix only)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.179"
