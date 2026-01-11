@@ -48,3 +48,9 @@ tokio-stream = "0.1"
 
 [dev-dependencies]
 ntest = "0.9.5"
+criterion = { version = "0.8", features = ["async_tokio"] }
+rand = "0.9"
+
+[[bench]]
+name = "isolate_pool_bench"
+harness = false

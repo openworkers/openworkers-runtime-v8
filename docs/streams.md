@@ -400,7 +400,7 @@ Tests are in `tests/native_stream_test.rs`:
 | `test_native_stream_cancel` | Stream cancellation |
 | `test_native_stream_error` | Error propagation |
 
-## Phase 4: Fetch Forward with Streaming ✅
+## Phase 4: Fetch Forward with Streaming
 
 Phase 4 is now complete! The `fetch()` API uses streaming by default:
 
