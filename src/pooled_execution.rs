@@ -6,7 +6,6 @@
 use crate::execution_context::ExecutionContext;
 use crate::isolate_pool::get_pool;
 use openworkers_core::{OperationsHandle, Script, Task, TerminationReason};
-use std::sync::Arc;
 
 /// Execute a worker script using the isolate pool
 ///
@@ -51,40 +50,42 @@ pub async fn execute_pooled(
 
     log::trace!("Acquired pooled isolate for worker_id: {}", worker_id);
 
+    // Get metadata from pooled isolate (needed for ExecutionContext)
+    let use_snapshot = pooled.use_snapshot().await;
+    let platform = pooled.platform().await;
+    let limits = pooled.limits().await;
+    let memory_limit_hit = pooled.memory_limit_hit().await;
+
+    // Capture worker_id for logging (avoid lifetime issues)
+    let worker_id_str = worker_id.to_string();
+
     // Execute with locked isolate
     pooled
-        .with_lock_async(|isolate| async move {
-            // TODO: Create ExecutionContext with &v8::Isolate instead of &mut SharedIsolate
-            //
-            // Current issue: ExecutionContext::new() takes &mut SharedIsolate,
-            // but we have &v8::Isolate from the pool.
-            //
-            // Solutions (to be implemented once rusty_v8 compiles):
-            //
-            // Option 1: Refactor ExecutionContext to accept &v8::Isolate
-            //   - Change ExecutionContext::new(isolate: &v8::Isolate, ...)
-            //   - Works with both SharedIsolate and PooledIsolate
-            //   - Breaking change, needs testing
-            //
-            // Option 2: Create thin wrapper that adapts &v8::Isolate to SharedIsolate interface
-            //   - Less invasive, no breaking changes
-            //   - Slightly more boilerplate
-            //
-            // Option 3: Duplicate ExecutionContext as PooledExecutionContext
-            //   - No breaking changes
-            //   - Code duplication, harder to maintain
-            //
-            // For now, return placeholder until rusty_v8 is ready
+        .with_lock_async(|isolate| {
+            // Execute synchronous part (context creation) first
+            let ctx_result = ExecutionContext::new_with_pooled_isolate(
+                isolate,
+                use_snapshot,
+                platform,
+                limits,
+                memory_limit_hit,
+                script,
+                ops,
+            );
 
-            // Placeholder implementation
-            log::warn!("execute_pooled: Not yet implemented - waiting for rusty_v8 compilation");
-            Err(TerminationReason::Other(
-                "Pooled execution not yet integrated with ExecutionContext".to_string(),
-            ))
+            async move {
+                log::trace!(
+                    "Executing task for worker_id: {} (with snapshot: {})",
+                    worker_id_str,
+                    use_snapshot
+                );
 
-            // Once rusty_v8 compiles, this will be:
-            // let mut ctx = ExecutionContext::new_with_isolate(isolate, script, ops)?;
-            // ctx.exec(task).await
+                // Unwrap the context result
+                let mut ctx = ctx_result?;
+
+                // Execute the task
+                ctx.exec(task).await
+            }
         })
         .await
 }

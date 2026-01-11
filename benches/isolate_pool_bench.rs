@@ -6,7 +6,7 @@
 //! - Concurrent access
 //! - LRU eviction overhead
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use openworkers_core::RuntimeLimits;
 use openworkers_runtime_v8::IsolatePool;
 use std::sync::Arc;
@@ -29,12 +29,14 @@ fn bench_cold_start(c: &mut Criterion) {
                 let pooled = pool.acquire(&worker_id).await;
 
                 // Simulate minimal work with lock
-                pooled.with_lock_async(|isolate| {
-                    let terminating = isolate.is_execution_terminating();
-                    async move {
-                        black_box(terminating);
-                    }
-                }).await;
+                pooled
+                    .with_lock_async(|isolate| {
+                        let terminating = isolate.is_execution_terminating();
+                        async move {
+                            black_box(terminating);
+                        }
+                    })
+                    .await;
             }
         });
     });
@@ -58,12 +60,14 @@ fn bench_warm_start(c: &mut Criterion) {
                 // Always use same worker ID (cache hit)
                 let pooled = pool.acquire("hot-worker").await;
 
-                pooled.with_lock_async(|isolate| {
-                    let terminating = isolate.is_execution_terminating();
-                    async move {
-                        black_box(terminating);
-                    }
-                }).await;
+                pooled
+                    .with_lock_async(|isolate| {
+                        let terminating = isolate.is_execution_terminating();
+                        async move {
+                            black_box(terminating);
+                        }
+                    })
+                    .await;
             }
         });
     });
@@ -117,22 +121,24 @@ fn bench_concurrent_access(c: &mut Criterion) {
                         use tokio::task::LocalSet;
 
                         let local = LocalSet::new();
-                        local.run_until(async {
-                            let handles: Vec<_> = (0..count)
-                                .map(|i| {
-                                    let pool = Arc::clone(&pool);
-                                    tokio::task::spawn_local(async move {
-                                        let worker_id = format!("concurrent_{}", i);
-                                        let pooled = pool.acquire(&worker_id).await;
-                                        pooled.with_lock_async(|_isolate| async {}).await;
+                        local
+                            .run_until(async {
+                                let handles: Vec<_> = (0..count)
+                                    .map(|i| {
+                                        let pool = Arc::clone(&pool);
+                                        tokio::task::spawn_local(async move {
+                                            let worker_id = format!("concurrent_{}", i);
+                                            let pooled = pool.acquire(&worker_id).await;
+                                            pooled.with_lock_async(|_isolate| async {}).await;
+                                        })
                                     })
-                                })
-                                .collect();
+                                    .collect();
 
-                            for handle in handles {
-                                handle.await.unwrap();
-                            }
-                        }).await;
+                                for handle in handles {
+                                    handle.await.unwrap();
+                                }
+                            })
+                            .await;
                     }
                 });
             },

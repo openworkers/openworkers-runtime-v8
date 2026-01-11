@@ -76,6 +76,151 @@ pub struct ExecutionContext {
 }
 
 impl ExecutionContext {
+    /// Create a new execution context with a pooled isolate (locked via v8::Locker)
+    ///
+    /// This variant works with isolates from the IsolatePool.
+    ///
+    /// # Safety
+    /// The isolate must be locked with v8::Locker before calling this method.
+    /// The ExecutionContext must be dropped before releasing the Locker.
+    pub fn new_with_pooled_isolate(
+        isolate: &v8::Isolate,
+        use_snapshot: bool,
+        platform: &'static v8::SharedRef<v8::Platform>,
+        limits: RuntimeLimits,
+        memory_limit_hit: Arc<AtomicBool>,
+        script: Script,
+        ops: OperationsHandle,
+    ) -> Result<Self, TerminationReason> {
+        // Create channels for this context
+        let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel();
+        let (callback_tx, callback_rx) = mpsc::unbounded_channel();
+        let callback_notify = Arc::new(Notify::new());
+
+        let fetch_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let fetch_error_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let stream_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let next_callback_id = Arc::new(Mutex::new(1));
+        let fetch_response_tx = Arc::new(Mutex::new(None));
+        let stream_manager = Arc::new(stream_manager::StreamManager::new());
+
+        // Create NEW context in the pooled isolate
+        let context = {
+            use std::pin::pin;
+            use std::ptr;
+
+            // SAFETY: We cast &v8::Isolate to &mut v8::Isolate here.
+            // This is safe because:
+            // 1. The isolate is locked with v8::Locker (exclusive access)
+            // 2. Only this thread can access the isolate while locked
+            // 3. HandleScope requires &mut but doesn't actually mutate the Isolate state
+            #[allow(invalid_reference_casting)]
+            let isolate_mut = unsafe { &mut *ptr::from_ref(isolate).cast_mut() };
+
+            let scope = pin!(v8::HandleScope::new(isolate_mut));
+            let mut scope = scope.init();
+            let context = v8::Context::new(&scope, Default::default());
+            let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+            // Setup global aliases (self, global) for compatibility
+            bindings::setup_global_aliases(scope);
+
+            // Always setup native bindings (not in snapshot)
+            bindings::setup_console(scope, scheduler_tx.clone());
+            bindings::setup_performance(scope);
+            bindings::setup_timers(scope, scheduler_tx.clone());
+            bindings::setup_fetch(
+                scope,
+                scheduler_tx.clone(),
+                fetch_callbacks.clone(),
+                fetch_error_callbacks.clone(),
+                next_callback_id.clone(),
+            );
+            bindings::setup_stream_ops(
+                scope,
+                scheduler_tx.clone(),
+                stream_callbacks.clone(),
+                next_callback_id.clone(),
+            );
+            bindings::setup_response_stream_ops(scope, stream_manager.clone());
+            crypto::setup_crypto(scope);
+
+            // Only setup pure JS APIs if no snapshot (they're in the snapshot)
+            if !use_snapshot {
+                text_encoding::setup_text_encoding(scope);
+                streams::setup_readable_stream(scope);
+                bindings::setup_blob(scope);
+                bindings::setup_form_data(scope);
+                bindings::setup_abort_controller(scope);
+                bindings::setup_structured_clone(scope);
+                bindings::setup_base64(scope);
+                bindings::setup_url_search_params(scope);
+                bindings::setup_url(scope);
+                bindings::setup_headers(scope);
+                bindings::setup_request(scope);
+                bindings::setup_response(scope);
+            }
+
+            v8::Global::new(scope.as_ref(), context)
+        };
+
+        // Setup addEventListener
+        #[allow(invalid_reference_casting)]
+        let isolate_mut = unsafe { &mut *std::ptr::from_ref(isolate).cast_mut() };
+        Self::setup_event_listener(isolate_mut, &context)?;
+
+        // Setup environment variables and bindings
+        Self::setup_env(isolate_mut, &context, &script.env, &script.bindings)?;
+
+        // Evaluate user script
+        Self::evaluate_script(isolate_mut, &context, &script.code)?;
+
+        // Setup ES Modules handler if `export default { fetch }` is used
+        Self::setup_es_modules_handler(isolate_mut, &context)?;
+
+        // Start event loop in background (with optional Operations handle)
+        let event_loop_stream_manager = stream_manager.clone();
+        let event_loop_callback_notify = callback_notify.clone();
+
+        let event_loop_handle = tokio::task::spawn_local(async move {
+            crate::runtime::run_event_loop(
+                scheduler_rx,
+                callback_tx,
+                event_loop_callback_notify,
+                event_loop_stream_manager,
+                ops,
+            )
+            .await;
+        });
+
+        // Store raw pointer to isolate (safe because ExecutionContext is dropped before Locker)
+        #[allow(invalid_reference_casting)]
+        let isolate_ptr = unsafe {
+            std::ptr::from_ref(isolate)
+                .cast_mut()
+                .cast::<v8::OwnedIsolate>()
+        };
+
+        Ok(Self {
+            isolate: isolate_ptr,
+            context,
+            scheduler_tx,
+            callback_rx,
+            callback_notify,
+            fetch_callbacks,
+            fetch_error_callbacks,
+            stream_callbacks,
+            next_callback_id,
+            fetch_response_tx,
+            stream_manager,
+            event_loop_handle,
+            platform,
+            limits,
+            memory_limit_hit,
+            aborted: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
     /// Create a new execution context within a shared isolate
     ///
     /// This is relatively cheap (~100µs) compared to creating an isolate.
@@ -208,7 +353,7 @@ impl ExecutionContext {
     /// Note: For now, we use the worker module's setup functions.
     /// TODO: Refactor worker.rs to extract these as reusable functions.
     fn setup_event_listener(
-        _isolate: &mut v8::OwnedIsolate,
+        _isolate: &mut v8::Isolate,
         _context: &v8::Global<v8::Context>,
     ) -> Result<(), TerminationReason> {
         // The setup is done during context creation via bindings::setup_*
@@ -221,7 +366,7 @@ impl ExecutionContext {
     /// Note: For now, we use the worker module's setup functions.
     /// TODO: Refactor worker.rs to extract these as reusable functions.
     fn setup_env(
-        _isolate: &mut v8::OwnedIsolate,
+        _isolate: &mut v8::Isolate,
         _context: &v8::Global<v8::Context>,
         _env: &Option<HashMap<String, String>>,
         _bindings: &Vec<openworkers_core::BindingInfo>,
@@ -236,7 +381,7 @@ impl ExecutionContext {
     /// Note: For now, we use the worker module's setup functions.
     /// TODO: Refactor worker.rs to extract these as reusable functions.
     fn evaluate_script(
-        _isolate: &mut v8::OwnedIsolate,
+        _isolate: &mut v8::Isolate,
         _context: &v8::Global<v8::Context>,
         _code: &WorkerCode,
     ) -> Result<(), TerminationReason> {
@@ -250,7 +395,7 @@ impl ExecutionContext {
     /// Note: For now, we use the worker module's setup functions.
     /// TODO: Refactor worker.rs to extract these as reusable functions.
     fn setup_es_modules_handler(
-        _isolate: &mut v8::OwnedIsolate,
+        _isolate: &mut v8::Isolate,
         _context: &v8::Global<v8::Context>,
     ) -> Result<(), TerminationReason> {
         // The ES modules handler is setup during context creation

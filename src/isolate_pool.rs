@@ -301,6 +301,30 @@ impl PooledIsolate {
     pub fn worker_id(&self) -> &str {
         &self.worker_id
     }
+
+    /// Get whether snapshot was used for isolate creation
+    pub async fn use_snapshot(&self) -> bool {
+        let entry = self.entry.lock().await;
+        entry.isolate.use_snapshot
+    }
+
+    /// Get platform reference
+    pub async fn platform(&self) -> &'static v8::SharedRef<v8::Platform> {
+        let entry = self.entry.lock().await;
+        entry.isolate.platform
+    }
+
+    /// Get runtime limits
+    pub async fn limits(&self) -> RuntimeLimits {
+        let entry = self.entry.lock().await;
+        entry.isolate.limits.clone()
+    }
+
+    /// Get memory limit hit flag
+    pub async fn memory_limit_hit(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        let entry = self.entry.lock().await;
+        Arc::clone(&entry.isolate.memory_limit_hit)
+    }
 }
 
 impl Drop for PooledIsolate {
