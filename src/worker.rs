@@ -559,16 +559,6 @@ impl Worker {
         }
     }
 
-    /// Calculate maximum event loop iterations based on wall-clock timeout.
-    ///
-    /// Formula: 100 base iterations + 1 per 100ms of wall-clock timeout.
-    /// This ensures we have enough iterations for long-running async operations
-    /// while still having a safety limit.
-    #[inline]
-    fn max_event_loop_iterations(&self) -> usize {
-        100 + (self.runtime.limits.max_wall_clock_time_ms / 100) as usize
-    }
-
     /// Check if execution should be terminated.
     ///
     /// Returns true if any termination condition is met:
@@ -588,7 +578,7 @@ impl Worker {
     /// Run the event loop until a condition is met or timeout/termination occurs.
     ///
     /// This is the core loop for processing async operations (Promises, timers, fetch).
-    /// It checks termination guards, processes callbacks, and waits for the exit condition.
+    /// Uses poll_fn for true async polling instead of sleep-based polling.
     ///
     /// When `abort_config` is provided, the loop also:
     /// - Detects client disconnects via stream_manager
@@ -601,21 +591,46 @@ impl Worker {
         exit_condition: EventLoopExit,
         abort_config: Option<AbortConfig>,
     ) -> Result<(), String> {
-        let max_iterations = self.max_event_loop_iterations();
-        let mut abort_signaled_at: Option<tokio::time::Instant> = None;
+        use crate::runtime::CallbackMessage;
+        use std::pin::Pin;
+        use std::task::Poll;
 
-        for _iteration in 0..max_iterations {
+        let mut abort_signaled_at: Option<tokio::time::Instant> = None;
+        let mut pending_callbacks: Vec<CallbackMessage> = Vec::with_capacity(16);
+
+        std::future::poll_fn(|cx| {
+            // 1. Check termination (CPU/wall-clock guards)
             if self.is_terminated(wall_guard, cpu_guard) {
-                return Err("Execution terminated".to_string());
+                return Poll::Ready(Err("Execution terminated".to_string()));
             }
 
-            // Process pending callbacks and microtasks
-            self.runtime.process_callbacks();
+            // 2. Poll callback channel - TRUE ASYNC with waker
+            //    This drains all available messages without blocking
+            loop {
+                match Pin::new(&mut self.runtime.callback_rx).poll_recv(cx) {
+                    Poll::Ready(Some(msg)) => {
+                        pending_callbacks.push(msg);
+                    }
+                    Poll::Ready(None) => {
+                        // Channel closed - event loop task ended
+                        return Poll::Ready(Err("Event loop channel closed".to_string()));
+                    }
+                    Poll::Pending => break,
+                }
+            }
 
-            // Check exit condition
-            // CRITICAL: Wrap in explicit block to drop V8 scopes BEFORE the await below.
-            // V8 scopes use RAII - if alive during await, another worker on the same thread
-            // may run and corrupt V8's context stack.
+            // 3. Process all received callbacks in batch
+            if !pending_callbacks.is_empty() {
+                for msg in pending_callbacks.drain(..) {
+                    self.runtime.process_single_callback(msg);
+                }
+            }
+
+            // 4. V8 platform messages + microtask checkpoint
+            self.runtime.pump_and_checkpoint();
+
+            // 5. Check exit condition with abort handling
+            // CRITICAL: Wrap in explicit block to drop V8 scopes BEFORE returning Pending.
             let should_exit = {
                 use std::pin::pin;
                 let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
@@ -651,24 +666,16 @@ impl Worker {
                 } else {
                     base_exit
                 }
-            }; // V8 scopes dropped here, BEFORE the await
+            }; // V8 scopes dropped here
 
             if should_exit {
-                return Ok(());
+                return Poll::Ready(Ok(()));
             }
 
-            // Wait for scheduler to signal callback ready, or timeout to check guards
-            tokio::select! {
-                _ = self.runtime.callback_notify.notified() => {
-                    // Callback ready, loop will process it
-                }
-                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
-                    // Periodic check for wall_guard timeout (checked at loop start)
-                }
-            }
-        }
-
-        Err("Max event loop iterations reached".to_string())
+            // 6. Not done yet - waker registered via poll_recv will wake us
+            Poll::Pending
+        })
+        .await
     }
 
     async fn trigger_fetch_event(

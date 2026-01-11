@@ -92,7 +92,10 @@ pub struct Runtime {
     pub(crate) memory_limit_hit: Arc<AtomicBool>,
     /// Runtime resource limits (CPU, wall-clock, memory)
     pub(crate) limits: RuntimeLimits,
-    /// Notify to wake up exec() loop when callbacks are ready
+    /// Notify to wake up exec() loop when callbacks are ready.
+    /// Note: With poll_fn pattern, Worker polls callback_rx directly,
+    /// but callback_notify is still used by the event loop to signal.
+    #[allow(dead_code)]
     pub(crate) callback_notify: Arc<Notify>,
 }
 
@@ -628,6 +631,394 @@ impl Runtime {
         tc_scope.perform_microtask_checkpoint();
 
         // Check for exceptions during microtask processing
+        if let Some(exception) = tc_scope.exception() {
+            let exception_string = exception
+                .to_string(&tc_scope)
+                .map(|s| s.to_rust_string_lossy(&*tc_scope))
+                .unwrap_or_else(|| "Unknown exception".to_string());
+            eprintln!(
+                "Exception during microtask processing: {}",
+                exception_string
+            );
+        }
+    }
+
+    /// Process a single callback message in a V8 scope.
+    ///
+    /// This method handles one callback message from the event loop.
+    /// Used by poll_fn-based event loops that poll the channel directly.
+    pub fn process_single_callback(&mut self, msg: CallbackMessage) {
+        use std::pin::pin;
+
+        let scope = pin!(v8::HandleScope::new(&mut self.isolate));
+        let mut scope = scope.init();
+        let context = v8::Local::new(&scope, &self.context);
+        let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+        match msg {
+            CallbackMessage::ExecuteTimeout(callback_id)
+            | CallbackMessage::ExecuteInterval(callback_id) => {
+                let global = context.global(scope);
+                let execute_timer_key = v8::String::new(scope, "__executeTimer").unwrap();
+
+                if let Some(execute_fn_val) = global.get(scope, execute_timer_key.into())
+                    && execute_fn_val.is_function()
+                {
+                    let execute_fn: v8::Local<v8::Function> = execute_fn_val.try_into().unwrap();
+                    let id_val = v8::Number::new(scope, callback_id as f64);
+                    execute_fn.call(scope, global.into(), &[id_val.into()]);
+                }
+            }
+            CallbackMessage::FetchError(callback_id, error_msg) => {
+                // Remove from success callbacks (cleanup)
+                {
+                    let mut cbs = self.fetch_callbacks.lock().unwrap();
+                    cbs.remove(&callback_id);
+                }
+
+                // Get error callback and call it
+                let error_callback_opt = {
+                    let mut cbs = self.fetch_error_callbacks.lock().unwrap();
+                    cbs.remove(&callback_id)
+                };
+
+                if let Some(callback_global) = error_callback_opt {
+                    let error_msg_val = v8::String::new(scope, &error_msg).unwrap();
+                    let error = v8::Exception::error(scope, error_msg_val);
+                    let callback = v8::Local::new(scope, &callback_global);
+                    let recv = v8::undefined(scope);
+                    callback.call(scope, recv.into(), &[error]);
+                }
+            }
+            CallbackMessage::FetchStreamingSuccess(callback_id, meta, stream_id) => {
+                let callback_opt = {
+                    let mut cbs = self.fetch_callbacks.lock().unwrap();
+                    cbs.remove(&callback_id)
+                };
+
+                // Cleanup error callback
+                {
+                    let mut cbs = self.fetch_error_callbacks.lock().unwrap();
+                    cbs.remove(&callback_id);
+                }
+
+                if let Some(callback_global) = callback_opt {
+                    let meta_obj = v8::Object::new(scope);
+
+                    let status_key = v8::String::new(scope, "status").unwrap();
+                    let status_val = v8::Number::new(scope, meta.status as f64);
+                    meta_obj.set(scope, status_key.into(), status_val.into());
+
+                    let status_text_key = v8::String::new(scope, "statusText").unwrap();
+                    let status_text_val = v8::String::new(scope, &meta.status_text).unwrap();
+                    meta_obj.set(scope, status_text_key.into(), status_text_val.into());
+
+                    let headers_obj = v8::Object::new(scope);
+                    for (key, value) in &meta.headers {
+                        let k = v8::String::new(scope, key).unwrap();
+                        let v = v8::String::new(scope, value).unwrap();
+                        headers_obj.set(scope, k.into(), v.into());
+                    }
+                    let headers_key = v8::String::new(scope, "headers").unwrap();
+                    meta_obj.set(scope, headers_key.into(), headers_obj.into());
+
+                    let stream_id_key = v8::String::new(scope, "streamId").unwrap();
+                    let stream_id_val = v8::Number::new(scope, stream_id as f64);
+                    meta_obj.set(scope, stream_id_key.into(), stream_id_val.into());
+
+                    let callback = v8::Local::new(scope, &callback_global);
+                    let recv = v8::undefined(scope);
+                    callback.call(scope, recv.into(), &[meta_obj.into()]);
+                }
+            }
+            CallbackMessage::StreamChunk(callback_id, chunk) => {
+                let callback_opt = {
+                    let mut cbs = self.stream_callbacks.lock().unwrap();
+                    cbs.remove(&callback_id)
+                };
+
+                if let Some(callback_global) = callback_opt {
+                    let callback = v8::Local::new(scope, &callback_global);
+                    let recv = v8::undefined(scope);
+
+                    let result_obj = v8::Object::new(scope);
+
+                    match chunk {
+                        stream_manager::StreamChunk::Data(bytes) => {
+                            let done_key = v8::String::new(scope, "done").unwrap();
+                            let done_val = v8::Boolean::new(scope, false);
+                            result_obj.set(scope, done_key.into(), done_val.into());
+
+                            let vec = bytes.to_vec();
+                            let len = vec.len();
+                            let backing_store = v8::ArrayBuffer::new_backing_store_from_vec(vec);
+                            let array_buffer = v8::ArrayBuffer::with_backing_store(
+                                scope,
+                                &backing_store.make_shared(),
+                            );
+                            let uint8_array =
+                                v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
+
+                            let value_key = v8::String::new(scope, "value").unwrap();
+                            result_obj.set(scope, value_key.into(), uint8_array.into());
+                        }
+                        stream_manager::StreamChunk::Done => {
+                            let done_key = v8::String::new(scope, "done").unwrap();
+                            let done_val = v8::Boolean::new(scope, true);
+                            result_obj.set(scope, done_key.into(), done_val.into());
+                        }
+                        stream_manager::StreamChunk::Error(err_msg) => {
+                            let error_key = v8::String::new(scope, "error").unwrap();
+                            let error_val = v8::String::new(scope, &err_msg).unwrap();
+                            result_obj.set(scope, error_key.into(), error_val.into());
+                        }
+                    }
+
+                    callback.call(scope, recv.into(), &[result_obj.into()]);
+                }
+            }
+            CallbackMessage::StorageResult(callback_id, storage_result) => {
+                let callback_opt = {
+                    let mut cbs = self.fetch_callbacks.lock().unwrap();
+                    cbs.remove(&callback_id)
+                };
+
+                if let Some(callback_global) = callback_opt {
+                    let callback = v8::Local::new(scope, &callback_global);
+                    let recv = v8::undefined(scope);
+
+                    let result_obj = v8::Object::new(scope);
+
+                    match storage_result {
+                        StorageResult::Body(maybe_body) => {
+                            let success_key = v8::String::new(scope, "success").unwrap();
+                            result_obj.set(
+                                scope,
+                                success_key.into(),
+                                v8::Boolean::new(scope, true).into(),
+                            );
+
+                            if let Some(body) = maybe_body {
+                                let vec = body;
+                                let len = vec.len();
+                                let backing_store =
+                                    v8::ArrayBuffer::new_backing_store_from_vec(vec);
+                                let array_buffer = v8::ArrayBuffer::with_backing_store(
+                                    scope,
+                                    &backing_store.make_shared(),
+                                );
+                                let uint8_array =
+                                    v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
+                                let body_key = v8::String::new(scope, "body").unwrap();
+                                result_obj.set(scope, body_key.into(), uint8_array.into());
+                            }
+                        }
+                        StorageResult::Head { size, etag } => {
+                            let success_key = v8::String::new(scope, "success").unwrap();
+                            result_obj.set(
+                                scope,
+                                success_key.into(),
+                                v8::Boolean::new(scope, true).into(),
+                            );
+
+                            let size_key = v8::String::new(scope, "size").unwrap();
+                            let size_val = v8::Number::new(scope, size as f64);
+                            result_obj.set(scope, size_key.into(), size_val.into());
+
+                            if let Some(etag_str) = etag {
+                                let etag_key = v8::String::new(scope, "etag").unwrap();
+                                let etag_val = v8::String::new(scope, &etag_str).unwrap();
+                                result_obj.set(scope, etag_key.into(), etag_val.into());
+                            }
+                        }
+                        StorageResult::List { keys, truncated } => {
+                            let success_key = v8::String::new(scope, "success").unwrap();
+                            result_obj.set(
+                                scope,
+                                success_key.into(),
+                                v8::Boolean::new(scope, true).into(),
+                            );
+
+                            let arr = v8::Array::new(scope, keys.len() as i32);
+                            for (i, key) in keys.iter().enumerate() {
+                                let key_val = v8::String::new(scope, key).unwrap();
+                                arr.set_index(scope, i as u32, key_val.into());
+                            }
+                            let keys_key = v8::String::new(scope, "keys").unwrap();
+                            result_obj.set(scope, keys_key.into(), arr.into());
+
+                            let truncated_key = v8::String::new(scope, "truncated").unwrap();
+                            result_obj.set(
+                                scope,
+                                truncated_key.into(),
+                                v8::Boolean::new(scope, truncated).into(),
+                            );
+                        }
+                        StorageResult::Error(err_msg) => {
+                            let success_key = v8::String::new(scope, "success").unwrap();
+                            result_obj.set(
+                                scope,
+                                success_key.into(),
+                                v8::Boolean::new(scope, false).into(),
+                            );
+
+                            let error_key = v8::String::new(scope, "error").unwrap();
+                            let error_val = v8::String::new(scope, &err_msg).unwrap();
+                            result_obj.set(scope, error_key.into(), error_val.into());
+                        }
+                    }
+
+                    callback.call(scope, recv.into(), &[result_obj.into()]);
+                }
+            }
+            CallbackMessage::KvResult(callback_id, kv_result) => {
+                let callback_opt = {
+                    let mut cbs = self.fetch_callbacks.lock().unwrap();
+                    cbs.remove(&callback_id)
+                };
+
+                if let Some(callback_global) = callback_opt {
+                    let callback = v8::Local::new(scope, &callback_global);
+                    let recv = v8::undefined(scope);
+
+                    let result_obj = v8::Object::new(scope);
+
+                    match kv_result {
+                        KvResult::Value(maybe_value) => {
+                            let success_key = v8::String::new(scope, "success").unwrap();
+                            result_obj.set(
+                                scope,
+                                success_key.into(),
+                                v8::Boolean::new(scope, true).into(),
+                            );
+
+                            let value_key = v8::String::new(scope, "value").unwrap();
+
+                            if let Some(value) = maybe_value {
+                                let json_str = serde_json::to_string(&value).unwrap();
+                                let json_v8_str = v8::String::new(scope, &json_str).unwrap();
+                                let parsed = v8::json::parse(scope, json_v8_str.into())
+                                    .unwrap_or_else(|| v8::null(scope).into());
+                                result_obj.set(scope, value_key.into(), parsed);
+                            } else {
+                                result_obj.set(scope, value_key.into(), v8::null(scope).into());
+                            }
+                        }
+                        KvResult::Ok => {
+                            let success_key = v8::String::new(scope, "success").unwrap();
+                            result_obj.set(
+                                scope,
+                                success_key.into(),
+                                v8::Boolean::new(scope, true).into(),
+                            );
+                        }
+                        KvResult::Keys(keys) => {
+                            let success_key = v8::String::new(scope, "success").unwrap();
+                            result_obj.set(
+                                scope,
+                                success_key.into(),
+                                v8::Boolean::new(scope, true).into(),
+                            );
+
+                            let keys_array = v8::Array::new(scope, keys.len().try_into().unwrap());
+                            for (i, key) in keys.iter().enumerate() {
+                                let key_val = v8::String::new(scope, key).unwrap();
+                                keys_array.set_index(scope, i as u32, key_val.into());
+                            }
+                            let keys_key = v8::String::new(scope, "keys").unwrap();
+                            result_obj.set(scope, keys_key.into(), keys_array.into());
+                        }
+                        KvResult::Error(err_msg) => {
+                            let success_key = v8::String::new(scope, "success").unwrap();
+                            result_obj.set(
+                                scope,
+                                success_key.into(),
+                                v8::Boolean::new(scope, false).into(),
+                            );
+
+                            let error_key = v8::String::new(scope, "error").unwrap();
+                            let error_val = v8::String::new(scope, &err_msg).unwrap();
+                            result_obj.set(scope, error_key.into(), error_val.into());
+                        }
+                    }
+
+                    callback.call(scope, recv.into(), &[result_obj.into()]);
+                }
+            }
+            CallbackMessage::DatabaseResult(callback_id, database_result) => {
+                let callback_opt = {
+                    let mut cbs = self.fetch_callbacks.lock().unwrap();
+                    cbs.remove(&callback_id)
+                };
+
+                if let Some(callback_global) = callback_opt {
+                    let callback = v8::Local::new(scope, &callback_global);
+                    let recv = v8::undefined(scope);
+
+                    let result_obj = v8::Object::new(scope);
+
+                    match database_result {
+                        DatabaseResult::Rows(rows_json) => {
+                            let success_key = v8::String::new(scope, "success").unwrap();
+                            result_obj.set(
+                                scope,
+                                success_key.into(),
+                                v8::Boolean::new(scope, true).into(),
+                            );
+
+                            let rows_key = v8::String::new(scope, "rows").unwrap();
+                            let rows_str = v8::String::new(scope, &rows_json).unwrap();
+                            let parsed = v8::json::parse(scope, rows_str.into());
+
+                            if let Some(parsed_value) = parsed {
+                                result_obj.set(scope, rows_key.into(), parsed_value);
+                            } else {
+                                result_obj.set(scope, rows_key.into(), rows_str.into());
+                            }
+                        }
+                        DatabaseResult::Error(err_msg) => {
+                            let success_key = v8::String::new(scope, "success").unwrap();
+                            result_obj.set(
+                                scope,
+                                success_key.into(),
+                                v8::Boolean::new(scope, false).into(),
+                            );
+
+                            let error_key = v8::String::new(scope, "error").unwrap();
+                            let error_val = v8::String::new(scope, &err_msg).unwrap();
+                            result_obj.set(scope, error_key.into(), error_val.into());
+                        }
+                    }
+
+                    callback.call(scope, recv.into(), &[result_obj.into()]);
+                }
+            }
+        }
+    }
+
+    /// Pump V8 platform messages and perform microtask checkpoint.
+    ///
+    /// This must be called regularly to:
+    /// 1. Process V8 platform messages (GC, optimizations, etc.)
+    /// 2. Execute microtasks (Promise.then, async/await continuations)
+    pub fn pump_and_checkpoint(&mut self) {
+        use std::pin::pin;
+
+        // Pump V8 platform message loop
+        while v8::Platform::pump_message_loop(self.platform, &mut self.isolate, false) {
+            // Continue pumping until no more messages
+        }
+
+        // Process microtasks (Promises, async/await)
+        let scope = pin!(v8::HandleScope::new(&mut self.isolate));
+        let mut scope = scope.init();
+        let context = v8::Local::new(&scope, &self.context);
+        let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+        let tc_scope = pin!(v8::TryCatch::new(scope));
+        let mut tc_scope = tc_scope.init();
+        tc_scope.perform_microtask_checkpoint();
+
         if let Some(exception) = tc_scope.exception() {
             let exception_string = exception
                 .to_string(&tc_scope)
