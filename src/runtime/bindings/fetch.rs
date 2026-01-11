@@ -133,6 +133,66 @@ fn register_callbacks_with_error(
     callback_id
 }
 
+/// Set up a native binding function for HTTP-based bindings (fetch, worker)
+///
+/// Both __nativeBindingFetch and __nativeBindingWorker have identical logic,
+/// differing only in the SchedulerMessage variant they send.
+fn setup_binding_fetch_helper<F>(scope: &mut v8::PinScope, key: &str, message_fn: F)
+where
+    F: Fn(CallbackId, String, HttpRequest) -> SchedulerMessage + Copy + 'static,
+{
+    let func = v8::Function::new(
+        scope,
+        move |scope: &mut v8::PinScope,
+              args: v8::FunctionCallbackArguments,
+              mut _retval: v8::ReturnValue| {
+            let Some(state) = get_fetch_state(scope) else {
+                return;
+            };
+
+            if args.length() < 4 {
+                return;
+            }
+
+            let Some(binding_name) = args
+                .get(0)
+                .to_string(scope)
+                .map(|s| s.to_rust_string_lossy(scope))
+            else {
+                return;
+            };
+
+            let Some(options) = args.get(1).to_object(scope) else {
+                return;
+            };
+
+            let Some(request) = parse_http_request(scope, options) else {
+                return;
+            };
+
+            let (success_cb, error_cb) = (args.get(2), args.get(3));
+
+            if !success_cb.is_function() || !error_cb.is_function() {
+                return;
+            }
+
+            let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
+            let error_fn: v8::Local<v8::Function> = error_cb.try_into().unwrap();
+
+            let callback_id = register_callbacks_with_error(state, scope, success_fn, error_fn);
+
+            let _ = state
+                .scheduler_tx
+                .send(message_fn(callback_id, binding_name, request));
+        },
+    )
+    .unwrap();
+
+    let global = scope.get_current_context().global(scope);
+    let key_v8 = v8::String::new(scope, key).unwrap();
+    global.set(scope, key_v8.into(), func.into());
+}
+
 /// Get string parameter from JS object
 fn get_string_param(
     scope: &mut v8::PinScope,
@@ -276,7 +336,13 @@ pub fn setup_fetch(
             }
             let resolve: v8::Local<v8::Function> = resolve_val.try_into().unwrap();
 
-            let callback_id = register_callback(state, scope, resolve);
+            let reject_val = args.get(2);
+            if !reject_val.is_function() {
+                return;
+            }
+            let reject: v8::Local<v8::Function> = reject_val.try_into().unwrap();
+
+            let callback_id = register_callbacks_with_error(state, scope, resolve, reject);
 
             let _ = state
                 .scheduler_tx
@@ -293,57 +359,9 @@ pub fn setup_fetch(
     );
 
     // Create __nativeBindingFetch for binding-based fetch (assets, storage)
-    let native_binding_fetch_fn = v8::Function::new(
-        scope,
-        |scope: &mut v8::PinScope,
-         args: v8::FunctionCallbackArguments,
-         mut _retval: v8::ReturnValue| {
-            let Some(state) = get_fetch_state(scope) else {
-                return;
-            };
-            if args.length() < 4 {
-                return;
-            }
-
-            let Some(binding_name) = args
-                .get(0)
-                .to_string(scope)
-                .map(|s| s.to_rust_string_lossy(scope))
-            else {
-                return;
-            };
-            let Some(options) = args.get(1).to_object(scope) else {
-                return;
-            };
-            let Some(request) = parse_http_request(scope, options) else {
-                return;
-            };
-
-            let (success_cb, error_cb) = (args.get(2), args.get(3));
-            if !success_cb.is_function() || !error_cb.is_function() {
-                return;
-            }
-
-            let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
-            let error_fn: v8::Local<v8::Function> = error_cb.try_into().unwrap();
-
-            let callback_id = register_callbacks_with_error(state, scope, success_fn, error_fn);
-
-            let _ = state.scheduler_tx.send(SchedulerMessage::BindingFetch(
-                callback_id,
-                binding_name,
-                request,
-            ));
-        },
-    )
-    .unwrap();
-
-    let native_binding_fetch_key = v8::String::new(scope, "__nativeBindingFetch").unwrap();
-    global.set(
-        scope,
-        native_binding_fetch_key.into(),
-        native_binding_fetch_fn.into(),
-    );
+    setup_binding_fetch_helper(scope, "__nativeBindingFetch", |id, name, req| {
+        SchedulerMessage::BindingFetch(id, name, req)
+    });
 
     // Create __nativeBindingStorage for storage operations (get/put/head/list/delete)
     let native_binding_storage_fn = v8::Function::new(
@@ -590,57 +608,9 @@ pub fn setup_fetch(
     );
 
     // Create __nativeBindingWorker for worker-to-worker calls
-    let native_binding_worker_fn = v8::Function::new(
-        scope,
-        |scope: &mut v8::PinScope,
-         args: v8::FunctionCallbackArguments,
-         mut _retval: v8::ReturnValue| {
-            let Some(state) = get_fetch_state(scope) else {
-                return;
-            };
-            if args.length() < 4 {
-                return;
-            }
-
-            let Some(binding_name) = args
-                .get(0)
-                .to_string(scope)
-                .map(|s| s.to_rust_string_lossy(scope))
-            else {
-                return;
-            };
-            let Some(options) = args.get(1).to_object(scope) else {
-                return;
-            };
-            let Some(request) = parse_http_request(scope, options) else {
-                return;
-            };
-
-            let (success_cb, error_cb) = (args.get(2), args.get(3));
-            if !success_cb.is_function() || !error_cb.is_function() {
-                return;
-            }
-
-            let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
-            let error_fn: v8::Local<v8::Function> = error_cb.try_into().unwrap();
-
-            let callback_id = register_callbacks_with_error(state, scope, success_fn, error_fn);
-
-            let _ = state.scheduler_tx.send(SchedulerMessage::BindingWorker(
-                callback_id,
-                binding_name,
-                request,
-            ));
-        },
-    )
-    .unwrap();
-
-    let native_binding_worker_key = v8::String::new(scope, "__nativeBindingWorker").unwrap();
-    global.set(
-        scope,
-        native_binding_worker_key.into(),
-        native_binding_worker_fn.into(),
-    );
+    setup_binding_fetch_helper(scope, "__nativeBindingWorker", |id, name, req| {
+        SchedulerMessage::BindingWorker(id, name, req)
+    });
 
     // JavaScript fetch implementation using Promises with streaming support
     let code = r#"

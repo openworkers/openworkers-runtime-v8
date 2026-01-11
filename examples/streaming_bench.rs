@@ -4,6 +4,7 @@ use openworkers_core::{
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+use tokio::time::timeout;
 
 /// Benchmark local stream creation and consumption (no network)
 async fn bench_local_stream(chunk_count: usize, chunk_size: usize) -> (Duration, usize) {
@@ -215,8 +216,19 @@ async fn main() {
                 iterations as f64 / elapsed.as_secs_f64()
             );
 
-            // Benchmark 2: Streaming forward (with network) - skipped if network unavailable
-            println!("🌊 Streaming Forward: (skipped - network dependent)\n");
+            // Benchmark 2: Streaming forward (with network)
+            println!("🌊 Streaming Forward (network):");
+            let iterations = 10;
+            match timeout(Duration::from_secs(5), bench_streaming_forward(iterations)).await {
+                Ok(elapsed) => {
+                    let per_request = elapsed / iterations;
+                    println!(
+                        "  {} iterations in {:.2?} ({:.2?}/req)\n",
+                        iterations, elapsed, per_request,
+                    );
+                }
+                Err(_) => println!("  ⚠️  Timeout after 5s (network issue?)\n"),
+            }
 
             // Benchmark 3: Local JS stream (no network)
             println!("🔄 Local JS ReadableStream (no network):");
@@ -234,8 +246,16 @@ async fn main() {
             }
             println!();
 
-            // Benchmark 4: Network streaming transfers - skipped if network unavailable
-            println!("📊 Network Streaming Transfer: (skipped - network dependent)");
+            // Benchmark 4: Network streaming transfers
+            println!("📊 Network Streaming Transfer:");
+            for size_kb in [1, 10, 100] {
+                if timeout(Duration::from_secs(5), bench_large_streaming(size_kb))
+                    .await
+                    .is_err()
+                {
+                    println!("  {:>4} KB: ⚠️  Timeout after 5s", size_kb);
+                }
+            }
 
             println!("\n========================================");
             println!("📝 Summary:");

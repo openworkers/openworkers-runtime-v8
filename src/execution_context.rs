@@ -450,12 +450,13 @@ impl ExecutionContext {
 
         let code_str = match code {
             WorkerCode::JavaScript(js) => js.as_str(),
-            #[cfg(feature = "wasm")]
-            WorkerCode::WebAssembly(_) => {
-                return Err("WASM not supported in V8 runtime".to_string());
-            }
             WorkerCode::Snapshot(_) => {
                 return Err("Snapshot execution not supported via evaluate()".to_string());
+            }
+            // Default case for other unsupported code types
+            #[allow(unreachable_patterns)]
+            _ => {
+                return Err("V8 runtime only supports JavaScript code".to_string());
             }
         };
 

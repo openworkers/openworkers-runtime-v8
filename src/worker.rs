@@ -35,7 +35,7 @@ pub struct Worker {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
 /// // Classic mode
 /// let worker = Worker::builder()
 ///     .script(script)

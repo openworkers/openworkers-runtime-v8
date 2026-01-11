@@ -6,10 +6,12 @@
 //! - Concurrent access
 //! - LRU eviction overhead
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use openworkers_core::RuntimeLimits;
 use openworkers_runtime_v8::IsolatePool;
+use std::hint::black_box;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::runtime::Runtime;
 
 /// Benchmark: Cold start (cache miss - first acquisition of a worker)
@@ -18,13 +20,13 @@ fn bench_cold_start(c: &mut Criterion) {
     let pool = Arc::new(IsolatePool::new(1000, RuntimeLimits::default()));
 
     c.bench_function("pool_cold_start", |b| {
-        let mut counter = 0;
+        let counter = AtomicUsize::new(0);
         b.to_async(&rt).iter(|| {
             let pool = Arc::clone(&pool);
+            let id = counter.fetch_add(1, Ordering::Relaxed);
             async move {
                 // Use unique worker ID for each iteration (always cache miss)
-                let worker_id = format!("worker_{}", counter);
-                counter += 1;
+                let worker_id = format!("worker_{}", id);
 
                 let pooled = pool.acquire(&worker_id).await;
 

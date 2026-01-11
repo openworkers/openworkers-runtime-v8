@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
 /// Script that simulates a worker making a fetch call
+#[allow(dead_code)]
 const FETCH_SCRIPT: &str = r#"
     addEventListener('fetch', event => {
         event.respondWith(new Response('OK'));

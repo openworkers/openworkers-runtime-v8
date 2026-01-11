@@ -96,6 +96,7 @@ thread_local! {
 
 struct LocalIsolatePool {
     isolates: Vec<MockIsolate>,
+    #[allow(dead_code)]
     thread_id: usize,
     acquisitions: usize,
 }
