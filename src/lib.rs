@@ -1,12 +1,34 @@
 //! # OpenWorkers V8 Runtime
 //!
-//! This crate provides V8-based JavaScript execution with three distinct execution modes.
+//! This crate provides V8-based JavaScript execution with four distinct execution modes.
 //!
 //! ## Execution Modes
 //!
-//! ### 🏆 Mode 1: IsolatePool (Recommended)
+//! ### 🏆 Mode 1: Thread-Pinned Pool (Recommended for Multi-Tenant)
 //!
-//! **Best for:** Production workloads, high throughput (>1000 req/s)
+//! **Best for:** Multi-tenant production, security isolation, CPU-bound workloads
+//!
+//! ```rust
+//! use openworkers_runtime_v8::{init_pinned_pool, execute_pinned, compute_thread_id};
+//!
+//! // Initialize pool once at startup
+//! init_pinned_pool(100, limits);  // 100 isolates per thread
+//!
+//! // Sticky routing for security (same worker → same thread)
+//! let thread_id = compute_thread_id("worker-id", num_threads);
+//! // Route request to thread_id, then:
+//! execute_pinned("worker-id", script, ops, task).await?;
+//! ```
+//!
+//! **Performance:** Zero mutex contention, <10µs warm start
+//! **Thread Model:** Thread-local pools, no cross-thread sharing
+//! **Security:** Strong tenant isolation (sticky routing)
+//!
+//! ---
+//!
+//! ### 🚀 Mode 2: Shared Pool
+//!
+//! **Best for:** I/O-bound workloads, resource sharing
 //!
 //! ```rust
 //! use openworkers_runtime_v8::{init_pool, execute_pooled};
@@ -19,14 +41,12 @@
 //! ```
 //!
 //! **Performance:** <10µs warm start, ~100µs cold start
-//! **Thread Model:** Multi-threaded pool with v8::Locker
-//! **Memory:** Configurable (pool_size × heap_max)
-//!
-//! See [`docs/execution_modes.md`](../docs/execution_modes.md) for details.
+//! **Thread Model:** Global mutex-protected LRU cache
+//! **⚠️ Warning:** Can have contention under CPU-bound load
 //!
 //! ---
 //!
-//! ### 🔒 Mode 2: Worker (Maximum Isolation)
+//! ### 🔒 Mode 3: Worker (Maximum Isolation)
 //!
 //! **Best for:** Maximum security, low request volume (<10 req/s)
 //!
@@ -39,43 +59,31 @@
 //! // Isolate destroyed here
 //! ```
 //!
-//! **Performance:** ~3-5ms per request (creates new isolate)
+//! **Performance:** ~2-3ms per request (creates new isolate)
 //! **Thread Model:** Single isolate per request
 //! **Memory:** Low (isolate destroyed after each request)
 //!
 //! ---
 //!
-//! ### 📦 Mode 3: SharedIsolate (Legacy)
+//! ### 📦 Mode 4: SharedIsolate (Legacy)
 //!
-//! **Best for:** Backward compatibility (not recommended for new code)
+//! **Best for:** Backward compatibility only
 //!
-//! ```rust
-//! use openworkers_runtime_v8::{SharedIsolate, ExecutionContext};
-//!
-//! // Thread-local isolate (one per thread)
-//! let mut shared = SharedIsolate::new(limits);
-//! let mut ctx = ExecutionContext::new(&mut shared, script, ops)?;
-//! ctx.exec(task).await?;
-//! ```
-//!
-//! **Performance:** ~100µs context creation
-//! **Thread Model:** Thread-local (not shared across threads)
-//! **Memory:** Medium (one isolate per thread)
-//!
-//! **⚠️ Warning:** Never tested in production. Use IsolatePool instead.
+//! **⚠️ Warning:** Deprecated. Use Thread-Pinned Pool instead.
 //!
 //! ---
 //!
 //! ## Quick Decision Guide
 //!
-//! - **Default/Production** → Use **IsolatePool** (fastest, most efficient)
+//! - **Multi-Tenant** → Use **Thread-Pinned Pool** (security + performance)
+//! - **I/O-Heavy** → Use **Shared Pool** (good resource utilization)
 //! - **Maximum Security** → Use **Worker** (per-request isolation)
 //! - **Legacy Code** → Use **SharedIsolate** (only if already using it)
 //!
 //! ## Documentation
 //!
+//! - [`docs/thread-pinned-vs-shared-pool.md`](../docs/thread-pinned-vs-shared-pool.md) - Architecture comparison
 //! - [`docs/execution_modes.md`](../docs/execution_modes.md) - Detailed comparison
-//! - [`docs/isolate_pool.md`](../docs/isolate_pool.md) - Pool implementation deep dive
 
 pub mod execution_context;
 pub mod execution_helpers;
@@ -86,6 +94,7 @@ pub mod runtime;
 pub mod security;
 pub mod shared_isolate;
 pub mod snapshot;
+pub mod thread_pinned_pool;
 pub mod worker;
 
 // Core API
@@ -95,6 +104,10 @@ pub use locker_managed_isolate::LockerManagedIsolate;
 pub use pooled_execution::execute_pooled;
 pub use runtime::Runtime;
 pub use shared_isolate::SharedIsolate;
+pub use thread_pinned_pool::{
+    LocalPoolStats, PinnedPoolConfig, PinnedPoolStats, compute_thread_id, execute_pinned,
+    get_local_pool_stats, get_pinned_pool_stats, init_pinned_pool,
+};
 pub use worker::Worker;
 
 // Re-export common types from openworkers-common
