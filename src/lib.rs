@@ -42,6 +42,7 @@ pub mod runtime;
 pub mod security;
 pub mod shared_isolate;
 pub mod snapshot;
+pub mod thread_pinned_pool;
 pub mod worker;
 
 // Core API
@@ -51,6 +52,10 @@ pub use locker_managed_isolate::LockerManagedIsolate;
 pub use pooled_execution::execute_pooled;
 pub use runtime::Runtime;
 pub use shared_isolate::SharedIsolate;
+pub use thread_pinned_pool::{
+    LocalPoolStats, PinnedPoolConfig, PinnedPoolStats, compute_thread_id, execute_pinned,
+    get_local_pool_stats, get_pinned_pool_stats, init_pinned_pool,
+};
 pub use worker::Worker;
 
 // Re-export common types from openworkers-core
