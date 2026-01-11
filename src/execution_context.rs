@@ -343,59 +343,114 @@ impl ExecutionContext {
         })
     }
 
+    /// Helper: Evaluate a raw JavaScript string
+    fn eval_js(
+        isolate: &mut v8::Isolate,
+        context: &v8::Global<v8::Context>,
+        code: &str,
+    ) -> Result<(), TerminationReason> {
+        Self::evaluate_script(isolate, context, &WorkerCode::JavaScript(code.to_string()))
+    }
+
     /// Helper: Setup addEventListener in the context
     ///
-    /// Note: For now, we use the worker module's setup functions.
-    /// TODO: Refactor worker.rs to extract these as reusable functions.
+    /// Uses the shared implementation from worker module.
     fn setup_event_listener(
-        _isolate: &mut v8::Isolate,
-        _context: &v8::Global<v8::Context>,
+        isolate: &mut v8::Isolate,
+        context: &v8::Global<v8::Context>,
     ) -> Result<(), TerminationReason> {
-        // The setup is done during context creation via bindings::setup_*
-        // This function is kept for compatibility but doesn't need to do anything extra
-        Ok(())
+        crate::worker::setup_event_listener(isolate, context).map_err(|e| {
+            TerminationReason::InitializationError(format!(
+                "Failed to setup addEventListener: {}",
+                e
+            ))
+        })
     }
 
     /// Helper: Setup environment
     ///
-    /// Note: For now, we use the worker module's setup functions.
-    /// TODO: Refactor worker.rs to extract these as reusable functions.
+    /// Uses the shared implementation from worker module.
     fn setup_env(
-        _isolate: &mut v8::Isolate,
-        _context: &v8::Global<v8::Context>,
-        _env: &Option<HashMap<String, String>>,
-        _bindings: &Vec<openworkers_core::BindingInfo>,
+        isolate: &mut v8::Isolate,
+        context: &v8::Global<v8::Context>,
+        env: &Option<HashMap<String, String>>,
+        bindings: &Vec<openworkers_core::BindingInfo>,
     ) -> Result<(), TerminationReason> {
-        // The setup is done during context creation via bindings::setup_*
-        // This function is kept for compatibility but doesn't need to do anything extra
-        Ok(())
+        crate::worker::setup_env(isolate, context, env, bindings).map_err(|e| {
+            TerminationReason::InitializationError(format!("Failed to setup env: {}", e))
+        })
     }
 
     /// Helper: Evaluate script
-    ///
-    /// Note: For now, we use the worker module's setup functions.
-    /// TODO: Refactor worker.rs to extract these as reusable functions.
     fn evaluate_script(
-        _isolate: &mut v8::Isolate,
-        _context: &v8::Global<v8::Context>,
-        _code: &WorkerCode,
+        isolate: &mut v8::Isolate,
+        context: &v8::Global<v8::Context>,
+        code: &WorkerCode,
     ) -> Result<(), TerminationReason> {
-        // The script is evaluated during context creation
-        // This function is kept for compatibility but doesn't need to do anything extra
-        Ok(())
+        use std::pin::pin;
+
+        let script_str = match code {
+            WorkerCode::JavaScript(js) => js,
+            _ => {
+                return Err(TerminationReason::InitializationError(
+                    "V8 runtime only supports JavaScript code".to_string(),
+                ));
+            }
+        };
+
+        let scope = pin!(v8::HandleScope::new(isolate));
+        let mut scope = scope.init();
+        let context_local = v8::Local::new(&scope, context);
+        let scope = &mut v8::ContextScope::new(&mut scope, context_local);
+
+        let code_str = v8::String::new(scope, script_str).ok_or_else(|| {
+            TerminationReason::InitializationError("Failed to create script string".to_string())
+        })?;
+
+        let tc_scope = pin!(v8::TryCatch::new(scope));
+        let mut tc_scope = tc_scope.init();
+
+        let script_obj = match v8::Script::compile(&mut tc_scope, code_str, None) {
+            Some(s) => s,
+            None => {
+                let msg = tc_scope
+                    .exception()
+                    .and_then(|e| e.to_string(&tc_scope))
+                    .map(|s| s.to_rust_string_lossy(&tc_scope))
+                    .unwrap_or_else(|| "Unknown compile error".to_string());
+                return Err(TerminationReason::Exception(format!(
+                    "SyntaxError: {}",
+                    msg
+                )));
+            }
+        };
+
+        match script_obj.run(&mut tc_scope) {
+            Some(_) => Ok(()),
+            None => {
+                let msg = tc_scope
+                    .exception()
+                    .and_then(|e| e.to_string(&tc_scope))
+                    .map(|s| s.to_rust_string_lossy(&tc_scope))
+                    .unwrap_or_else(|| "Unknown runtime error".to_string());
+                Err(TerminationReason::Exception(msg))
+            }
+        }
     }
 
     /// Helper: Setup ES modules handler
     ///
-    /// Note: For now, we use the worker module's setup functions.
-    /// TODO: Refactor worker.rs to extract these as reusable functions.
+    /// Uses the shared implementation from worker module.
     fn setup_es_modules_handler(
-        _isolate: &mut v8::Isolate,
-        _context: &v8::Global<v8::Context>,
+        isolate: &mut v8::Isolate,
+        context: &v8::Global<v8::Context>,
     ) -> Result<(), TerminationReason> {
-        // The ES modules handler is setup during context creation
-        // This function is kept for compatibility but doesn't need to do anything extra
-        Ok(())
+        crate::worker::setup_es_modules_handler(isolate, context).map_err(|e| {
+            TerminationReason::InitializationError(format!(
+                "Failed to setup ES modules handler: {}",
+                e
+            ))
+        })
     }
 
     /// Get a mutable reference to the isolate

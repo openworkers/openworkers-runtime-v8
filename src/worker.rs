@@ -17,12 +17,32 @@
 //!
 //! ## Usage
 //!
+//! ### Classic Mode (creates own isolate)
+//!
 //! ```rust
 //! use openworkers_runtime_v8::Worker;
 //!
-//! let mut worker = Worker::new_with_ops(script, limits, ops).await?;
+//! let mut worker = Worker::builder()
+//!     .script(script)
+//!     .ops(ops)
+//!     .limits(limits)
+//!     .build()
+//!     .await?;
 //! worker.exec(task).await?;
 //! // Worker dropped here, isolate destroyed
+//! ```
+//!
+//! ### Pooled Mode (uses provided isolate)
+//!
+//! ```rust
+//! use openworkers_runtime_v8::Worker;
+//!
+//! // Execute with a pooled isolate - no Worker returned
+//! Worker::builder()
+//!     .script(script)
+//!     .ops(ops)
+//!     .execute_with_isolate(&mut isolate, task)
+//!     .await?;
 //! ```
 //!
 //! ## ⚠️ For production workloads, consider using IsolatePool instead
@@ -57,7 +77,316 @@ pub struct Worker {
     aborted: Arc<AtomicBool>,
 }
 
+/// Builder for creating Workers with flexible configuration.
+///
+/// Supports two modes:
+/// - **Classic**: Creates a new V8 isolate via `build()`
+/// - **Pooled**: Uses an existing isolate via `execute_with_isolate()`
+///
+/// # Example
+///
+/// ```rust
+/// // Classic mode
+/// let worker = Worker::builder()
+///     .script(script)
+///     .ops(ops)
+///     .limits(limits)
+///     .build()
+///     .await?;
+///
+/// // Pooled mode (executes immediately, no Worker returned)
+/// Worker::builder()
+///     .script(script)
+///     .ops(ops)
+///     .execute_with_isolate(&mut isolate, task)
+///     .await?;
+/// ```
+pub struct WorkerBuilder {
+    script: Option<Script>,
+    ops: Option<OperationsHandle>,
+    limits: Option<RuntimeLimits>,
+}
+
+impl WorkerBuilder {
+    /// Create a new WorkerBuilder
+    pub fn new() -> Self {
+        Self {
+            script: None,
+            ops: None,
+            limits: None,
+        }
+    }
+
+    /// Set the script to execute
+    pub fn script(mut self, script: Script) -> Self {
+        self.script = Some(script);
+        self
+    }
+
+    /// Set the operations handle for fetch, KV, etc.
+    pub fn ops(mut self, ops: OperationsHandle) -> Self {
+        self.ops = Some(ops);
+        self
+    }
+
+    /// Set the runtime limits
+    pub fn limits(mut self, limits: RuntimeLimits) -> Self {
+        self.limits = Some(limits);
+        self
+    }
+
+    /// Build a Worker with a new V8 isolate (classic mode)
+    ///
+    /// Creates a new isolate, sets up the runtime, and returns a Worker
+    /// that owns the isolate.
+    pub async fn build(self) -> Result<Worker, TerminationReason> {
+        let script = self.script.ok_or_else(|| {
+            TerminationReason::InitializationError("Script is required".to_string())
+        })?;
+
+        let ops = self.ops.ok_or_else(|| {
+            TerminationReason::InitializationError("Operations handle is required".to_string())
+        })?;
+
+        Worker::new_with_ops(script, self.limits, ops).await
+    }
+
+    /// Execute a task with a pooled isolate (pooled mode)
+    ///
+    /// Uses the provided isolate to execute the task directly.
+    /// Does NOT return a Worker - this is a one-shot execution.
+    ///
+    /// # Arguments
+    /// * `isolate` - Mutable reference to a V8 isolate (from pool, locked via v8::Locker)
+    /// * `task` - The task to execute
+    ///
+    /// # Returns
+    /// * `Ok(())` if execution succeeded
+    /// * `Err(TerminationReason)` if execution failed
+    pub async fn execute_with_isolate(
+        self,
+        isolate: &mut v8::Isolate,
+        mut task: Task,
+    ) -> Result<(), TerminationReason> {
+        use crate::runtime::stream_manager::StreamManager;
+        use crate::runtime::{bindings, crypto, run_event_loop, streams, text_encoding};
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        use tokio::sync::{Notify, mpsc};
+
+        let script = self.script.ok_or_else(|| {
+            TerminationReason::InitializationError("Script is required".to_string())
+        })?;
+
+        let ops = self.ops.ok_or_else(|| {
+            TerminationReason::InitializationError("Operations handle is required".to_string())
+        })?;
+
+        let _limits = self.limits.unwrap_or_default();
+
+        // Create channels (same as Runtime::new)
+        let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel();
+        let (callback_tx, _callback_rx) = mpsc::unbounded_channel();
+        let callback_notify = Arc::new(Notify::new());
+
+        let fetch_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let fetch_error_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let stream_callbacks = Arc::new(Mutex::new(HashMap::new()));
+        let next_callback_id = Arc::new(Mutex::new(1u64));
+        let stream_manager = Arc::new(StreamManager::new());
+
+        // Check if snapshot is available
+        use std::sync::OnceLock;
+        static USE_SNAPSHOT: OnceLock<bool> = OnceLock::new();
+        let use_snapshot = *USE_SNAPSHOT.get_or_init(|| {
+            const RUNTIME_SNAPSHOT_PATH: &str = env!("RUNTIME_SNAPSHOT_PATH");
+            std::path::Path::new(RUNTIME_SNAPSHOT_PATH).exists()
+        });
+
+        // Create context with bindings on the borrowed isolate
+        let context = {
+            use std::pin::pin;
+            let scope = pin!(v8::HandleScope::new(isolate));
+            let mut scope = scope.init();
+            let context = v8::Context::new(&scope, Default::default());
+            let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+            // Setup global aliases (self, global)
+            bindings::setup_global_aliases(scope);
+
+            // Native bindings (always needed)
+            bindings::setup_console(scope, scheduler_tx.clone());
+            bindings::setup_performance(scope);
+            bindings::setup_timers(scope, scheduler_tx.clone());
+            bindings::setup_fetch(
+                scope,
+                scheduler_tx.clone(),
+                fetch_callbacks.clone(),
+                fetch_error_callbacks.clone(),
+                next_callback_id.clone(),
+            );
+            bindings::setup_stream_ops(
+                scope,
+                scheduler_tx.clone(),
+                stream_callbacks.clone(),
+                next_callback_id.clone(),
+            );
+            bindings::setup_response_stream_ops(scope, stream_manager.clone());
+            crypto::setup_crypto(scope);
+
+            // Pure JS APIs (only if no snapshot)
+            if !use_snapshot {
+                text_encoding::setup_text_encoding(scope);
+                streams::setup_readable_stream(scope);
+                bindings::setup_blob(scope);
+                bindings::setup_form_data(scope);
+                bindings::setup_abort_controller(scope);
+                bindings::setup_structured_clone(scope);
+                bindings::setup_base64(scope);
+                bindings::setup_url_search_params(scope);
+                bindings::setup_url(scope);
+                bindings::setup_headers(scope);
+                bindings::setup_request(scope);
+                bindings::setup_response(scope);
+            }
+
+            v8::Global::new(scope.as_ref(), context)
+        };
+
+        // Use the SHARED setup functions!
+        setup_event_listener(isolate, &context).map_err(|e| {
+            TerminationReason::InitializationError(format!(
+                "Failed to setup addEventListener: {}",
+                e
+            ))
+        })?;
+
+        setup_env(isolate, &context, &script.env, &script.bindings).map_err(|e| {
+            TerminationReason::InitializationError(format!("Failed to setup env: {}", e))
+        })?;
+
+        // Evaluate user script
+        let user_code = match &script.code {
+            WorkerCode::JavaScript(js) => js.as_str(),
+            _ => {
+                return Err(TerminationReason::InitializationError(
+                    "V8 runtime only supports JavaScript code".to_string(),
+                ));
+            }
+        };
+        evaluate_in_context(isolate, &context, user_code).map_err(|e| {
+            TerminationReason::Exception(format!("Script evaluation failed: {}", e))
+        })?;
+
+        setup_es_modules_handler(isolate, &context).map_err(|e| {
+            TerminationReason::InitializationError(format!(
+                "Failed to setup ES modules handler: {}",
+                e
+            ))
+        })?;
+
+        // Start event loop
+        let event_loop_stream_manager = stream_manager.clone();
+        let event_loop_callback_notify = callback_notify.clone();
+
+        let event_loop_handle = tokio::task::spawn_local(async move {
+            run_event_loop(
+                scheduler_rx,
+                callback_tx,
+                event_loop_callback_notify,
+                event_loop_stream_manager,
+                ops,
+            )
+            .await;
+        });
+
+        // Execute task
+        let result = match task {
+            Task::Scheduled(mut init) => {
+                let scheduled_init = init.take().ok_or(TerminationReason::Other(
+                    "ScheduledInit already consumed".to_string(),
+                ))?;
+
+                // Trigger scheduled handler
+                {
+                    use std::pin::pin;
+                    let scope = pin!(v8::HandleScope::new(isolate));
+                    let mut scope = scope.init();
+                    let ctx = v8::Local::new(&scope, &context);
+                    let scope = &mut v8::ContextScope::new(&mut scope, ctx);
+
+                    let global = ctx.global(scope);
+                    let handler_key = v8::String::new(scope, "__scheduledHandler").unwrap();
+
+                    if let Some(handler_val) = global.get(scope, handler_key.into()) {
+                        if handler_val.is_function() {
+                            let handler_fn: v8::Local<v8::Function> =
+                                handler_val.try_into().unwrap();
+
+                            let event_obj = v8::Object::new(scope);
+                            let time_key = v8::String::new(scope, "scheduledTime").unwrap();
+                            let time_val = v8::Number::new(scope, scheduled_init.time as f64);
+                            event_obj.set(scope, time_key.into(), time_val.into());
+
+                            handler_fn.call(scope, global.into(), &[event_obj.into()]);
+                        }
+                    }
+                }
+
+                // Wait for completion
+                for _ in 0..100 {
+                    let complete = {
+                        use std::pin::pin;
+                        let scope = pin!(v8::HandleScope::new(isolate));
+                        let mut scope = scope.init();
+                        let ctx = v8::Local::new(&scope, &context);
+                        let scope = &mut v8::ContextScope::new(&mut scope, ctx);
+
+                        let global = ctx.global(scope);
+                        let key = v8::String::new(scope, "__requestComplete").unwrap();
+                        global
+                            .get(scope, key.into())
+                            .map(|v| v.is_true())
+                            .unwrap_or(false)
+                    };
+
+                    if complete {
+                        let _ = scheduled_init.res_tx.send(());
+                        break;
+                    }
+
+                    tokio::select! {
+                        _ = callback_notify.notified() => {}
+                        _ = tokio::time::sleep(tokio::time::Duration::from_millis(10)) => {}
+                    }
+                }
+
+                Ok(())
+            }
+            Task::Fetch(_) => Err(TerminationReason::Other(
+                "Fetch not yet implemented for pooled mode".to_string(),
+            )),
+        };
+
+        // Cleanup
+        event_loop_handle.abort();
+
+        result
+    }
+}
+
+impl Default for WorkerBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Worker {
+    /// Create a new WorkerBuilder for flexible Worker construction
+    pub fn builder() -> WorkerBuilder {
+        WorkerBuilder::new()
+    }
+
     /// Process pending callbacks (timers, etc.)
     pub fn process_callbacks(&mut self) {
         self.runtime.process_callbacks();
@@ -109,7 +438,7 @@ impl Worker {
         let (mut runtime, scheduler_rx, callback_tx, callback_notify) = Runtime::new(limits);
 
         // Setup addEventListener
-        setup_event_listener(&mut runtime).map_err(|e| {
+        setup_event_listener(&mut runtime.isolate, &runtime.context).map_err(|e| {
             TerminationReason::InitializationError(format!(
                 "Failed to setup addEventListener: {}",
                 e
@@ -117,7 +446,13 @@ impl Worker {
         })?;
 
         // Setup environment variables and bindings
-        setup_env(&mut runtime, &script.env, &script.bindings).map_err(|e| {
+        setup_env(
+            &mut runtime.isolate,
+            &runtime.context,
+            &script.env,
+            &script.bindings,
+        )
+        .map_err(|e| {
             TerminationReason::InitializationError(format!("Failed to setup env: {}", e))
         })?;
 
@@ -128,7 +463,7 @@ impl Worker {
 
         // Setup ES Modules handler if `export default { fetch }` is used
         // This takes priority over addEventListener('fetch', ...)
-        setup_es_modules_handler(&mut runtime).map_err(|e| {
+        setup_es_modules_handler(&mut runtime.isolate, &runtime.context).map_err(|e| {
             TerminationReason::InitializationError(format!(
                 "Failed to setup ES modules handler: {}",
                 e
@@ -711,8 +1046,45 @@ impl Worker {
 
 // Helper functions are now in execution_helpers module
 
-fn setup_env(
-    runtime: &mut Runtime,
+/// Evaluate JavaScript code in a V8 context
+///
+/// This is the shared helper used by all setup functions.
+/// Works with both owned isolates (Worker mode) and borrowed isolates (pooled mode).
+pub(crate) fn evaluate_in_context(
+    isolate: &mut v8::Isolate,
+    context: &v8::Global<v8::Context>,
+    code: &str,
+) -> Result<(), String> {
+    use std::pin::pin;
+
+    let scope = pin!(v8::HandleScope::new(isolate));
+    let mut scope = scope.init();
+    let ctx = v8::Local::new(&scope, context);
+    let scope = &mut v8::ContextScope::new(&mut scope, ctx);
+
+    let code_str = v8::String::new(scope, code).ok_or("Failed to create V8 string")?;
+
+    let tc = pin!(v8::TryCatch::new(scope));
+    let mut tc = tc.init();
+
+    let script_obj = v8::Script::compile(&mut tc, code_str, None).ok_or_else(|| {
+        tc.exception()
+            .and_then(|e| e.to_string(&tc).map(|s| s.to_rust_string_lossy(&tc)))
+            .unwrap_or_else(|| "Compile error".to_string())
+    })?;
+
+    script_obj.run(&mut tc).ok_or_else(|| {
+        tc.exception()
+            .and_then(|e| e.to_string(&tc).map(|s| s.to_rust_string_lossy(&tc)))
+            .unwrap_or_else(|| "Runtime error".to_string())
+    })?;
+
+    Ok(())
+}
+
+pub(crate) fn setup_env(
+    isolate: &mut v8::Isolate,
+    context: &v8::Global<v8::Context>,
     env: &Option<std::collections::HashMap<String, String>>,
     bindings: &[openworkers_core::BindingInfo],
 ) -> Result<(), String> {
@@ -977,10 +1349,13 @@ fn setup_env(
         env_json, bindings_json
     );
 
-    runtime.evaluate(&WorkerCode::JavaScript(code))
+    evaluate_in_context(isolate, context, &code)
 }
 
-fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
+pub(crate) fn setup_event_listener(
+    isolate: &mut v8::Isolate,
+    context: &v8::Global<v8::Context>,
+) -> Result<(), String> {
     let code = r#"
         // Track active response streams - worker stays alive until all streams are closed
         globalThis.__activeResponseStreams = 0;
@@ -1210,7 +1585,7 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
         };
     "#;
 
-    runtime.evaluate(&WorkerCode::JavaScript(code.to_string()))
+    evaluate_in_context(isolate, context, code)
 }
 
 /// Setup ES Modules handler if `export default { fetch }` is used
@@ -1220,7 +1595,10 @@ fn setup_event_listener(runtime: &mut Runtime) -> Result<(), String> {
 /// instead of the Service Worker style (event.respondWith).
 ///
 /// ES Modules style takes priority over addEventListener.
-fn setup_es_modules_handler(runtime: &mut Runtime) -> Result<(), String> {
+pub(crate) fn setup_es_modules_handler(
+    isolate: &mut v8::Isolate,
+    context: &v8::Global<v8::Context>,
+) -> Result<(), String> {
     let code = r#"
         // Check if ES Modules style is used: export default { fetch }
         if (typeof globalThis.default === 'object' && globalThis.default !== null && typeof globalThis.default.fetch === 'function') {
@@ -1322,7 +1700,7 @@ fn setup_es_modules_handler(runtime: &mut Runtime) -> Result<(), String> {
         }
     "#;
 
-    runtime.evaluate(&WorkerCode::JavaScript(code.to_string()))
+    evaluate_in_context(isolate, context, code)
 }
 
 impl openworkers_core::Worker for Worker {
