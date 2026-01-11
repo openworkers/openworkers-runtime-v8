@@ -57,6 +57,8 @@ impl Future for WorkerFuture<'_> {
     type Output = Result<(), String>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        use crate::event_loop::drain_and_process;
+
         let this = self.get_mut();
 
         // 1. Check termination (CPU/wall-clock guards)
@@ -64,30 +66,10 @@ impl Future for WorkerFuture<'_> {
             return Poll::Ready(Err("Execution terminated".to_string()));
         }
 
-        // 2. Poll callback channel - TRUE ASYNC with waker
-        //    This drains all available messages without blocking
-        loop {
-            match Pin::new(&mut this.ctx.callback_rx).poll_recv(cx) {
-                Poll::Ready(Some(msg)) => {
-                    this.pending_callbacks.push(msg);
-                }
-                Poll::Ready(None) => {
-                    // Channel closed - event loop task ended
-                    return Poll::Ready(Err("Event loop channel closed".to_string()));
-                }
-                Poll::Pending => break,
-            }
+        // 2-4. Drain callbacks, process, pump V8
+        if let Err(e) = drain_and_process(cx, this.ctx, &mut this.pending_callbacks) {
+            return Poll::Ready(Err(e));
         }
-
-        // 3. Process all received callbacks in batch
-        if !this.pending_callbacks.is_empty() {
-            for msg in this.pending_callbacks.drain(..) {
-                this.ctx.process_single_callback(msg);
-            }
-        }
-
-        // 4. V8 platform messages + microtask checkpoint
-        this.ctx.pump_and_checkpoint();
 
         // 5. Check exit condition with abort handling
         let should_exit = this.ctx.check_exit_with_abort(
@@ -100,8 +82,7 @@ impl Future for WorkerFuture<'_> {
             return Poll::Ready(Ok(()));
         }
 
-        // 6. Not done yet - the waker from cx will wake us when:
-        //    - A new callback arrives (via poll_recv registration)
+        // 6. Not done yet - waker registered via poll_recv
         Poll::Pending
     }
 }

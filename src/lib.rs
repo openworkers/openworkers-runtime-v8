@@ -33,6 +33,7 @@
 //!
 //! Performance: ~2-3ms per request (creates new isolate)
 
+pub mod event_loop;
 pub mod execution_context;
 pub mod execution_helpers;
 pub mod isolate_pool;

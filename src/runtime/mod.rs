@@ -1550,3 +1550,17 @@ impl Drop for Runtime {
         let _ = self.scheduler_tx.send(SchedulerMessage::Shutdown);
     }
 }
+
+impl crate::event_loop::EventLoopRuntime for Runtime {
+    fn callback_rx_mut(&mut self) -> &mut tokio::sync::mpsc::UnboundedReceiver<CallbackMessage> {
+        &mut self.callback_rx
+    }
+
+    fn process_callback(&mut self, msg: CallbackMessage) {
+        self.process_single_callback(msg);
+    }
+
+    fn pump_and_checkpoint(&mut self) {
+        Runtime::pump_and_checkpoint(self);
+    }
+}

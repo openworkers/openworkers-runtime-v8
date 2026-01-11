@@ -591,8 +591,8 @@ impl Worker {
         exit_condition: EventLoopExit,
         abort_config: Option<AbortConfig>,
     ) -> Result<(), String> {
+        use crate::event_loop::drain_and_process;
         use crate::runtime::CallbackMessage;
-        use std::pin::Pin;
         use std::task::Poll;
 
         let mut abort_signaled_at: Option<tokio::time::Instant> = None;
@@ -604,30 +604,10 @@ impl Worker {
                 return Poll::Ready(Err("Execution terminated".to_string()));
             }
 
-            // 2. Poll callback channel - TRUE ASYNC with waker
-            //    This drains all available messages without blocking
-            loop {
-                match Pin::new(&mut self.runtime.callback_rx).poll_recv(cx) {
-                    Poll::Ready(Some(msg)) => {
-                        pending_callbacks.push(msg);
-                    }
-                    Poll::Ready(None) => {
-                        // Channel closed - event loop task ended
-                        return Poll::Ready(Err("Event loop channel closed".to_string()));
-                    }
-                    Poll::Pending => break,
-                }
+            // 2-4. Drain callbacks, process, pump V8
+            if let Err(e) = drain_and_process(cx, &mut self.runtime, &mut pending_callbacks) {
+                return Poll::Ready(Err(e));
             }
-
-            // 3. Process all received callbacks in batch
-            if !pending_callbacks.is_empty() {
-                for msg in pending_callbacks.drain(..) {
-                    self.runtime.process_single_callback(msg);
-                }
-            }
-
-            // 4. V8 platform messages + microtask checkpoint
-            self.runtime.pump_and_checkpoint();
 
             // 5. Check exit condition with abort handling
             // CRITICAL: Wrap in explicit block to drop V8 scopes BEFORE returning Pending.
@@ -672,7 +652,7 @@ impl Worker {
                 return Poll::Ready(Ok(()));
             }
 
-            // 6. Not done yet - waker registered via poll_recv will wake us
+            // 6. Not done yet - waker registered via poll_recv
             Poll::Pending
         })
         .await
