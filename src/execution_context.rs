@@ -501,10 +501,52 @@ impl ExecutionContext {
     }
 
     /// Process pending callbacks (timers, fetch responses, etc.)
+    ///
+    /// NOTE: This method uses try_recv() polling. For true async behavior,
+    /// use WorkerFuture which polls the channel with a waker.
     pub fn process_callbacks(&mut self) {
+        // Process our custom callbacks (timers, fetch, etc.)
+        while let Ok(msg) = self.callback_rx.try_recv() {
+            self.process_single_callback(msg);
+        }
+
+        // Pump V8 platform messages and process microtasks AFTER callbacks
+        // This ensures Promise.then() handlers run immediately after resolution
+        self.pump_and_checkpoint();
+    }
+
+    /// Process a single callback message in a V8 scope
+    ///
+    /// This is the core callback processing logic, extracted to be called
+    /// from both process_callbacks() and WorkerFuture::poll().
+    pub fn process_single_callback(&mut self, msg: crate::runtime::CallbackMessage) {
+        use crate::runtime::CallbackMessage;
         use std::pin::pin;
 
-        // Process V8 platform message loop
+        // Get callback data before entering V8 scope
+        let (fetch_callback, fetch_error_callback) = match &msg {
+            CallbackMessage::FetchError(callback_id, _) => {
+                let cb1 = self.fetch_callbacks.lock().unwrap().remove(callback_id);
+                let cb2 = self
+                    .fetch_error_callbacks
+                    .lock()
+                    .unwrap()
+                    .remove(callback_id);
+                (cb1, cb2)
+            }
+            CallbackMessage::FetchStreamingSuccess(callback_id, _, _) => {
+                let cb1 = self.fetch_callbacks.lock().unwrap().remove(callback_id);
+                let cb2 = self
+                    .fetch_error_callbacks
+                    .lock()
+                    .unwrap()
+                    .remove(callback_id);
+                (cb1, cb2)
+            }
+            _ => (None, None),
+        };
+
+        // Now enter V8 scope
         unsafe {
             let isolate = &mut *self.isolate;
             let scope = pin!(v8::HandleScope::new(isolate));
@@ -512,111 +554,223 @@ impl ExecutionContext {
             let context = v8::Local::new(&scope, &self.context);
             let scope = &mut v8::ContextScope::new(&mut scope, context);
 
-            while v8::Platform::pump_message_loop(self.platform, scope, false) {
-                // Keep pumping while there are messages
+            match msg {
+                CallbackMessage::ExecuteTimeout(callback_id)
+                | CallbackMessage::ExecuteInterval(callback_id) => {
+                    let global = context.global(scope);
+                    let execute_timer_key = v8::String::new(scope, "__executeTimer").unwrap();
+
+                    if let Some(execute_fn_val) = global.get(scope, execute_timer_key.into()) {
+                        if execute_fn_val.is_function() {
+                            let execute_fn: v8::Local<v8::Function> =
+                                execute_fn_val.try_into().unwrap();
+                            let id_val = v8::Number::new(scope, callback_id as f64);
+                            execute_fn.call(scope, global.into(), &[id_val.into()]);
+                        }
+                    }
+                }
+                CallbackMessage::FetchError(_, error_msg) => {
+                    if let Some(callback_global) = fetch_error_callback {
+                        let error_msg_val = v8::String::new(scope, &error_msg).unwrap();
+                        let error = v8::Exception::error(scope, error_msg_val);
+                        let callback: v8::Local<v8::Function> =
+                            v8::Local::new(scope, &callback_global);
+                        let recv = v8::undefined(scope);
+                        callback.call(scope, recv.into(), &[error]);
+                    }
+                }
+                CallbackMessage::FetchStreamingSuccess(_, meta, stream_id) => {
+                    if let Some(callback_global) = fetch_callback {
+                        let meta_obj = v8::Object::new(scope);
+
+                        // status
+                        let status_key = v8::String::new(scope, "status").unwrap();
+                        let status_val = v8::Number::new(scope, meta.status as f64);
+                        meta_obj.set(scope, status_key.into(), status_val.into());
+
+                        // statusText
+                        let status_text_key = v8::String::new(scope, "statusText").unwrap();
+                        let status_text_val = v8::String::new(scope, &meta.status_text).unwrap();
+                        meta_obj.set(scope, status_text_key.into(), status_text_val.into());
+
+                        // headers
+                        let headers_obj = v8::Object::new(scope);
+                        for (key, value) in &meta.headers {
+                            let key_v8 = v8::String::new(scope, key).unwrap();
+                            let value_v8 = v8::String::new(scope, value).unwrap();
+                            headers_obj.set(scope, key_v8.into(), value_v8.into());
+                        }
+                        let headers_key = v8::String::new(scope, "headers").unwrap();
+                        meta_obj.set(scope, headers_key.into(), headers_obj.into());
+
+                        // streamId
+                        let stream_id_key = v8::String::new(scope, "streamId").unwrap();
+                        let stream_id_val = v8::Number::new(scope, stream_id as f64);
+                        meta_obj.set(scope, stream_id_key.into(), stream_id_val.into());
+
+                        let callback: v8::Local<v8::Function> =
+                            v8::Local::new(scope, &callback_global);
+                        let recv = v8::undefined(scope);
+                        callback.call(scope, recv.into(), &[meta_obj.into()]);
+                    }
+                }
+                CallbackMessage::StreamChunk(callback_id, chunk) => {
+                    // Stream read result - call the JavaScript callback with the chunk
+                    let callback_opt = {
+                        let mut cbs = self.stream_callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback_global) = callback_opt {
+                        let callback = v8::Local::new(scope, &callback_global);
+                        let recv = v8::undefined(scope);
+
+                        // Create result object: {done: boolean, value?: Uint8Array, error?: string}
+                        let result_obj = v8::Object::new(scope);
+
+                        use crate::runtime::stream_manager;
+                        match chunk {
+                            stream_manager::StreamChunk::Data(bytes) => {
+                                // {done: false, value: Uint8Array}
+                                let done_key = v8::String::new(scope, "done").unwrap();
+                                let done_val = v8::Boolean::new(scope, false);
+                                result_obj.set(scope, done_key.into(), done_val.into());
+
+                                // Create Uint8Array from bytes using backing store transfer
+                                let vec = bytes.to_vec();
+                                let len = vec.len();
+                                let backing_store =
+                                    v8::ArrayBuffer::new_backing_store_from_vec(vec);
+                                let array_buffer = v8::ArrayBuffer::with_backing_store(
+                                    scope,
+                                    &backing_store.make_shared(),
+                                );
+                                let uint8_array =
+                                    v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
+
+                                let value_key = v8::String::new(scope, "value").unwrap();
+                                result_obj.set(scope, value_key.into(), uint8_array.into());
+                            }
+                            stream_manager::StreamChunk::Done => {
+                                // {done: true}
+                                let done_key = v8::String::new(scope, "done").unwrap();
+                                let done_val = v8::Boolean::new(scope, true);
+                                result_obj.set(scope, done_key.into(), done_val.into());
+                            }
+                            stream_manager::StreamChunk::Error(err_msg) => {
+                                // {error: string}
+                                let error_key = v8::String::new(scope, "error").unwrap();
+                                let error_val = v8::String::new(scope, &err_msg).unwrap();
+                                result_obj.set(scope, error_key.into(), error_val.into());
+                            }
+                        }
+
+                        callback.call(scope, recv.into(), &[result_obj.into()]);
+                    }
+                }
+                _ => {
+                    // Other callback types (StorageResult, KvResult, etc.) can be added as needed
+                }
+            }
+        }
+        // Note: Microtask checkpoint is NOT done here anymore.
+        // It's done in pump_and_checkpoint() which is called after processing
+        // all callbacks in a batch. This is more efficient.
+    }
+
+    /// Pump V8 platform messages and perform microtask checkpoint
+    ///
+    /// This must be called regularly to:
+    /// 1. Process V8 platform messages (GC, optimizations, etc.)
+    /// 2. Execute microtasks (Promise.then, async/await continuations)
+    ///
+    /// Called from both process_callbacks() and WorkerFuture::poll()
+    pub fn pump_and_checkpoint(&mut self) {
+        use std::pin::pin;
+
+        // Pump V8 platform message loop (GC, etc.)
+        unsafe {
+            let isolate = &mut *self.isolate;
+
+            while v8::Platform::pump_message_loop(self.platform, isolate, false) {
+                // Continue pumping until no more messages
             }
         }
 
-        // Process our custom callbacks (timers, fetch, etc.)
-        while let Ok(msg) = self.callback_rx.try_recv() {
-            use crate::runtime::CallbackMessage;
+        // Process microtasks (Promises, async/await) - CRITICAL for Promise resolution!
+        // Without this, .then() handlers and async/await continuations never execute.
+        unsafe {
+            let isolate = &mut *self.isolate;
+            let scope = pin!(v8::HandleScope::new(isolate));
+            let mut scope = scope.init();
+            let context = v8::Local::new(&scope, &self.context);
+            let scope = &mut v8::ContextScope::new(&mut scope, context);
 
-            // Get callback data before entering V8 scope
-            let (fetch_callback, fetch_error_callback) = match &msg {
-                CallbackMessage::FetchError(callback_id, _) => {
-                    let cb1 = self.fetch_callbacks.lock().unwrap().remove(callback_id);
-                    let cb2 = self
-                        .fetch_error_callbacks
-                        .lock()
-                        .unwrap()
-                        .remove(callback_id);
-                    (cb1, cb2)
-                }
-                CallbackMessage::FetchStreamingSuccess(callback_id, _, _) => {
-                    let cb1 = self.fetch_callbacks.lock().unwrap().remove(callback_id);
-                    let cb2 = self
-                        .fetch_error_callbacks
-                        .lock()
-                        .unwrap()
-                        .remove(callback_id);
-                    (cb1, cb2)
-                }
-                _ => (None, None),
-            };
+            let tc_scope = pin!(v8::TryCatch::new(scope));
+            let mut tc_scope = tc_scope.init();
+            tc_scope.perform_microtask_checkpoint();
 
-            // Now enter V8 scope
-            unsafe {
-                let isolate = &mut *self.isolate;
-                let scope = pin!(v8::HandleScope::new(isolate));
-                let mut scope = scope.init();
-                let context = v8::Local::new(&scope, &self.context);
-                let scope = &mut v8::ContextScope::new(&mut scope, context);
+            // Check for exceptions during microtask processing
+            if let Some(exception) = tc_scope.exception() {
+                let exception_string = exception
+                    .to_string(&tc_scope)
+                    .map(|s| s.to_rust_string_lossy(&*tc_scope))
+                    .unwrap_or_else(|| "Unknown exception".to_string());
+                log::warn!(
+                    "Exception during microtask processing: {}",
+                    exception_string
+                );
+            }
+        }
+    }
 
-                match msg {
-                    CallbackMessage::ExecuteTimeout(callback_id)
-                    | CallbackMessage::ExecuteInterval(callback_id) => {
-                        let global = context.global(scope);
-                        let execute_timer_key = v8::String::new(scope, "__executeTimer").unwrap();
+    /// Check exit condition with abort handling
+    ///
+    /// This is used by WorkerFuture to check if the event loop should exit.
+    /// Returns true if the loop should exit.
+    pub fn check_exit_with_abort(
+        &mut self,
+        exit_condition: EventLoopExit,
+        abort_config: &Option<AbortConfig>,
+        abort_signaled_at: &mut Option<tokio::time::Instant>,
+    ) -> bool {
+        use std::pin::pin;
 
-                        if let Some(execute_fn_val) = global.get(scope, execute_timer_key.into()) {
-                            if execute_fn_val.is_function() {
-                                let execute_fn: v8::Local<v8::Function> =
-                                    execute_fn_val.try_into().unwrap();
-                                let id_val = v8::Number::new(scope, callback_id as f64);
-                                execute_fn.call(scope, global.into(), &[id_val.into()]);
-                            }
+        unsafe {
+            let isolate = &mut *self.isolate;
+            let scope = pin!(v8::HandleScope::new(isolate));
+            let mut scope = scope.init();
+            let context = v8::Local::new(&scope, &self.context);
+            let scope = &mut v8::ContextScope::new(&mut scope, context);
+            let global = context.global(scope);
+
+            // Basic exit condition check
+            let base_exit = check_exit_condition(scope, global, exit_condition);
+
+            // If abort detection is enabled, handle client disconnects
+            if let Some(config) = abort_config {
+                let (request_complete, active_streams) = get_completion_state(scope, global);
+
+                // Detect client disconnect and signal abort to JS
+                if active_streams > 0 && abort_signaled_at.is_none() {
+                    if let Some(stream_id) = get_response_stream_id(scope, global) {
+                        if !self.stream_manager.has_sender(stream_id) {
+                            *abort_signaled_at = Some(tokio::time::Instant::now());
+                            signal_client_disconnect(scope);
                         }
                     }
-                    CallbackMessage::FetchError(_, error_msg) => {
-                        if let Some(callback_global) = fetch_error_callback {
-                            let error_msg_val = v8::String::new(scope, &error_msg).unwrap();
-                            let error = v8::Exception::error(scope, error_msg_val);
-                            let callback: v8::Local<v8::Function> =
-                                v8::Local::new(scope, &callback_global);
-                            let recv = v8::undefined(scope);
-                            callback.call(scope, recv.into(), &[error]);
-                        }
-                    }
-                    CallbackMessage::FetchStreamingSuccess(_, meta, stream_id) => {
-                        if let Some(callback_global) = fetch_callback {
-                            let meta_obj = v8::Object::new(scope);
-
-                            // status
-                            let status_key = v8::String::new(scope, "status").unwrap();
-                            let status_val = v8::Number::new(scope, meta.status as f64);
-                            meta_obj.set(scope, status_key.into(), status_val.into());
-
-                            // statusText
-                            let status_text_key = v8::String::new(scope, "statusText").unwrap();
-                            let status_text_val =
-                                v8::String::new(scope, &meta.status_text).unwrap();
-                            meta_obj.set(scope, status_text_key.into(), status_text_val.into());
-
-                            // headers
-                            let headers_obj = v8::Object::new(scope);
-                            for (key, value) in &meta.headers {
-                                let key_v8 = v8::String::new(scope, key).unwrap();
-                                let value_v8 = v8::String::new(scope, value).unwrap();
-                                headers_obj.set(scope, key_v8.into(), value_v8.into());
-                            }
-                            let headers_key = v8::String::new(scope, "headers").unwrap();
-                            meta_obj.set(scope, headers_key.into(), headers_obj.into());
-
-                            // streamId
-                            let stream_id_key = v8::String::new(scope, "streamId").unwrap();
-                            let stream_id_val = v8::Number::new(scope, stream_id as f64);
-                            meta_obj.set(scope, stream_id_key.into(), stream_id_val.into());
-
-                            let callback: v8::Local<v8::Function> =
-                                v8::Local::new(scope, &callback_global);
-                            let recv = v8::undefined(scope);
-                            callback.call(scope, recv.into(), &[meta_obj.into()]);
-                        }
-                    }
-                    _ => {
-                        // Other callback types can be added as needed
-                    }
                 }
+
+                // Check grace period
+                let grace_exceeded = abort_signaled_at
+                    .as_ref()
+                    .map(|t| t.elapsed() > config.grace_period)
+                    .unwrap_or(false);
+
+                // Exit if base condition met, OR if request complete and grace exceeded
+                base_exit || (request_complete && grace_exceeded)
+            } else {
+                base_exit
             }
         }
     }
@@ -710,15 +864,18 @@ impl ExecutionContext {
         }
     }
 
-    /// Calculate maximum event loop iterations based on wall-clock timeout
-    #[inline]
-    fn max_event_loop_iterations(&self) -> usize {
-        100 + (self.limits.max_wall_clock_time_ms / 100) as usize
-    }
-
     /// Check if execution should be terminated
+    ///
+    /// Returns true if any termination condition is met:
+    /// - V8 execution terminating
+    /// - Wall-clock timeout triggered
+    /// - CPU time limit exceeded (Linux only)
     #[inline]
-    fn is_terminated(&self, wall_guard: &TimeoutGuard, cpu_guard: &Option<CpuEnforcer>) -> bool {
+    pub fn is_terminated(
+        &self,
+        wall_guard: &TimeoutGuard,
+        cpu_guard: &Option<CpuEnforcer>,
+    ) -> bool {
         unsafe {
             (*self.isolate).is_execution_terminating()
                 || wall_guard.was_triggered()
@@ -732,7 +889,17 @@ impl ExecutionContext {
     /// Run the event loop until a condition is met or timeout/termination occurs.
     ///
     /// This is the core loop for processing async operations (Promises, timers, fetch).
-    /// It checks termination guards, processes callbacks, and waits for the exit condition.
+    /// Uses poll_fn for true async polling instead of sleep-based polling.
+    ///
+    /// ## Design: poll_fn vs WorkerFuture
+    ///
+    /// We use `poll_fn` here instead of `WorkerFuture` because:
+    /// - `await_event_loop` is a method on `&mut self`
+    /// - `WorkerFuture::new` also needs `&mut ExecutionContext`
+    /// - Rust's borrowing rules prevent creating WorkerFuture inside a method
+    ///
+    /// `poll_fn` solves this by letting us define the poll logic inline,
+    /// capturing `&mut self` without ownership conflicts.
     async fn await_event_loop(
         &mut self,
         wall_guard: &TimeoutGuard,
@@ -740,78 +907,55 @@ impl ExecutionContext {
         exit_condition: EventLoopExit,
         abort_config: Option<AbortConfig>,
     ) -> Result<(), String> {
-        let max_iterations = self.max_event_loop_iterations();
-        let mut abort_signaled_at: Option<tokio::time::Instant> = None;
+        use std::pin::Pin;
+        use std::task::Poll;
 
-        for _iteration in 0..max_iterations {
+        let mut abort_signaled_at: Option<tokio::time::Instant> = None;
+        let mut pending_callbacks: Vec<crate::runtime::CallbackMessage> = Vec::with_capacity(16);
+
+        std::future::poll_fn(|cx| {
+            // 1. Check termination (CPU/wall-clock guards)
             if self.is_terminated(wall_guard, cpu_guard) {
-                return Err("Execution terminated".to_string());
+                return Poll::Ready(Err("Execution terminated".to_string()));
             }
 
-            // Process pending callbacks and microtasks
-            self.process_callbacks();
-
-            // Check exit condition
-            // CRITICAL: Wrap in explicit block to drop V8 scopes BEFORE the await below.
-            // V8 scopes use RAII - if alive during await, another worker on the same thread
-            // may run and corrupt V8's context stack.
-            let should_exit = {
-                use std::pin::pin;
-                unsafe {
-                    let isolate = &mut *self.isolate;
-                    let scope = pin!(v8::HandleScope::new(isolate));
-                    let mut scope = scope.init();
-                    let context = v8::Local::new(&scope, &self.context);
-                    let scope = &mut v8::ContextScope::new(&mut scope, context);
-                    let global = context.global(scope);
-
-                    // Basic exit condition check
-                    let base_exit = check_exit_condition(scope, global, exit_condition);
-
-                    // If abort detection is enabled, handle client disconnects
-                    if let Some(ref config) = abort_config {
-                        let (request_complete, active_streams) =
-                            get_completion_state(scope, global);
-
-                        // Detect client disconnect and signal abort to JS
-                        if active_streams > 0 && abort_signaled_at.is_none() {
-                            if let Some(stream_id) = get_response_stream_id(scope, global) {
-                                if !self.stream_manager.has_sender(stream_id) {
-                                    abort_signaled_at = Some(tokio::time::Instant::now());
-                                    signal_client_disconnect(scope);
-                                }
-                            }
-                        }
-
-                        // Check grace period
-                        let grace_exceeded = abort_signaled_at
-                            .map(|t| t.elapsed() > config.grace_period)
-                            .unwrap_or(false);
-
-                        // Exit if base condition met, OR if request complete and grace exceeded
-                        base_exit || (request_complete && grace_exceeded)
-                    } else {
-                        base_exit
+            // 2. Poll callback channel - TRUE ASYNC with waker
+            //    This drains all available messages without blocking
+            loop {
+                match Pin::new(&mut self.callback_rx).poll_recv(cx) {
+                    Poll::Ready(Some(msg)) => {
+                        pending_callbacks.push(msg);
                     }
+                    Poll::Ready(None) => {
+                        // Channel closed - event loop task ended
+                        return Poll::Ready(Err("Event loop channel closed".to_string()));
+                    }
+                    Poll::Pending => break,
                 }
-            }; // V8 scopes dropped here, BEFORE the await
+            }
+
+            // 3. Process all received callbacks in batch
+            if !pending_callbacks.is_empty() {
+                for msg in pending_callbacks.drain(..) {
+                    self.process_single_callback(msg);
+                }
+            }
+
+            // 4. V8 platform messages + microtask checkpoint
+            self.pump_and_checkpoint();
+
+            // 5. Check exit condition with abort handling
+            let should_exit =
+                self.check_exit_with_abort(exit_condition, &abort_config, &mut abort_signaled_at);
 
             if should_exit {
-                return Ok(());
+                return Poll::Ready(Ok(()));
             }
 
-            // Wait for scheduler to signal callback ready, or timeout to check guards
-            tokio::select! {
-                _ = self.callback_notify.notified() => {
-                    // Callback ready, loop will process it
-                }
-                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
-                    // Periodic check for wall_guard timeout (checked at loop start)
-                }
-            }
-        }
-
-        Err("Max event loop iterations reached".to_string())
+            // 6. Not done yet - waker registered via poll_recv will wake us
+            Poll::Pending
+        })
+        .await
     }
 
     /// Trigger a fetch event

@@ -96,6 +96,7 @@ pub mod shared_isolate;
 pub mod snapshot;
 pub mod thread_pinned_pool;
 pub mod worker;
+pub mod worker_future;
 
 // Core API
 pub use execution_context::ExecutionContext;
@@ -109,6 +110,7 @@ pub use thread_pinned_pool::{
     get_local_pool_stats, get_pinned_pool_stats, init_pinned_pool,
 };
 pub use worker::Worker;
+pub use worker_future::WorkerFuture;
 
 // Re-export common types from openworkers-common
 pub use openworkers_core::{
