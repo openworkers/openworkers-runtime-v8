@@ -79,12 +79,18 @@ impl ExecutionContext {
     /// Create a new execution context with a pooled isolate (locked via v8::Locker)
     ///
     /// This variant works with isolates from the IsolatePool.
+    /// The isolate must already be locked with v8::Locker before calling this method.
     ///
-    /// # Safety
-    /// The isolate must be locked with v8::Locker before calling this method.
-    /// The ExecutionContext must be dropped before releasing the Locker.
+    /// # Arguments
+    /// * `isolate` - Mutable reference to the locked isolate (via v8::Locker's DerefMut)
+    /// * `use_snapshot` - Whether the isolate was created with a snapshot
+    /// * `platform` - V8 platform reference
+    /// * `limits` - Runtime limits
+    /// * `memory_limit_hit` - Memory limit tracking flag
+    /// * `script` - Worker script to load
+    /// * `ops` - Operations handle for async ops
     pub fn new_with_pooled_isolate(
-        isolate: &v8::Isolate,
+        isolate: &mut v8::Isolate,
         use_snapshot: bool,
         platform: &'static v8::SharedRef<v8::Platform>,
         limits: RuntimeLimits,
@@ -107,17 +113,9 @@ impl ExecutionContext {
         // Create NEW context in the pooled isolate
         let context = {
             use std::pin::pin;
-            use std::ptr;
 
-            // SAFETY: We cast &v8::Isolate to &mut v8::Isolate here.
-            // This is safe because:
-            // 1. The isolate is locked with v8::Locker (exclusive access)
-            // 2. Only this thread can access the isolate while locked
-            // 3. HandleScope requires &mut but doesn't actually mutate the Isolate state
-            #[allow(invalid_reference_casting)]
-            let isolate_mut = unsafe { &mut *ptr::from_ref(isolate).cast_mut() };
-
-            let scope = pin!(v8::HandleScope::new(isolate_mut));
+            // Create HandleScope with the mutable isolate reference
+            let scope = pin!(v8::HandleScope::new(isolate));
             let mut scope = scope.init();
             let context = v8::Context::new(&scope, Default::default());
             let scope = &mut v8::ContextScope::new(&mut scope, context);
@@ -164,19 +162,17 @@ impl ExecutionContext {
             v8::Global::new(scope.as_ref(), context)
         };
 
-        // Setup addEventListener
-        #[allow(invalid_reference_casting)]
-        let isolate_mut = unsafe { &mut *std::ptr::from_ref(isolate).cast_mut() };
-        Self::setup_event_listener(isolate_mut, &context)?;
+        // Setup addEventListener (placeholder - actual setup done during context creation)
+        Self::setup_event_listener(isolate, &context)?;
 
-        // Setup environment variables and bindings
-        Self::setup_env(isolate_mut, &context, &script.env, &script.bindings)?;
+        // Setup environment variables and bindings (placeholder)
+        Self::setup_env(isolate, &context, &script.env, &script.bindings)?;
 
-        // Evaluate user script
-        Self::evaluate_script(isolate_mut, &context, &script.code)?;
+        // Evaluate user script (placeholder)
+        Self::evaluate_script(isolate, &context, &script.code)?;
 
-        // Setup ES Modules handler if `export default { fetch }` is used
-        Self::setup_es_modules_handler(isolate_mut, &context)?;
+        // Setup ES Modules handler (placeholder)
+        Self::setup_es_modules_handler(isolate, &context)?;
 
         // Start event loop in background (with optional Operations handle)
         let event_loop_stream_manager = stream_manager.clone();
@@ -194,12 +190,11 @@ impl ExecutionContext {
         });
 
         // Store raw pointer to isolate (safe because ExecutionContext is dropped before Locker)
-        #[allow(invalid_reference_casting)]
-        let isolate_ptr = unsafe {
-            std::ptr::from_ref(isolate)
-                .cast_mut()
-                .cast::<v8::OwnedIsolate>()
-        };
+        // We cast &mut v8::Isolate to *mut v8::OwnedIsolate - this is safe because:
+        // 1. The isolate is locked and we have exclusive access
+        // 2. ExecutionContext lifetime is tied to the Locker lifetime
+        // 3. v8::Isolate and v8::OwnedIsolate have same memory layout
+        let isolate_ptr = isolate as *mut v8::Isolate as *mut v8::OwnedIsolate;
 
         Ok(Self {
             isolate: isolate_ptr,

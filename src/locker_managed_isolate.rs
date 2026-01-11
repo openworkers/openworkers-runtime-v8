@@ -89,29 +89,10 @@ impl LockerManagedIsolate {
         }
     }
 
-    /// Get reference to isolate
-    ///
-    /// The isolate must be locked with v8::Locker before use.
-    pub fn as_isolate(&self) -> &v8::Isolate {
-        &*self.isolate
-    }
-
-    /// Get mutable reference to isolate
-    ///
-    /// The isolate must be locked with v8::Locker before use.
-    pub fn as_isolate_mut(&mut self) -> &mut v8::Isolate {
-        &mut *self.isolate
-    }
-
     /// Check if memory limit was hit
     pub fn memory_limit_hit(&self) -> bool {
         self.memory_limit_hit
             .load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    /// Get a thread-safe handle to this isolate for termination
-    pub fn thread_safe_handle(&self) -> v8::IsolateHandle {
-        self.isolate.thread_safe_handle()
     }
 }
 
@@ -160,22 +141,15 @@ mod tests {
     #[test]
     fn test_with_locker() {
         let limits = RuntimeLimits::default();
-        let isolate = LockerManagedIsolate::new(limits);
+        let mut isolate_wrapper = LockerManagedIsolate::new(limits);
 
-        // CRITICAL: Enter isolate before locking (sets up V8's TLS)
-        unsafe {
-            isolate.as_isolate().enter();
-        }
+        // Create Locker - it handles enter/exit automatically via RAII
+        let mut locker = v8::Locker::new(&mut isolate_wrapper.isolate);
 
-        // Lock the isolate
-        let _locker = v8::Locker::new(isolate.as_isolate());
+        // Now we can use the isolate via DerefMut
+        let scope = std::pin::pin!(v8::HandleScope::new(&mut *locker));
+        let _scope = scope.init();
 
-        // Now we can use it (in a real scenario, create HandleScope, etc.)
-        // For this test, just verify it doesn't crash
-
-        // CRITICAL: Exit isolate (cleanup V8's TLS)
-        unsafe {
-            isolate.as_isolate().exit();
-        }
+        // Locker drop will call exit() automatically
     }
 }

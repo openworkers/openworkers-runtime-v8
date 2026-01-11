@@ -4,8 +4,7 @@ mod common;
 
 use common::run_in_local;
 use openworkers_core::{
-    DefaultOps, HttpMethod, HttpRequest, OperationsHandle, RequestBody, RuntimeLimits, Script,
-    Task,
+    DefaultOps, HttpMethod, HttpRequest, OperationsHandle, RequestBody, RuntimeLimits, Script, Task,
 };
 use openworkers_runtime_v8::{get_pool_stats, init_pool};
 use std::sync::Arc;

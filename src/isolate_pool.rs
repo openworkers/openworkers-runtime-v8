@@ -220,80 +220,57 @@ pub struct PooledIsolate {
 impl PooledIsolate {
     /// Execute closure with locked isolate (blocking)
     ///
-    /// Creates v8::Locker, calls closure, drops locker.
+    /// Creates v8::Locker (which handles enter/exit automatically), calls closure, drops locker.
     /// This is a blocking operation - use with_lock_async for async code.
     pub fn with_lock<F, R>(&self, f: F) -> R
     where
-        F: FnOnce(&v8::Isolate) -> R,
+        F: FnOnce(&mut v8::Isolate) -> R,
     {
         let mut entry = self.entry.blocking_lock();
 
-        // CRITICAL: Enter isolate for this thread (sets up V8's TLS)
-        // V8 uses Thread-Local Storage to track which isolate the current thread is using.
-        // Without this, V8 internal calls to Isolate::GetCurrent() will return nullptr → SEGFAULT
-        unsafe {
-            entry.isolate.as_isolate().enter();
-        }
-
-        // Create v8::Locker (locks V8 side for mutual exclusion)
-        let _locker = v8::Locker::new(entry.isolate.as_isolate());
-
-        // Update stats
+        // Update stats before creating Locker (to avoid double borrow)
         entry.total_requests += 1;
 
-        // Execute user closure
-        let result = f(entry.isolate.as_isolate());
+        // Create v8::Locker - handles enter/exit automatically via RAII
+        let mut locker = v8::Locker::new(&mut entry.isolate.isolate);
 
-        // CRITICAL: Exit isolate (cleanup V8's TLS for this thread)
-        // This must happen AFTER the locker is dropped
-        unsafe {
-            entry.isolate.as_isolate().exit();
-        }
-
-        result
+        // Execute user closure with mutable reference via DerefMut
+        f(&mut *locker)
     }
 
     /// Execute async closure with locked isolate
     ///
-    /// Creates v8::Locker, calls async closure, drops locker.
+    /// Creates v8::Locker (which handles enter/exit automatically), calls async closure, drops locker.
     /// This is the preferred method for async operations.
+    ///
+    /// Note: The Locker is held for the entire duration of the async operation,
+    /// so the isolate remains locked. This is safe because we use LocalSet (single-threaded).
     pub async fn with_lock_async<F, Fut, R>(&self, f: F) -> R
     where
-        F: FnOnce(&v8::Isolate) -> Fut,
+        F: FnOnce(&mut v8::Isolate) -> Fut,
         Fut: std::future::Future<Output = R>,
     {
         let mut entry = self.entry.lock().await;
 
-        // CRITICAL: Enter isolate for this thread (sets up V8's TLS)
-        // V8 uses Thread-Local Storage to track which isolate the current thread is using.
-        // Without this, V8 internal calls to Isolate::GetCurrent() will return nullptr → SEGFAULT
-        unsafe {
-            entry.isolate.as_isolate().enter();
-        }
-
-        // Create v8::Locker (locks V8 side for mutual exclusion)
-        let _locker = v8::Locker::new(entry.isolate.as_isolate());
-
-        // Update stats
+        // Update stats before creating Locker (to avoid double borrow)
         entry.total_requests += 1;
+        let total_requests = entry.total_requests;
+
+        // Create v8::Locker - handles enter/exit automatically via RAII
+        let mut locker = v8::Locker::new(&mut entry.isolate.isolate);
 
         log::trace!(
             "Isolate locked for worker {} (total_requests: {})",
             self.worker_id,
-            entry.total_requests
+            total_requests
         );
 
-        // Execute async user closure
-        let result = f(entry.isolate.as_isolate()).await;
+        // Execute async user closure with mutable reference via DerefMut
+        let result = f(&mut *locker).await;
 
         log::trace!("Isolate unlocked for worker {}", self.worker_id);
 
-        // CRITICAL: Exit isolate (cleanup V8's TLS for this thread)
-        // This must happen AFTER the locker is dropped
-        unsafe {
-            entry.isolate.as_isolate().exit();
-        }
-
+        // Locker drop will call exit() automatically here
         result
     }
 
