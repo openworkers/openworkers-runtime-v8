@@ -1,7 +1,7 @@
 //! Legacy thread-local isolate reuse.
 
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
 use v8;
 
 use crate::security::CustomAllocator;
@@ -27,16 +27,8 @@ impl SharedIsolate {
     /// This is expensive (~3-5ms) and should be done once at startup,
     /// not per-request.
     pub fn new(limits: RuntimeLimits) -> Self {
-        // Initialize V8 platform (once, globally) using OnceLock for safety
-        use std::sync::OnceLock;
-        static PLATFORM: OnceLock<v8::SharedRef<v8::Platform>> = OnceLock::new();
-
-        let platform = PLATFORM.get_or_init(|| {
-            let platform = v8::new_default_platform(0, false).make_shared();
-            v8::V8::initialize_platform(platform.clone());
-            v8::V8::initialize();
-            platform
-        });
+        // Get global V8 platform (initialized once, shared across all modules)
+        let platform = crate::platform::get_platform();
 
         // Memory limit tracking for ArrayBuffer allocations
         let memory_limit_hit = Arc::new(AtomicBool::new(false));

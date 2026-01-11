@@ -6,7 +6,7 @@ pub mod text_encoding;
 
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::{Notify, mpsc};
 use v8;
@@ -110,16 +110,8 @@ impl Runtime {
     ) {
         let limits = limits.unwrap_or_default();
 
-        // Initialize V8 platform (once, globally) using OnceLock for safety
-        use std::sync::OnceLock;
-        static PLATFORM: OnceLock<v8::SharedRef<v8::Platform>> = OnceLock::new();
-
-        let platform = PLATFORM.get_or_init(|| {
-            let platform = v8::new_default_platform(0, false).make_shared();
-            v8::V8::initialize_platform(platform.clone());
-            v8::V8::initialize();
-            platform
-        });
+        // Get global V8 platform (initialized once, shared across all modules)
+        let platform = crate::platform::get_platform();
 
         let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel();
         let (callback_tx, callback_rx) = mpsc::unbounded_channel();

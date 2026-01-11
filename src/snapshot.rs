@@ -14,16 +14,8 @@ pub struct SnapshotOutput {
 ///
 /// Note: Timers and Fetch are not included as they require runtime-specific state
 pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
-    // Initialize V8 platform if not already done
-    use std::sync::OnceLock;
-    static PLATFORM: OnceLock<v8::SharedRef<v8::Platform>> = OnceLock::new();
-
-    let _platform = PLATFORM.get_or_init(|| {
-        let platform = v8::new_default_platform(0, false).make_shared();
-        v8::V8::initialize_platform(platform.clone());
-        v8::V8::initialize();
-        platform
-    });
+    // Get global V8 platform (initialized once, shared across all modules)
+    let _platform = crate::platform::get_platform();
 
     // Create isolate with snapshot creator
     let mut snapshot_creator = v8::Isolate::snapshot_creator(None, None);

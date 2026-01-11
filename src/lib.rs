@@ -37,6 +37,7 @@ pub mod execution_context;
 pub mod execution_helpers;
 pub mod isolate_pool;
 pub mod locker_managed_isolate;
+pub mod platform;
 pub mod pooled_execution;
 pub mod runtime;
 pub mod security;
