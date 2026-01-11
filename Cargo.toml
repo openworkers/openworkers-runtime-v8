@@ -12,7 +12,7 @@ openworkers-core = { git = "https://github.com/openworkers/openworkers-core", ta
 
 # V8 JavaScript engine (v8 is the new name for rusty_v8)
 # v8 = "142.2.0"
-v8 = { git = "https://github.com/max-lt/rusty_v8.git", tag = "v142.2.0-locker.6", features = ["v8_enable_pointer_compression"] }
+v8 = { path = "/Users/max/Documents/forks/rusty_v8", features = ["v8_enable_pointer_compression"] }
 
 # Async runtime
 tokio = { version = "1.49.0", features = ["full"] }
@@ -33,6 +33,9 @@ bytes = { version = "1.11", features = ["serde"] }
 ring = "0.17"
 uuid = { version = "1", features = ["v4"] }
 
+# LRU cache for isolate pool
+lru = "0.12"
+
 # CPU time measurement (Unix only)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.179"
@@ -46,3 +49,8 @@ tokio-stream = "0.1"
 
 [dev-dependencies]
 ntest = "0.9.5"
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "isolate_pool_bench"
+harness = false

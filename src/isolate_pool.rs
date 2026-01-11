@@ -39,6 +39,15 @@
 //! - Allows safe sharing of isolates across threads
 //! - Prevents `v8::OwnedIsolate` LIFO drop constraint
 //!
+//! **Critical: enter()/exit() Requirement:**
+//! - V8 uses Thread-Local Storage (TLS) for performance optimization
+//! - TLS tracks: `g_current_isolate`, `g_thread_heap`, `g_handle_scope`
+//! - MUST call `isolate.enter()` before using isolate on a thread
+//! - MUST call `isolate.exit()` after finishing work on the isolate
+//! - Without enter(): V8 calls `Isolate::GetCurrent()` → nullptr → SEGFAULT
+//! - One thread can switch between multiple isolates, but only ONE at a time
+//! - Pattern: `enter()` → lock → work → unlock → `exit()`
+//!
 //! ## Public API
 //!
 //! Simple high-level API via [`crate::execute_pooled`]:
@@ -213,28 +222,41 @@ impl PooledIsolate {
     ///
     /// Creates v8::Locker, calls closure, drops locker.
     /// This is a blocking operation - use with_lock_async for async code.
-    #[cfg(feature = "v8")]
     pub fn with_lock<F, R>(&self, f: F) -> R
     where
         F: FnOnce(&v8::Isolate) -> R,
     {
         let mut entry = self.entry.blocking_lock();
 
-        // Create v8::Locker (locks V8 side)
+        // CRITICAL: Enter isolate for this thread (sets up V8's TLS)
+        // V8 uses Thread-Local Storage to track which isolate the current thread is using.
+        // Without this, V8 internal calls to Isolate::GetCurrent() will return nullptr → SEGFAULT
+        unsafe {
+            entry.isolate.as_isolate().enter();
+        }
+
+        // Create v8::Locker (locks V8 side for mutual exclusion)
         let _locker = v8::Locker::new(entry.isolate.as_isolate());
 
         // Update stats
         entry.total_requests += 1;
 
         // Execute user closure
-        f(entry.isolate.as_isolate())
+        let result = f(entry.isolate.as_isolate());
+
+        // CRITICAL: Exit isolate (cleanup V8's TLS for this thread)
+        // This must happen AFTER the locker is dropped
+        unsafe {
+            entry.isolate.as_isolate().exit();
+        }
+
+        result
     }
 
     /// Execute async closure with locked isolate
     ///
     /// Creates v8::Locker, calls async closure, drops locker.
     /// This is the preferred method for async operations.
-    #[cfg(feature = "v8")]
     pub async fn with_lock_async<F, Fut, R>(&self, f: F) -> R
     where
         F: FnOnce(&v8::Isolate) -> Fut,
@@ -242,7 +264,14 @@ impl PooledIsolate {
     {
         let mut entry = self.entry.lock().await;
 
-        // Create v8::Locker
+        // CRITICAL: Enter isolate for this thread (sets up V8's TLS)
+        // V8 uses Thread-Local Storage to track which isolate the current thread is using.
+        // Without this, V8 internal calls to Isolate::GetCurrent() will return nullptr → SEGFAULT
+        unsafe {
+            entry.isolate.as_isolate().enter();
+        }
+
+        // Create v8::Locker (locks V8 side for mutual exclusion)
         let _locker = v8::Locker::new(entry.isolate.as_isolate());
 
         // Update stats
@@ -258,6 +287,12 @@ impl PooledIsolate {
         let result = f(entry.isolate.as_isolate()).await;
 
         log::trace!("Isolate unlocked for worker {}", self.worker_id);
+
+        // CRITICAL: Exit isolate (cleanup V8's TLS for this thread)
+        // This must happen AFTER the locker is dropped
+        unsafe {
+            entry.isolate.as_isolate().exit();
+        }
 
         result
     }
@@ -346,7 +381,7 @@ pub async fn get_pool_stats() -> PoolStats {
     get_pool().stats().await
 }
 
-#[cfg(all(test, feature = "v8"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -355,10 +390,15 @@ mod tests {
         let pool = IsolatePool::new(10, RuntimeLimits::default());
 
         let pooled = pool.acquire("worker_1").await;
-        pooled.with_lock(|isolate| {
-            // Isolate is locked and usable
-            assert!(!isolate.is_execution_terminating());
-        });
+        pooled
+            .with_lock_async(|isolate| {
+                // Isolate is locked and usable
+                let is_terminating = isolate.is_execution_terminating();
+                async move {
+                    assert!(!is_terminating);
+                }
+            })
+            .await;
         // Drop releases back to pool
     }
 
@@ -404,29 +444,41 @@ mod tests {
 
     #[tokio::test]
     async fn test_pool_concurrent_access() {
-        let pool = Arc::new(IsolatePool::new(10, RuntimeLimits::default()));
+        use tokio::task::LocalSet;
 
-        // Multiple threads accessing different workers
-        let handles: Vec<_> = (0..5)
-            .map(|i| {
-                let pool = Arc::clone(&pool);
-                tokio::spawn(async move {
-                    let worker_id = format!("worker_{}", i);
-                    let pooled = pool.acquire(&worker_id).await;
-                    pooled.with_lock(|_isolate| {
-                        // Simulate work
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    });
-                })
+        let local = LocalSet::new();
+        local
+            .run_until(async {
+                let pool = Arc::new(IsolatePool::new(10, RuntimeLimits::default()));
+
+                // Multiple tasks accessing different workers (on same thread via LocalSet)
+                let handles: Vec<_> = (0..5)
+                    .map(|i| {
+                        let pool = Arc::clone(&pool);
+                        tokio::task::spawn_local(async move {
+                            let worker_id = format!("worker_{}", i);
+                            let pooled = pool.acquire(&worker_id).await;
+                            pooled
+                                .with_lock_async(|_isolate| {
+                                    // Simulate work
+                                    async move {
+                                        tokio::time::sleep(std::time::Duration::from_millis(10))
+                                            .await;
+                                    }
+                                })
+                                .await;
+                        })
+                    })
+                    .collect();
+
+                for handle in handles {
+                    handle.await.unwrap();
+                }
+
+                let stats = pool.stats().await;
+                assert_eq!(stats.cached, 5);
             })
-            .collect();
-
-        for handle in handles {
-            handle.await.unwrap();
-        }
-
-        let stats = pool.stats().await;
-        assert_eq!(stats.cached, 5);
+            .await;
     }
 
     #[tokio::test]
@@ -436,9 +488,12 @@ mod tests {
         // Same worker, multiple sequential requests
         for _ in 0..10 {
             let pooled = pool.acquire("worker_1").await;
-            pooled.with_lock(|_isolate| {
-                // Simulate work
-            });
+            pooled
+                .with_lock_async(|_isolate| {
+                    // Simulate work
+                    async move {}
+                })
+                .await;
         }
 
         // Should still have only 1 isolate in cache

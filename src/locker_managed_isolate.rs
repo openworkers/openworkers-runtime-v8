@@ -162,10 +162,20 @@ mod tests {
         let limits = RuntimeLimits::default();
         let isolate = LockerManagedIsolate::new(limits);
 
+        // CRITICAL: Enter isolate before locking (sets up V8's TLS)
+        unsafe {
+            isolate.as_isolate().enter();
+        }
+
         // Lock the isolate
         let _locker = v8::Locker::new(isolate.as_isolate());
 
         // Now we can use it (in a real scenario, create HandleScope, etc.)
         // For this test, just verify it doesn't crash
+
+        // CRITICAL: Exit isolate (cleanup V8's TLS)
+        unsafe {
+            isolate.as_isolate().exit();
+        }
     }
 }
