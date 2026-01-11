@@ -1,10 +1,10 @@
-# Legacy vs Shared Pool vs Thread-Pinned Architecture
+# Legacy vs Shared Pool vs Thread-Pinned Pool Architecture
 
 ## Overview
 
-This document compares three architectures for managing V8 isolates in a multi-threaded runtime:
+This document compares three architectures for managing V8 isolates in OpenWorkers runtime-v8:
 
-1. **Legacy**: Create a new isolate for each request (no pooling)
+1. **Legacy (Worker)**: Create a new isolate for each request (no pooling)
 2. **Shared Pool**: A global pool of isolates protected by a mutex, accessible by any thread
 3. **Thread-Pinned Pool**: Each thread owns its own local pool, no cross-thread synchronization
 
@@ -60,39 +60,60 @@ This document compares three architectures for managing V8 isolates in a multi-t
  (Each thread owns its pool - zero contention)
 ```
 
-## Benchmark Results
+## Benchmark Results (runtime-v8)
+
+These benchmarks were run with the actual runtime-v8 implementation using `Worker`, `execute_pooled`, and `execute_pinned`.
 
 ### Complete Comparison Table
 
+| Test | Legacy (Worker) | Shared Pool | Thread-Pinned | Winner |
+|------|-----------------|-------------|---------------|--------|
+| CPU-bound (no I/O) | 400 req/s (2.50ms) | 578 req/s (1.73ms) | 556 req/s (1.80ms) | Shared +44% vs Legacy |
+| Standard (5ms I/O) | 118 req/s (8.47ms) | 126 req/s (7.95ms) | 126 req/s (7.92ms) | ~Equal |
+| Warm Cache | N/A | 1,551 req/s (0.64ms) | **2,077 req/s (0.48ms)** | **Pinned +34%** |
+
+### Key Observations
+
+1. **Both pool architectures beat Legacy by ~40%** in CPU-bound scenarios
+2. **Thread-Pinned wins on warm cache by 34%** due to simpler code path
+3. **With I/O, all architectures are similar** - I/O dominates the latency
+
+### Why Thread-Pinned Wins on Warm Cache
+
+The Thread-Pinned pool has a simpler code path:
+- No global mutex acquisition for pool lookup
+- Direct thread-local access to LRU cache
+- Fewer lock acquisitions overall
+
+```
+Shared Pool warm path:
+  1. Lock global mutex
+  2. LRU cache lookup
+  3. Get Arc<Mutex<Entry>>
+  4. Unlock global mutex
+  5. Lock entry mutex
+  6. Execute
+  7. Unlock entry
+
+Thread-Pinned warm path:
+  1. Thread-local access (no lock)
+  2. LRU cache lookup
+  3. Get Arc<Mutex<Entry>>
+  4. Lock entry mutex
+  5. Execute
+  6. Unlock entry
+```
+
+### Synthetic Benchmark Results (locker-example)
+
+For comparison, here are results from synthetic benchmarks with raw V8 (no runtime overhead):
+
 | Test | Config | Legacy | Shared | Pinned | Winner |
 |------|--------|--------|--------|--------|--------|
-| Standard | 4t/4i/2ms I/O | 1,281 | 1,668 | **1,722** | Pinned +34% vs Legacy |
-| More threads | 8t/4i/2ms I/O | 2,413 | 3,553 | **3,590** | Pinned +49% vs Legacy |
 | CPU-bound | 8t/4i/0ms I/O | 9,945 | 5,423 ❌ | **10,450** | Pinned +5% vs Legacy |
-| High contention | 8t/2i/2ms I/O | 3,341 | 3,649 | **3,721** | Pinned +11% vs Legacy |
-| I/O heavy | 4t/2i/20ms I/O | 283 | 266 | **288** | ~Equal |
-| **Extreme** | 8t/1i/0ms I/O | 10,083 | 1,094 ❌❌ | **19,511** | 🔥 Pinned **18x** vs Shared |
+| Extreme | 8t/1i/0ms I/O | 10,083 | 1,094 ❌❌ | **19,511** | 🔥 Pinned **18x** vs Shared |
 
-*(throughput in req/s, t=threads, i=isolates)*
-
-### Isolate Count Variation (8 threads, 2ms I/O)
-
-| Isolates | Legacy | Shared | Pinned | Contention (Shared) |
-|----------|--------|--------|--------|---------------------|
-| 1 | 3,179 | 3,179 | **3,697** | 61.88% |
-| 2 | 3,473 | 3,473 | **3,701** | 23.69% |
-| 4 | 3,602 | 3,602 | **3,702** | 4.25% |
-| 8 | 3,675 | 3,675 | **3,736** | 0.12% |
-
-### I/O Delay Variation (8 threads, 2 isolates)
-
-| I/O Delay | Legacy | Shared | Pinned | Contention (Shared) |
-|-----------|--------|--------|--------|---------------------|
-| **0ms** | 10,083 | 2,887 ❌ | **20,810** | **97.12%** |
-| 1ms | 5,360 | 5,360 | **5,321** | 27.44% |
-| 5ms | 1,903 | 1,903 | **1,946** | 17.44% |
-| 10ms | 1,067 | 1,067 | **1,049** | 13.63% |
-| 20ms | 576 | 576 | **606** | 10.31% |
+**Critical finding**: Under extreme contention (1 isolate for 8 threads), Shared Pool becomes **9x slower than Legacy**!
 
 ## Key Findings
 
@@ -116,24 +137,15 @@ Extreme case: 8 threads, 1 shared isolate, CPU-bound (0ms I/O)
 |----------|-----------|-----------|
 | Standard workload | +30-50% faster | +3-5% faster |
 | CPU-bound | +5% faster | +50-200% faster |
+| Warm cache | - | +34% faster |
 | High contention | +10% faster | +10-1800% faster |
-| I/O-heavy | ~Equal | ~Equal |
 
-### 3. The Contention Threshold
-
-```
-Contention < 5%   → All architectures perform similarly
-Contention 5-30%  → Thread-pinned gains 5-15%
-Contention > 50%  → Thread-pinned gains 50-1800%
-Contention > 90%  → Shared becomes WORSE than Legacy
-```
-
-### 4. I/O Reduces Contention Naturally
+### 3. I/O Reduces Contention Naturally
 
 More I/O wait time = less time holding the isolate = lower contention.
 
-- **0ms I/O (CPU-bound)**: 97% contention → Shared is catastrophic
-- **20ms I/O**: 10% contention → All architectures similar
+- **0ms I/O (CPU-bound)**: High contention → Shared degrades
+- **20ms I/O**: Low contention → All architectures similar
 
 ## Security Considerations
 
@@ -148,9 +160,10 @@ Beyond performance, **thread-pinned is critical for multi-tenant security**:
 
 ### Thread-Pinned Benefits
 
-With sticky routing (`hash(worker_id) % num_threads → thread`):
+With sticky routing (`compute_thread_id(worker_id, num_threads)`):
 
-```
+```rust
+// Same worker always goes to same thread
 Tenant A (worker_id: "abc") → hash("abc") % 8 = Thread 2
 Tenant B (worker_id: "xyz") → hash("xyz") % 8 = Thread 5
 
@@ -167,12 +180,11 @@ Thread 5: [isolates dedicated to Tenant B]
 | Aspect | Legacy | Shared Pool | Thread-Pinned |
 |--------|--------|-------------|---------------|
 | **Isolate reuse** | ❌ None | ✅ Yes | ✅ Yes |
-| **Lock contention** | ✅ None | ❌ Can be severe | ✅ None |
+| **Lock contention** | ✅ None | ⚠️ Global mutex | ✅ None (thread-local) |
 | **Memory efficiency** | ❌ High (new isolate/req) | ✅ Low | ⚠️ Medium |
-| **Performance (low load)** | ⚠️ OK | ✅ Good | ✅ Good |
-| **Performance (high load)** | ⚠️ OK | ❌ Can degrade | ✅ Excellent |
-| **Latency predictability** | ⚠️ Variable (GC) | ❌ Variable (lock) | ✅ Consistent |
-| **Security isolation** | ✅ Strong | ❌ Weak | ✅ Strong |
+| **Performance (cold)** | ❌ Slow (~2.5ms) | ✅ Fast (~1.7ms) | ✅ Fast (~1.8ms) |
+| **Performance (warm)** | ❌ N/A | ✅ Good (0.64ms) | ✅ Best (0.48ms) |
+| **Security isolation** | ✅ Strong | ❌ Weak | ✅ Strong (sticky routing) |
 | **Implementation** | ✅ Simple | ✅ Simple | ⚠️ Needs routing |
 
 ## Recommendations
@@ -182,17 +194,16 @@ Thread 5: [isolates dedicated to Tenant B]
 **Use Thread-Pinned Pool** because:
 
 1. **Security is non-negotiable** - Tenant isolation is critical
-2. **Predictable latency** - Important for SLA compliance
-3. **No performance cliff** - Shared pool can become catastrophic under load
-4. **CPU-bound workers exist** - Some workers do heavy computation
-5. **Scale horizontally** - Add more threads/machines, not more shared contention
+2. **Best warm performance** - 34% faster than Shared Pool
+3. **Predictable latency** - No lock contention = consistent P99
+4. **No performance cliff** - Shared pool can degrade under contention
+5. **CPU-bound workers exist** - Some workers do heavy computation
 
 ### When Shared Pool Might Be OK
 
 Only if ALL of these conditions are met:
 - Single-tenant environment (no security concerns)
 - Primarily I/O-bound workloads (>10ms average I/O per request)
-- `isolates >= threads` (low contention guaranteed)
 - Memory is extremely constrained
 
 ### When Legacy Might Be OK
@@ -202,23 +213,24 @@ Only for:
 - Very low traffic (<10 req/s)
 - When you need perfect isolation and don't care about latency
 
-## Implementation Strategy
+## Implementation
 
-### Thread-Pinned Pool
+### Thread-Pinned Pool Usage
 
 ```rust
-// Sticky routing: same worker always goes to same thread
-let thread_id = hash(worker_id) % num_threads;
+use openworkers_runtime_v8::{
+    init_pinned_pool, execute_pinned, compute_thread_id,
+    RuntimeLimits
+};
 
-// Each thread has its own pool
-thread_local! {
-    static LOCAL_POOL: RefCell<Vec<Isolate>> = RefCell::new(vec![]);
-}
+// Initialize once at startup
+init_pinned_pool(100, RuntimeLimits::default());  // 100 isolates per thread
 
-// Acquire from LOCAL pool (no mutex!)
-fn acquire() -> Isolate {
-    LOCAL_POOL.with(|pool| pool.borrow_mut().pop())
-}
+// Sticky routing for security (same worker → same thread)
+let thread_id = compute_thread_id("worker-id", num_threads);
+
+// Route request to thread_id, then execute
+execute_pinned("worker-id", script, ops, task).await?;
 ```
 
 ### Configuration Guidelines
@@ -226,33 +238,23 @@ fn acquire() -> Isolate {
 | Metric | Recommendation |
 |--------|----------------|
 | Threads | Match CPU cores |
-| Isolates per thread | 1-2 (start with 1) |
-| Routing | `hash(worker_id) % threads` |
-| Fallback | Consider work-stealing for extreme imbalance |
+| Isolates per thread | 50-100 (start with 100) |
+| Routing | `compute_thread_id(worker_id, threads)` |
 
 ## Running the Benchmarks
 
 ```bash
-# Compare all three architectures
-cargo run --release --bin thread-pinned
+# Legacy benchmarks (Worker - new isolate per request)
+cargo test --test three_arch_bench bench_legacy -- --nocapture --test-threads=1
 
-# Custom parameters
-cargo run --release --bin thread-pinned -- \
-  --threads 8 \
-  --isolates 4 \
-  --tasks 200 \
-  --io-delay 5
+# Shared Pool benchmarks (execute_pooled - global mutex LRU cache)
+cargo test --test three_arch_bench bench_shared -- --nocapture --test-threads=1
 
-# CPU-bound stress test
-cargo run --release --bin thread-pinned -- \
-  --threads 8 --isolates 2 --tasks 500 --io-delay 0
-
-# Skip legacy (it's slower)
-cargo run --release --bin thread-pinned -- --skip-legacy
-
-# Only test specific architecture
-cargo run --release --bin thread-pinned -- --pinned-only
+# Thread-Pinned Pool benchmarks (execute_pinned - thread-local, zero contention)
+cargo test --test three_arch_bench bench_pinned -- --nocapture --test-threads=1
 ```
+
+**Note:** Run each architecture separately due to V8 state conflicts.
 
 ## Conclusion
 
@@ -261,14 +263,15 @@ cargo run --release --bin thread-pinned -- --pinned-only
 | Architecture | Recommendation |
 |--------------|----------------|
 | **Legacy** | ❌ Avoid (slow, no reuse) |
-| **Shared Pool** | ⚠️ Risky (can be worse than Legacy!) |
+| **Shared Pool** | ⚠️ Risky (can degrade under contention) |
 | **Thread-Pinned** | ✅ **Recommended** (best performance + security) |
 
 ### Key Takeaways
 
-1. **Shared Pool is a trap** - It looks good on paper but can perform worse than no pooling at all under contention
-2. **Thread-Pinned has no downsides** - Always equal or better than alternatives
-3. **Security comes free** - Thread-pinned naturally provides tenant isolation
-4. **Predictability matters** - No lock contention = consistent latency
+1. **Thread-Pinned has the best warm performance** - 34% faster than Shared Pool
+2. **Both pools beat Legacy by ~40%** - Isolate reuse matters
+3. **Shared Pool can be a trap** - Degrades to worse than Legacy under contention
+4. **Security comes free with Thread-Pinned** - Sticky routing provides tenant isolation
+5. **Predictability matters** - No lock contention = consistent latency
 
-For a multi-tenant runtime like OpenWorkers, **Thread-Pinned is the only sensible choice**.
+For a multi-tenant runtime like OpenWorkers, **Thread-Pinned is the clear choice**.
