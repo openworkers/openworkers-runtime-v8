@@ -75,25 +75,28 @@ ctx.exec(task).await?;
 
 ---
 
-## Thread-Pinned Pool (Alternative)
+## Thread-Pinned Pool (Recommended for Multi-Tenant)
 
-For multi-tenant security, each thread owns its local pool.
+For multi-tenant security, each thread owns its local pool with per-owner isolation.
 
 ```rust
-use openworkers_runtime_v8::{init_pinned_pool, execute_pinned, compute_thread_id};
+use openworkers_runtime_v8::{init_pinned_pool_full, execute_pinned};
 
-init_pinned_pool(100, limits);  // 100 isolates per thread
+// 100 isolates/thread, max 2/owner, queue of 10, 5s timeout
+init_pinned_pool_full(100, Some(2), 10, 5000, limits);
 
-// Sticky routing: same worker → same thread
-let thread_id = compute_thread_id("worker-id", num_threads);
-execute_pinned("worker-id", script, ops, task).await?;
+// Round-robin routing at caller level (not sticky!)
+// Same owner can use isolates on ANY thread
+execute_pinned("owner-id", script, ops, task).await?;
 ```
 
-**Benefits over shared pool:**
+**Benefits:**
 
-- Zero cross-thread contention
-- Better tenant isolation (sticky routing)
-- 34% faster warm cache
+- Zero cross-thread contention (thread-local pools)
+- Per-owner isolation (isolates tagged with owner_id)
+- Per-owner concurrency limits (prevents monopolization)
+- FIFO queue with backpressure (503 when overloaded)
+- Round-robin distribution (no hot spots)
 
 **Trade-off:** Higher memory (isolates duplicated across threads).
 
