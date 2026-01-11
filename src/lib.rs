@@ -1,9 +1,11 @@
+pub mod locker_managed_isolate;
 pub mod runtime;
 pub mod security;
 pub mod snapshot;
 pub mod worker;
 
 // Core API
+pub use locker_managed_isolate::LockerManagedIsolate;
 pub use runtime::Runtime;
 pub use worker::Worker;
 
