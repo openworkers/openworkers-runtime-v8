@@ -1284,3 +1284,22 @@ pub fn setup_response(scope: &mut v8::PinScope) {
     let script = v8::Script::compile(scope, code_str, None).unwrap();
     script.run(scope).unwrap();
 }
+
+/// Remove dangerous globals that could be used for timing attacks (Spectre)
+///
+/// SharedArrayBuffer and Atomics can be used to create high-precision timers
+/// for side-channel attacks. Since we don't expose Web Workers (multi-threaded JS),
+/// these APIs have no legitimate use case and are removed for security.
+pub fn setup_security_restrictions(scope: &mut v8::PinScope) {
+    let code = r#"
+        // Remove SharedArrayBuffer - can be used to create high-precision timers
+        delete globalThis.SharedArrayBuffer;
+
+        // Remove Atomics - only useful with SharedArrayBuffer, potential for timing attacks
+        delete globalThis.Atomics;
+    "#;
+
+    let code_str = v8::String::new(scope, code).unwrap();
+    let script = v8::Script::compile(scope, code_str, None).unwrap();
+    script.run(scope).unwrap();
+}

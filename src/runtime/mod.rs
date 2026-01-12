@@ -150,12 +150,14 @@ impl Runtime {
             let params = v8::CreateParams::default()
                 .heap_limits(heap_initial, heap_max)
                 .array_buffer_allocator(array_buffer_allocator.into_v8_allocator())
-                .snapshot_blob((*snapshot_data).into());
+                .snapshot_blob((*snapshot_data).into())
+                .allow_atomics_wait(false); // Security: prevent Atomics.wait() from blocking
             v8::Isolate::new(params)
         } else {
             let params = v8::CreateParams::default()
                 .heap_limits(heap_initial, heap_max)
-                .array_buffer_allocator(array_buffer_allocator.into_v8_allocator());
+                .array_buffer_allocator(array_buffer_allocator.into_v8_allocator())
+                .allow_atomics_wait(false); // Security: prevent Atomics.wait() from blocking
             v8::Isolate::new(params)
         };
 

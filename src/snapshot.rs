@@ -34,6 +34,9 @@ pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
         // Setup global aliases (self, global) for browser/Node.js compatibility
         crate::runtime::bindings::setup_global_aliases(scope);
 
+        // Remove dangerous globals (SharedArrayBuffer, Atomics) for security
+        crate::runtime::bindings::setup_security_restrictions(scope);
+
         // Setup TextEncoder/TextDecoder (pre-compiled in snapshot - pure JS)
         crate::runtime::text_encoding::setup_text_encoding(scope);
 
