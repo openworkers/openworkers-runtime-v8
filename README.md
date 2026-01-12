@@ -41,6 +41,10 @@ execute_pooled("worker-id", script, ops, task).await?;
 - [Isolate Pool](docs/isolate_pool.md) — Pool implementation details
 - [Streams](docs/streams.md) — Streaming architecture
 
+## Development Setup
+
+This crate uses [openworkers-v8](https://crates.io/crates/openworkers-v8), a fork of rusty_v8 with Locker/UnenteredIsolate support for isolate pooling. V8 binaries are downloaded automatically during build.
+
 ## Testing
 
 ```bash

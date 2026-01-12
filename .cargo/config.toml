@@ -1,4 +1,7 @@
 [env]
-RUSTY_V8_ARCHIVE = "/tmp/rusty_v8_binaries/librusty_v8.a"
-RUSTY_V8_SRC_BINDING_PATH = "/tmp/rusty_v8_binaries/src_binding.rs"
+# V8 binaries are now downloaded automatically by openworkers-v8 from crates.io
+# For local dev with path dependency, you can set:
+# RUSTY_V8_ARCHIVE = "/path/to/librusty_v8.a"
+# RUSTY_V8_SRC_BINDING_PATH = "/path/to/src_binding.rs"
+
 RUNTIME_SNAPSHOT_PATH = { value = "/tmp/openworkers-runtime-v8-snapshot.bin", relative = false }

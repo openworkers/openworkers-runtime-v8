@@ -11,7 +11,9 @@ license = "MIT"
 openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.8.1" }
 
 # V8 JavaScript engine (fork with UnenteredIsolate + Locker support for pooling)
-v8 = { path = "/Users/max/Documents/forks/rusty_v8", features = ["v8_enable_pointer_compression"] }
+# Local dev: v8 = { path = "../rusty_v8", features = ["v8_enable_pointer_compression"] }
+# After PR merge: v8 = { version = "...", features = ["v8_enable_pointer_compression"] }
+v8 = { package = "openworkers-v8", version = "142.2.1", features = ["v8_enable_pointer_compression"] }
 
 # Async runtime
 tokio = { version = "1.49.0", features = ["full"] }

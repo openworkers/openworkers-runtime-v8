@@ -946,6 +946,7 @@ dependencies = [
  "lru",
  "ntest",
  "openworkers-core",
+ "openworkers-v8",
  "rand",
  "ring",
  "serde",
@@ -955,7 +956,23 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "uuid",
- "v8",
+]
+
+[[package]]
+name = "openworkers-v8"
+version = "142.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "421f7f44b31929f74332785574d823be340b97d4c8864967f6de0e6b2ac3f590"
+dependencies = [
+ "bindgen",
+ "bitflags",
+ "fslock",
+ "gzip-header",
+ "home",
+ "miniz_oxide",
+ "paste",
+ "temporal_capi",
+ "which",
 ]
 
 [[package]]
@@ -1579,21 +1596,6 @@ dependencies = [
  "getrandom 0.3.4",
  "js-sys",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "v8"
-version = "142.2.0"
-dependencies = [
- "bindgen",
- "bitflags",
- "fslock",
- "gzip-header",
- "home",
- "miniz_oxide",
- "paste",
- "temporal_capi",
- "which",
 ]
 
 [[package]]
