@@ -30,13 +30,39 @@ platform.rs                 ← V8 Platform (singleton, once per process)
 
 ## Execution Modes
 
-| Mode              | API                       | Performance | Use Case             |
-| ----------------- | ------------------------- | ----------- | -------------------- |
-| **Worker**        | `Worker::new()`           | ~2-3ms/req  | Max isolation, tests |
-| **SharedIsolate** | `ExecutionContext::new()` | ~100µs/req  | Thread-local, legacy |
-| **IsolatePool**   | `execute_pooled()`        | <10µs warm  | **Production**       |
+| Mode              | API                | Performance | Use Case             |
+| ----------------- | ------------------ | ----------- | -------------------- |
+| **Legacy**        | `Worker::new()`    | ~700µs/req  | Max isolation, tests |
+| **Shared Pool**   | `execute_pooled()` | ~200µs/req  | Single-thread        |
+| **Thread-Pinned** | `execute_pinned()` | ~170µs/req  | **Production**       |
 
 See [execution_modes.md](./execution_modes.md) for details.
+
+## Benchmarks
+
+Multi-threaded benchmark (4 OS threads × 20 requests = 80 total):
+
+```
+┌─────────────────┬──────────────┬─────────────────┐
+│ Architecture    │  Throughput  │ vs Legacy       │
+├─────────────────┼──────────────┼─────────────────┤
+│ Legacy          │  1,474 req/s │ baseline        │
+│ Shared Pool     │  4,851 req/s │ +229%           │
+│ Thread-Pinned   │  5,766 req/s │ +291%           │
+└─────────────────┴──────────────┴─────────────────┘
+```
+
+**Key insights:**
+
+- **Pooling = ~4x faster** than creating new isolates per request
+- **Thread-Pinned** beats Shared Pool by +19% (no mutex contention)
+- Under high contention (8 threads), Thread-Pinned wins by **+167%**
+
+Run benchmarks with:
+
+```bash
+cargo test --test multithread_bench -- --nocapture --test-threads=1
+```
 
 ## Event Loop
 

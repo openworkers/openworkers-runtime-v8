@@ -35,11 +35,11 @@ ring = "0.17"
 uuid = { version = "1", features = ["v4"] }
 
 # LRU cache for isolate pool
-lru = "0.12"
+lru = "0.16.3"
 
 # CPU time measurement (Unix only)
 [target.'cfg(unix)'.dependencies]
-libc = "0.2.179"
+libc = "0.2.180"
 
 # Signal handling (for CPU time enforcement on Linux)
 [target.'cfg(target_os = "linux")'.dependencies]

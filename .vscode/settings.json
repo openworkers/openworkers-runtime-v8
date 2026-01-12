@@ -2,12 +2,15 @@
   "cSpell.words": [
     "actix",
     "arraybuffer",
+    "libc",
     "microtask",
     "microtasks",
+    "ntest",
     "oneshot",
     "openworkers",
     "reqwest",
     "rustls",
-    "serde"
+    "serde",
+    "usize"
   ]
 }
