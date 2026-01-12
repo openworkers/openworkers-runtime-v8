@@ -826,8 +826,10 @@ impl Worker {
                         let stream_manager = self.runtime.stream_manager.clone();
 
                         // Spawn task to convert StreamChunk -> Result<Bytes, String>
+                        // IMPORTANT: Use tokio::spawn (not spawn_local) so this task survives
+                        // when the LocalSet is dropped (production pattern with thread-pinned pool)
                         // Uses select! to detect client disconnect immediately via tx.closed()
-                        tokio::task::spawn_local(async move {
+                        tokio::spawn(async move {
                             let mut receiver = receiver;
 
                             loop {

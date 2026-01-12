@@ -572,34 +572,11 @@ impl ExecutionContext {
                     }
                 }
                 CallbackMessage::FetchStreamingSuccess(_, meta, stream_id) => {
+                    use crate::runtime::callback_handlers;
+
                     if let Some(callback_global) = fetch_callback {
                         let meta_obj = v8::Object::new(scope);
-
-                        // status
-                        let status_key = v8::String::new(scope, "status").unwrap();
-                        let status_val = v8::Number::new(scope, meta.status as f64);
-                        meta_obj.set(scope, status_key.into(), status_val.into());
-
-                        // statusText
-                        let status_text_key = v8::String::new(scope, "statusText").unwrap();
-                        let status_text_val = v8::String::new(scope, &meta.status_text).unwrap();
-                        meta_obj.set(scope, status_text_key.into(), status_text_val.into());
-
-                        // headers
-                        let headers_obj = v8::Object::new(scope);
-                        for (key, value) in &meta.headers {
-                            let key_v8 = v8::String::new(scope, key).unwrap();
-                            let value_v8 = v8::String::new(scope, value).unwrap();
-                            headers_obj.set(scope, key_v8.into(), value_v8.into());
-                        }
-                        let headers_key = v8::String::new(scope, "headers").unwrap();
-                        meta_obj.set(scope, headers_key.into(), headers_obj.into());
-
-                        // streamId
-                        let stream_id_key = v8::String::new(scope, "streamId").unwrap();
-                        let stream_id_val = v8::Number::new(scope, stream_id as f64);
-                        meta_obj.set(scope, stream_id_key.into(), stream_id_val.into());
-
+                        callback_handlers::populate_fetch_meta(scope, meta_obj, &meta, stream_id);
                         let callback: v8::Local<v8::Function> =
                             v8::Local::new(scope, &callback_global);
                         let recv = v8::undefined(scope);
@@ -607,61 +584,76 @@ impl ExecutionContext {
                     }
                 }
                 CallbackMessage::StreamChunk(callback_id, chunk) => {
-                    // Stream read result - call the JavaScript callback with the chunk
+                    use crate::runtime::callback_handlers;
+
                     let callback_opt = {
                         let mut cbs = self.stream_callbacks.lock().unwrap();
                         cbs.remove(&callback_id)
                     };
 
                     if let Some(callback_global) = callback_opt {
+                        let result_obj = v8::Object::new(scope);
+                        callback_handlers::populate_stream_chunk_result(scope, result_obj, chunk);
                         let callback = v8::Local::new(scope, &callback_global);
                         let recv = v8::undefined(scope);
-
-                        // Create result object: {done: boolean, value?: Uint8Array, error?: string}
-                        let result_obj = v8::Object::new(scope);
-
-                        use crate::runtime::stream_manager;
-                        match chunk {
-                            stream_manager::StreamChunk::Data(bytes) => {
-                                // {done: false, value: Uint8Array}
-                                let done_key = v8::String::new(scope, "done").unwrap();
-                                let done_val = v8::Boolean::new(scope, false);
-                                result_obj.set(scope, done_key.into(), done_val.into());
-
-                                // Create Uint8Array from bytes using backing store transfer
-                                let vec = bytes.to_vec();
-                                let len = vec.len();
-                                let backing_store =
-                                    v8::ArrayBuffer::new_backing_store_from_vec(vec);
-                                let array_buffer = v8::ArrayBuffer::with_backing_store(
-                                    scope,
-                                    &backing_store.make_shared(),
-                                );
-                                let uint8_array =
-                                    v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
-
-                                let value_key = v8::String::new(scope, "value").unwrap();
-                                result_obj.set(scope, value_key.into(), uint8_array.into());
-                            }
-                            stream_manager::StreamChunk::Done => {
-                                // {done: true}
-                                let done_key = v8::String::new(scope, "done").unwrap();
-                                let done_val = v8::Boolean::new(scope, true);
-                                result_obj.set(scope, done_key.into(), done_val.into());
-                            }
-                            stream_manager::StreamChunk::Error(err_msg) => {
-                                // {error: string}
-                                let error_key = v8::String::new(scope, "error").unwrap();
-                                let error_val = v8::String::new(scope, &err_msg).unwrap();
-                                result_obj.set(scope, error_key.into(), error_val.into());
-                            }
-                        }
-
                         callback.call(scope, recv.into(), &[result_obj.into()]);
                     }
                 }
-                _ => {
-                    // Other callback types (StorageResult, KvResult, etc.) can be added as needed
+                CallbackMessage::StorageResult(callback_id, storage_result) => {
+                    use crate::runtime::callback_handlers;
+
+                    let callback_opt = {
+                        let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback_global) = callback_opt {
+                        let result_obj = v8::Object::new(scope);
+                        callback_handlers::populate_storage_result(
+                            scope,
+                            result_obj,
+                            storage_result,
+                        );
+                        let callback = v8::Local::new(scope, &callback_global);
+                        let recv = v8::undefined(scope);
+                        callback.call(scope, recv.into(), &[result_obj.into()]);
+                    }
+                }
+                CallbackMessage::KvResult(callback_id, kv_result) => {
+                    use crate::runtime::callback_handlers;
+
+                    let callback_opt = {
+                        let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback_global) = callback_opt {
+                        let result_obj = v8::Object::new(scope);
+                        callback_handlers::populate_kv_result(scope, result_obj, kv_result);
+                        let callback = v8::Local::new(scope, &callback_global);
+                        let recv = v8::undefined(scope);
+                        callback.call(scope, recv.into(), &[result_obj.into()]);
+                    }
+                }
+                CallbackMessage::DatabaseResult(callback_id, database_result) => {
+                    use crate::runtime::callback_handlers;
+
+                    let callback_opt = {
+                        let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback_global) = callback_opt {
+                        let result_obj = v8::Object::new(scope);
+                        callback_handlers::populate_database_result(
+                            scope,
+                            result_obj,
+                            database_result,
+                        );
+                        let callback = v8::Local::new(scope, &callback_global);
+                        let recv = v8::undefined(scope);
+                        callback.call(scope, recv.into(), &[result_obj.into()]);
+                    }
                 }
             }
         }
@@ -1101,7 +1093,9 @@ impl ExecutionContext {
                             let stream_manager = self.stream_manager.clone();
 
                             // Spawn task to convert StreamChunk -> Result<Bytes, String>
-                            tokio::task::spawn_local(async move {
+                            // IMPORTANT: Use tokio::spawn (not spawn_local) so this task survives
+                            // when the LocalSet is dropped (production pattern with thread-pinned pool)
+                            tokio::spawn(async move {
                                 let mut receiver = receiver;
 
                                 loop {
