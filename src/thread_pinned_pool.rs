@@ -821,12 +821,15 @@ mod tests {
 
     #[test]
     fn test_tagged_isolate_acquire_release() {
-        // Test atomic acquire/release
+        // Test atomic acquire/release using a real isolate
+        let limits = openworkers_core::RuntimeLimits::default();
+        let isolate = crate::locker_managed_isolate::LockerManagedIsolate::new(limits);
+
         let isolate_meta = TaggedIsolate {
             owner_id: "test_owner".to_string(),
             in_use: AtomicBool::new(false),
             inner: Mutex::new(TaggedIsolateInner {
-                isolate: unsafe { std::mem::zeroed() }, // Just for testing metadata
+                isolate,
                 created_at: Instant::now(),
                 last_used: Instant::now(),
                 total_requests: 0,

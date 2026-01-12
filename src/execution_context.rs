@@ -159,6 +159,10 @@ impl ExecutionContext {
                 bindings::setup_response(scope);
             }
 
+            // Security: Remove SharedArrayBuffer and Atomics (Spectre mitigations)
+            // Must be done at context creation, not in snapshot (breaks V8 bootstrapping)
+            bindings::setup_security_restrictions(scope);
+
             v8::Global::new(scope.as_ref(), context)
         };
 
@@ -286,6 +290,10 @@ impl ExecutionContext {
                 bindings::setup_request(scope);
                 bindings::setup_response(scope);
             }
+
+            // Security: Remove SharedArrayBuffer and Atomics (Spectre mitigations)
+            // Must be done at context creation, not in snapshot (breaks V8 bootstrapping)
+            bindings::setup_security_restrictions(scope);
 
             v8::Global::new(scope.as_ref(), context)
         };
