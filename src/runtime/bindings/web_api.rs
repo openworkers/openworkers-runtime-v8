@@ -994,8 +994,11 @@ pub fn setup_response(scope: &mut v8::PinScope) {
                 }
 
                 // Support different body types - all wrapped in ReadableStream
+                // _isBuffered marks responses where body data is already fully available
+                // (created from string/Uint8Array/ArrayBuffer, not a user-provided stream)
                 if (body instanceof ReadableStream) {
                     this.body = body;
+                    this._isBuffered = false; // User-provided stream - must be streamed
                     if (body._nativeStreamId !== undefined) {
                         this._nativeStreamId = body._nativeStreamId;
                     }
@@ -1007,8 +1010,10 @@ pub fn setup_response(scope: &mut v8::PinScope) {
                             controller.close();
                         }
                     });
+                    this._isBuffered = true; // Data fully available - can use _getRawBody()
                 } else if (body === null || body === undefined) {
                     this.body = null;
+                    this._isBuffered = true; // No body - definitely buffered
                 } else {
                     const encoder = new TextEncoder();
                     const bytes = encoder.encode(String(body));
@@ -1018,6 +1023,7 @@ pub fn setup_response(scope: &mut v8::PinScope) {
                             controller.close();
                         }
                     });
+                    this._isBuffered = true; // Data fully available - can use _getRawBody()
                 }
             }
 

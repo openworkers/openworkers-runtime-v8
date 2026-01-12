@@ -1309,7 +1309,7 @@ pub(crate) fn setup_event_listener(
             }
         };
 
-        // Stream response body to Rust (stream all responses with body)
+        // Stream response body to Rust (only for true streaming responses)
         async function __streamResponseBody(response) {
             if (!response.body) {
                 return response;
@@ -1322,7 +1322,15 @@ pub(crate) fn setup_event_listener(
                 return response;
             }
 
-            // Stream the body: create output stream and pipe
+            // Check if this is a buffered response (created from string/Uint8Array/ArrayBuffer)
+            // These have _isBuffered = true, set by the Response constructor
+            // For these, skip streaming and let Rust use _getRawBody() instead
+            if (response._isBuffered) {
+                // Buffered response - data already available, no need to stream
+                return response;
+            }
+
+            // True streaming response - create output stream and pipe
             const streamId = __responseStreamCreate();
             response._responseStreamId = streamId;
 
