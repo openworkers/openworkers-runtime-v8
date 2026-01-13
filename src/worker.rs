@@ -1321,6 +1321,7 @@ pub(crate) fn setup_event_listener(
             // Native streams are managed by Rust, no need to track here
             if (response.body._nativeStreamId !== undefined) {
                 response._responseStreamId = response.body._nativeStreamId;
+                globalThis.__lastResponseStreamId = response.body._nativeStreamId;
                 return response;
             }
 
