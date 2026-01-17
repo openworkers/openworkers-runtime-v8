@@ -1,4 +1,4 @@
-use super::super::{CallbackId, SchedulerMessage};
+use super::super::{CallbackId, SchedulerMessage, stream_manager};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -31,4 +31,10 @@ pub struct StreamState {
     pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     pub callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
     pub next_id: Arc<Mutex<CallbackId>>,
+}
+
+/// State for response streaming operations
+#[derive(Clone)]
+pub struct ResponseStreamState {
+    pub manager: Arc<stream_manager::StreamManager>,
 }

@@ -1,28 +1,36 @@
 use super::super::SchedulerMessage;
 use super::state::TimerState;
+use std::rc::Rc;
 use tokio::sync::mpsc;
 use v8;
 
-/// Create a timer callback that extracts (id, delay) and sends a message
-macro_rules! timer_callback {
-    ($msg:ident) => {
-        |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _: v8::ReturnValue| {
-            let Some(state) = get_state!(scope, TimerState) else {
-                return;
-            };
+// Native timer functions using v8g macro
 
-            if args.length() >= 2 {
-                if let (Some(id), Some(val)) =
-                    (args.get(0).to_uint32(scope), args.get(1).to_uint32(scope))
-                {
-                    let _ = state.scheduler_tx.send(SchedulerMessage::$msg(
-                        id.value() as u64,
-                        val.value() as u64,
-                    ));
-                }
-            }
-        }
-    };
+#[gv8::method(state = TimerState)]
+fn native_schedule_timeout(scope: &mut v8::PinScope, state: &Rc<TimerState>, id: u64, delay: u64) {
+    let _ = scope;
+    let _ = state
+        .scheduler_tx
+        .send(SchedulerMessage::ScheduleTimeout(id, delay));
+}
+
+#[gv8::method(state = TimerState)]
+fn native_schedule_interval(
+    scope: &mut v8::PinScope,
+    state: &Rc<TimerState>,
+    id: u64,
+    interval: u64,
+) {
+    let _ = scope;
+    let _ = state
+        .scheduler_tx
+        .send(SchedulerMessage::ScheduleInterval(id, interval));
+}
+
+#[gv8::method(state = TimerState)]
+fn native_clear_timer(scope: &mut v8::PinScope, state: &Rc<TimerState>, id: u64) {
+    let _ = scope;
+    let _ = state.scheduler_tx.send(SchedulerMessage::ClearTimer(id));
 }
 
 pub fn setup_timers(
@@ -35,25 +43,10 @@ pub fn setup_timers(
     };
     store_state!(scope, state);
 
-    // Register native timer functions
-    let schedule_timeout_fn = v8::Function::new(scope, timer_callback!(ScheduleTimeout)).unwrap();
-    let schedule_interval_fn = v8::Function::new(scope, timer_callback!(ScheduleInterval)).unwrap();
-
-    let clear_timer_fn = v8::Function::new(
-        scope,
-        |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _: v8::ReturnValue| {
-            let Some(state) = get_state!(scope, TimerState) else {
-                return;
-            };
-
-            if let Some(id) = args.get(0).to_uint32(scope) {
-                let _ = state
-                    .scheduler_tx
-                    .send(SchedulerMessage::ClearTimer(id.value() as u64));
-            }
-        },
-    )
-    .unwrap();
+    // Register native functions using generated wrappers
+    let schedule_timeout_fn = v8::Function::new(scope, native_schedule_timeout_v8).unwrap();
+    let schedule_interval_fn = v8::Function::new(scope, native_schedule_interval_v8).unwrap();
+    let clear_timer_fn = v8::Function::new(scope, native_clear_timer_v8).unwrap();
 
     register_fn!(scope, "__nativeScheduleTimeout", schedule_timeout_fn);
     register_fn!(scope, "__nativeScheduleInterval", schedule_interval_fn);

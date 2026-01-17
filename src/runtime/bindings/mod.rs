@@ -9,7 +9,7 @@ mod timers;
 mod web_api;
 
 // Re-export state types
-pub use state::{FetchState, StreamState};
+pub use state::{FetchState, ResponseStreamState, StreamState};
 
 // Re-export setup functions
 pub use console::setup_console;
