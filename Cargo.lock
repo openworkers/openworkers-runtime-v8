@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "openworkers-runtime-v8"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "bytes",
  "criterion",
@@ -975,6 +975,8 @@ dependencies = [
 [[package]]
 name = "openworkers-serde-v8"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b205c1e1cfc913a46e9c3dedeb4c53140ea770be8087e28feb30143990b73f5"
 dependencies = [
  "num-bigint",
  "openworkers-v8",
