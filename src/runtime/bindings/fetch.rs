@@ -2,8 +2,9 @@ use super::super::{CallbackId, SchedulerMessage};
 use super::state::FetchState;
 use openworkers_core::{DatabaseOp, HttpMethod, HttpRequest, KvOp, RequestBody, StorageOp};
 use serde::Deserialize;
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::rc::Rc;
 use tokio::sync::mpsc;
 use v8;
 
@@ -87,7 +88,7 @@ fn register_callback(
     success_fn: v8::Local<v8::Function>,
 ) -> CallbackId {
     let callback_id = {
-        let mut id = state.next_id.lock().unwrap();
+        let mut id = state.next_id.borrow_mut();
         let current = *id;
         *id += 1;
         current
@@ -95,8 +96,7 @@ fn register_callback(
 
     state
         .callbacks
-        .lock()
-        .unwrap()
+        .borrow_mut()
         .insert(callback_id, v8::Global::new(scope, success_fn));
 
     callback_id
@@ -109,12 +109,11 @@ fn register_callbacks_with_error(
     success_fn: v8::Local<v8::Function>,
     error_fn: v8::Local<v8::Function>,
 ) -> CallbackId {
-    let callback_id = register_callback(&state, scope, success_fn);
+    let callback_id = register_callback(state, scope, success_fn);
 
     state
         .error_callbacks
-        .lock()
-        .unwrap()
+        .borrow_mut()
         .insert(callback_id, v8::Global::new(scope, error_fn));
 
     callback_id
@@ -175,9 +174,9 @@ where
 pub fn setup_fetch(
     scope: &mut v8::PinScope,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
-    error_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
-    next_id: Arc<Mutex<CallbackId>>,
+    callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    error_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    next_id: Rc<RefCell<CallbackId>>,
 ) {
     let state = FetchState {
         scheduler_tx,

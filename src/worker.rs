@@ -120,8 +120,9 @@ impl WorkerBuilder {
     ) -> Result<(), TerminationReason> {
         use crate::runtime::stream_manager::StreamManager;
         use crate::runtime::{bindings, crypto, run_event_loop, streams, text_encoding};
+        use std::cell::RefCell;
         use std::collections::HashMap;
-        use std::sync::Mutex;
+        use std::rc::Rc;
         use tokio::sync::{Notify, mpsc};
 
         let script = self.script.ok_or_else(|| {
@@ -139,10 +140,10 @@ impl WorkerBuilder {
         let (callback_tx, _callback_rx) = mpsc::unbounded_channel();
         let callback_notify = Arc::new(Notify::new());
 
-        let fetch_callbacks = Arc::new(Mutex::new(HashMap::new()));
-        let fetch_error_callbacks = Arc::new(Mutex::new(HashMap::new()));
-        let stream_callbacks = Arc::new(Mutex::new(HashMap::new()));
-        let next_callback_id = Arc::new(Mutex::new(1u64));
+        let fetch_callbacks = Rc::new(RefCell::new(HashMap::new()));
+        let fetch_error_callbacks = Rc::new(RefCell::new(HashMap::new()));
+        let stream_callbacks = Rc::new(RefCell::new(HashMap::new()));
+        let next_callback_id = Rc::new(RefCell::new(1u64));
         let stream_manager = Arc::new(StreamManager::new());
 
         // Check if snapshot is available
@@ -268,18 +269,17 @@ impl WorkerBuilder {
                     let global = ctx.global(scope);
                     let handler_key = v8::String::new(scope, "__scheduledHandler").unwrap();
 
-                    if let Some(handler_val) = global.get(scope, handler_key.into()) {
-                        if handler_val.is_function() {
-                            let handler_fn: v8::Local<v8::Function> =
-                                handler_val.try_into().unwrap();
+                    if let Some(handler_val) = global.get(scope, handler_key.into())
+                        && handler_val.is_function()
+                    {
+                        let handler_fn: v8::Local<v8::Function> = handler_val.try_into().unwrap();
 
-                            let event_obj = v8::Object::new(scope);
-                            let time_key = v8::String::new(scope, "scheduledTime").unwrap();
-                            let time_val = v8::Number::new(scope, scheduled_init.time as f64);
-                            event_obj.set(scope, time_key.into(), time_val.into());
+                        let event_obj = v8::Object::new(scope);
+                        let time_key = v8::String::new(scope, "scheduledTime").unwrap();
+                        let time_val = v8::Number::new(scope, scheduled_init.time as f64);
+                        event_obj.set(scope, time_key.into(), time_val.into());
 
-                            handler_fn.call(scope, global.into(), &[event_obj.into()]);
-                        }
+                        handler_fn.call(scope, global.into(), &[event_obj.into()]);
                     }
                 }
 
@@ -627,13 +627,13 @@ impl Worker {
                     let (request_complete, active_streams) = get_completion_state(scope, global);
 
                     // Detect client disconnect and signal abort to JS
-                    if active_streams > 0 && abort_signaled_at.is_none() {
-                        if let Some(stream_id) = get_response_stream_id(scope, global) {
-                            if !self.runtime.stream_manager.has_sender(stream_id) {
-                                abort_signaled_at = Some(tokio::time::Instant::now());
-                                signal_client_disconnect(scope);
-                            }
-                        }
+                    if active_streams > 0
+                        && abort_signaled_at.is_none()
+                        && let Some(stream_id) = get_response_stream_id(scope, global)
+                        && !self.runtime.stream_manager.has_sender(stream_id)
+                    {
+                        abort_signaled_at = Some(tokio::time::Instant::now());
+                        signal_client_disconnect(scope);
                     }
 
                     // Check grace period
@@ -671,7 +671,7 @@ impl Worker {
 
         // Store the sender in runtime so JS can use it
         {
-            let mut tx_lock = self.runtime.fetch_response_tx.lock().unwrap();
+            let mut tx_lock = self.runtime.fetch_response_tx.borrow_mut();
             *tx_lock = Some(response_tx);
         }
 
@@ -709,19 +709,18 @@ impl Worker {
                 init_obj.set(scope, headers_key.into(), headers_obj.into());
 
                 // Add body if present (as Uint8Array for binary support)
-                if let RequestBody::Bytes(body_bytes) = &req.body {
-                    if !body_bytes.is_empty() {
-                        let len = body_bytes.len();
-                        let backing_store =
-                            v8::ArrayBuffer::new_backing_store_from_vec(body_bytes.to_vec())
-                                .make_shared();
-                        let array_buffer =
-                            v8::ArrayBuffer::with_backing_store(scope, &backing_store);
-                        let uint8_array = v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
+                if let RequestBody::Bytes(body_bytes) = &req.body
+                    && !body_bytes.is_empty()
+                {
+                    let len = body_bytes.len();
+                    let backing_store =
+                        v8::ArrayBuffer::new_backing_store_from_vec(body_bytes.to_vec())
+                            .make_shared();
+                    let array_buffer = v8::ArrayBuffer::with_backing_store(scope, &backing_store);
+                    let uint8_array = v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
 
-                        let body_key = v8::String::new(scope, "body").unwrap();
-                        init_obj.set(scope, body_key.into(), uint8_array.into());
-                    }
+                    let body_key = v8::String::new(scope, "body").unwrap();
+                    init_obj.set(scope, body_key.into(), uint8_array.into());
                 }
 
                 // Call new Request(url, init)
@@ -1004,15 +1003,15 @@ pub(crate) fn evaluate_in_context(
     let code_str = v8::String::new(scope, code).ok_or("Failed to create V8 string")?;
 
     let tc = pin!(v8::TryCatch::new(scope));
-    let mut tc = tc.init();
+    let tc = tc.init();
 
-    let script_obj = v8::Script::compile(&mut tc, code_str, None).ok_or_else(|| {
+    let script_obj = v8::Script::compile(&tc, code_str, None).ok_or_else(|| {
         tc.exception()
             .and_then(|e| e.to_string(&tc).map(|s| s.to_rust_string_lossy(&tc)))
             .unwrap_or_else(|| "Compile error".to_string())
     })?;
 
-    script_obj.run(&mut tc).ok_or_else(|| {
+    script_obj.run(&tc).ok_or_else(|| {
         tc.exception()
             .and_then(|e| e.to_string(&tc).map(|s| s.to_rust_string_lossy(&tc)))
             .unwrap_or_else(|| "Runtime error".to_string())

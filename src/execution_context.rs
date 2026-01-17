@@ -6,9 +6,11 @@
 //!
 //! The context is cheap to create (~100µs) compared to an isolate (~3-5ms).
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, mpsc};
 use v8;
 
@@ -44,14 +46,14 @@ pub struct ExecutionContext {
     pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     pub callback_rx: mpsc::UnboundedReceiver<CallbackMessage>,
 
-    /// Callback storage
-    pub fetch_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
-    pub fetch_error_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
-    pub stream_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
-    pub next_callback_id: Arc<Mutex<CallbackId>>,
+    /// Callback storage (Rc/RefCell since V8 types aren't thread-safe)
+    pub fetch_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    pub fetch_error_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    pub stream_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    pub next_callback_id: Rc<RefCell<CallbackId>>,
 
     /// Fetch response channel
-    pub fetch_response_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
+    pub fetch_response_tx: Rc<RefCell<Option<tokio::sync::oneshot::Sender<String>>>>,
 
     /// Stream manager
     pub stream_manager: Arc<stream_manager::StreamManager>,
@@ -103,11 +105,11 @@ impl ExecutionContext {
         let (callback_tx, callback_rx) = mpsc::unbounded_channel();
         let callback_notify = Arc::new(Notify::new());
 
-        let fetch_callbacks = Arc::new(Mutex::new(HashMap::new()));
-        let fetch_error_callbacks = Arc::new(Mutex::new(HashMap::new()));
-        let stream_callbacks = Arc::new(Mutex::new(HashMap::new()));
-        let next_callback_id = Arc::new(Mutex::new(1));
-        let fetch_response_tx = Arc::new(Mutex::new(None));
+        let fetch_callbacks = Rc::new(RefCell::new(HashMap::new()));
+        let fetch_error_callbacks = Rc::new(RefCell::new(HashMap::new()));
+        let stream_callbacks = Rc::new(RefCell::new(HashMap::new()));
+        let next_callback_id = Rc::new(RefCell::new(1));
+        let fetch_response_tx = Rc::new(RefCell::new(None));
         let stream_manager = Arc::new(stream_manager::StreamManager::new());
 
         // Create NEW context in the pooled isolate
@@ -237,11 +239,11 @@ impl ExecutionContext {
         let (callback_tx, callback_rx) = mpsc::unbounded_channel();
         let callback_notify = Arc::new(Notify::new());
 
-        let fetch_callbacks = Arc::new(Mutex::new(HashMap::new()));
-        let fetch_error_callbacks = Arc::new(Mutex::new(HashMap::new()));
-        let stream_callbacks = Arc::new(Mutex::new(HashMap::new()));
-        let next_callback_id = Arc::new(Mutex::new(1));
-        let fetch_response_tx = Arc::new(Mutex::new(None));
+        let fetch_callbacks = Rc::new(RefCell::new(HashMap::new()));
+        let fetch_error_callbacks = Rc::new(RefCell::new(HashMap::new()));
+        let stream_callbacks = Rc::new(RefCell::new(HashMap::new()));
+        let next_callback_id = Rc::new(RefCell::new(1));
+        let fetch_response_tx = Rc::new(RefCell::new(None));
         let stream_manager = Arc::new(stream_manager::StreamManager::new());
 
         // Create NEW context in the shared isolate
@@ -373,7 +375,7 @@ impl ExecutionContext {
         isolate: &mut v8::Isolate,
         context: &v8::Global<v8::Context>,
         env: &Option<HashMap<String, String>>,
-        bindings: &Vec<openworkers_core::BindingInfo>,
+        bindings: &[openworkers_core::BindingInfo],
     ) -> Result<(), TerminationReason> {
         crate::worker::setup_env(isolate, context, env, bindings).map_err(|e| {
             TerminationReason::InitializationError(format!("Failed to setup env: {}", e))
@@ -407,9 +409,9 @@ impl ExecutionContext {
         })?;
 
         let tc_scope = pin!(v8::TryCatch::new(scope));
-        let mut tc_scope = tc_scope.init();
+        let tc_scope = tc_scope.init();
 
-        let script_obj = match v8::Script::compile(&mut tc_scope, code_str, None) {
+        let script_obj = match v8::Script::compile(&tc_scope, code_str, None) {
             Some(s) => s,
             None => {
                 let msg = tc_scope
@@ -424,7 +426,7 @@ impl ExecutionContext {
             }
         };
 
-        match script_obj.run(&mut tc_scope) {
+        match script_obj.run(&tc_scope) {
             Some(_) => Ok(()),
             None => {
                 let msg = tc_scope
@@ -518,21 +520,13 @@ impl ExecutionContext {
         // Get callback data before entering V8 scope
         let (fetch_callback, fetch_error_callback) = match &msg {
             CallbackMessage::FetchError(callback_id, _) => {
-                let cb1 = self.fetch_callbacks.lock().unwrap().remove(callback_id);
-                let cb2 = self
-                    .fetch_error_callbacks
-                    .lock()
-                    .unwrap()
-                    .remove(callback_id);
+                let cb1 = self.fetch_callbacks.borrow_mut().remove(callback_id);
+                let cb2 = self.fetch_error_callbacks.borrow_mut().remove(callback_id);
                 (cb1, cb2)
             }
             CallbackMessage::FetchStreamingSuccess(callback_id, _, _) => {
-                let cb1 = self.fetch_callbacks.lock().unwrap().remove(callback_id);
-                let cb2 = self
-                    .fetch_error_callbacks
-                    .lock()
-                    .unwrap()
-                    .remove(callback_id);
+                let cb1 = self.fetch_callbacks.borrow_mut().remove(callback_id);
+                let cb2 = self.fetch_error_callbacks.borrow_mut().remove(callback_id);
                 (cb1, cb2)
             }
             _ => (None, None),
@@ -552,13 +546,13 @@ impl ExecutionContext {
                     let global = context.global(scope);
                     let execute_timer_key = v8::String::new(scope, "__executeTimer").unwrap();
 
-                    if let Some(execute_fn_val) = global.get(scope, execute_timer_key.into()) {
-                        if execute_fn_val.is_function() {
-                            let execute_fn: v8::Local<v8::Function> =
-                                execute_fn_val.try_into().unwrap();
-                            let id_val = v8::Number::new(scope, callback_id as f64);
-                            execute_fn.call(scope, global.into(), &[id_val.into()]);
-                        }
+                    if let Some(execute_fn_val) = global.get(scope, execute_timer_key.into())
+                        && execute_fn_val.is_function()
+                    {
+                        let execute_fn: v8::Local<v8::Function> =
+                            execute_fn_val.try_into().unwrap();
+                        let id_val = v8::Number::new(scope, callback_id as f64);
+                        execute_fn.call(scope, global.into(), &[id_val.into()]);
                     }
                 }
                 CallbackMessage::FetchError(_, error_msg) => {
@@ -587,7 +581,7 @@ impl ExecutionContext {
                     use crate::runtime::callback_handlers;
 
                     let callback_opt = {
-                        let mut cbs = self.stream_callbacks.lock().unwrap();
+                        let mut cbs = self.stream_callbacks.borrow_mut();
                         cbs.remove(&callback_id)
                     };
 
@@ -603,7 +597,7 @@ impl ExecutionContext {
                     use crate::runtime::callback_handlers;
 
                     let callback_opt = {
-                        let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        let mut cbs = self.fetch_callbacks.borrow_mut();
                         cbs.remove(&callback_id)
                     };
 
@@ -623,7 +617,7 @@ impl ExecutionContext {
                     use crate::runtime::callback_handlers;
 
                     let callback_opt = {
-                        let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        let mut cbs = self.fetch_callbacks.borrow_mut();
                         cbs.remove(&callback_id)
                     };
 
@@ -639,7 +633,7 @@ impl ExecutionContext {
                     use crate::runtime::callback_handlers;
 
                     let callback_opt = {
-                        let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        let mut cbs = self.fetch_callbacks.borrow_mut();
                         cbs.remove(&callback_id)
                     };
 
@@ -698,7 +692,7 @@ impl ExecutionContext {
             if let Some(exception) = tc_scope.exception() {
                 let exception_string = exception
                     .to_string(&tc_scope)
-                    .map(|s| s.to_rust_string_lossy(&*tc_scope))
+                    .map(|s| s.to_rust_string_lossy(&tc_scope))
                     .unwrap_or_else(|| "Unknown exception".to_string());
                 log::warn!(
                     "Exception during microtask processing: {}",
@@ -736,13 +730,13 @@ impl ExecutionContext {
                 let (request_complete, active_streams) = get_completion_state(scope, global);
 
                 // Detect client disconnect and signal abort to JS
-                if active_streams > 0 && abort_signaled_at.is_none() {
-                    if let Some(stream_id) = get_response_stream_id(scope, global) {
-                        if !self.stream_manager.has_sender(stream_id) {
-                            *abort_signaled_at = Some(tokio::time::Instant::now());
-                            signal_client_disconnect(scope);
-                        }
-                    }
+                if active_streams > 0
+                    && abort_signaled_at.is_none()
+                    && let Some(stream_id) = get_response_stream_id(scope, global)
+                    && !self.stream_manager.has_sender(stream_id)
+                {
+                    *abort_signaled_at = Some(tokio::time::Instant::now());
+                    signal_client_disconnect(scope);
                 }
 
                 // Check grace period
@@ -936,7 +930,7 @@ impl ExecutionContext {
 
         // Store the sender in runtime so JS can use it
         {
-            let mut tx_lock = self.fetch_response_tx.lock().unwrap();
+            let mut tx_lock = self.fetch_response_tx.borrow_mut();
             *tx_lock = Some(response_tx);
         }
 
@@ -976,20 +970,19 @@ impl ExecutionContext {
                     init_obj.set(scope, headers_key.into(), headers_obj.into());
 
                     // Add body if present (as Uint8Array for binary support)
-                    if let RequestBody::Bytes(body_bytes) = &req.body {
-                        if !body_bytes.is_empty() {
-                            let len = body_bytes.len();
-                            let backing_store =
-                                v8::ArrayBuffer::new_backing_store_from_vec(body_bytes.to_vec())
-                                    .make_shared();
-                            let array_buffer =
-                                v8::ArrayBuffer::with_backing_store(scope, &backing_store);
-                            let uint8_array =
-                                v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
+                    if let RequestBody::Bytes(body_bytes) = &req.body
+                        && !body_bytes.is_empty()
+                    {
+                        let len = body_bytes.len();
+                        let backing_store =
+                            v8::ArrayBuffer::new_backing_store_from_vec(body_bytes.to_vec())
+                                .make_shared();
+                        let array_buffer =
+                            v8::ArrayBuffer::with_backing_store(scope, &backing_store);
+                        let uint8_array = v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
 
-                            let body_key = v8::String::new(scope, "body").unwrap();
-                            init_obj.set(scope, body_key.into(), uint8_array.into());
-                        }
+                        let body_key = v8::String::new(scope, "body").unwrap();
+                        init_obj.set(scope, body_key.into(), uint8_array.into());
                     }
 
                     // Call new Request(url, init)

@@ -394,11 +394,11 @@ impl ThreadLocalPool {
             // Only consider FREE isolates for eviction
             if arc.is_free() {
                 // Try to get last_used without blocking
-                if let Ok(guard) = arc.inner.try_lock() {
-                    if guard.last_used < oldest {
-                        oldest = guard.last_used;
-                        lru_idx = Some(i);
-                    }
+                if let Ok(guard) = arc.inner.try_lock()
+                    && guard.last_used < oldest
+                {
+                    oldest = guard.last_used;
+                    lru_idx = Some(i);
                 }
             }
         }
@@ -786,7 +786,7 @@ pub async fn execute_pinned(
 
     // Create execution context
     let ctx_result = ExecutionContext::new_with_pooled_isolate(
-        &mut *locker,
+        &mut locker,
         use_snapshot,
         platform,
         limits,

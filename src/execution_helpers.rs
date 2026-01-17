@@ -53,14 +53,15 @@ pub fn check_exit_condition(
             // Check __lastResponse is a valid Response object (not undefined, not a Promise)
             let resp_key = v8::String::new(scope, "__lastResponse").unwrap();
 
-            if let Some(resp_val) = global.get(scope, resp_key.into()) {
-                if !resp_val.is_undefined() && !resp_val.is_null() && !resp_val.is_promise() {
-                    if let Some(resp_obj) = resp_val.to_object(scope) {
-                        // Check if it has a 'status' property (indicates it's a Response)
-                        let status_key = v8::String::new(scope, "status").unwrap();
-                        return resp_obj.get(scope, status_key.into()).is_some();
-                    }
-                }
+            if let Some(resp_val) = global.get(scope, resp_key.into())
+                && !resp_val.is_undefined()
+                && !resp_val.is_null()
+                && !resp_val.is_promise()
+                && let Some(resp_obj) = resp_val.to_object(scope)
+            {
+                // Check if it has a 'status' property (indicates it's a Response)
+                let status_key = v8::String::new(scope, "status").unwrap();
+                return resp_obj.get(scope, status_key.into()).is_some();
             }
 
             false

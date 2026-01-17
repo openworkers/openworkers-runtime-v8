@@ -169,7 +169,7 @@ impl PooledIsolate {
         let mut locker = v8::Locker::new(&mut entry.isolate.isolate);
 
         // Execute user closure with mutable reference via DerefMut
-        f(&mut *locker)
+        f(&mut locker)
     }
 
     /// Execute async closure with locked isolate
@@ -200,7 +200,7 @@ impl PooledIsolate {
         );
 
         // Execute async user closure with mutable reference via DerefMut
-        let result = f(&mut *locker).await;
+        let result = f(&mut locker).await;
 
         log::trace!("Isolate unlocked for worker {}", self.worker_id);
 

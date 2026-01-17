@@ -6,9 +6,11 @@ pub mod stream_manager;
 pub mod streams;
 pub mod text_encoding;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
 
 use tokio::sync::{Notify, mpsc};
 use v8;
@@ -26,12 +28,12 @@ pub struct Runtime {
     pub context: v8::Global<v8::Context>,
     pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     pub callback_rx: mpsc::UnboundedReceiver<CallbackMessage>,
-    pub(crate) fetch_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
-    pub(crate) fetch_error_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
-    pub(crate) stream_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
-    pub(crate) _next_callback_id: Arc<Mutex<CallbackId>>,
+    pub(crate) fetch_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    pub(crate) fetch_error_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    pub(crate) stream_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    pub(crate) _next_callback_id: Rc<RefCell<CallbackId>>,
     /// Channel for fetch response (set during fetch event execution)
-    pub(crate) fetch_response_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
+    pub(crate) fetch_response_tx: Rc<RefCell<Option<tokio::sync::oneshot::Sender<String>>>>,
     /// V8 Platform (for pump_message_loop)
     platform: &'static v8::SharedRef<v8::Platform>,
     /// Stream manager for native streaming
@@ -65,11 +67,11 @@ impl Runtime {
         let (callback_tx, callback_rx) = mpsc::unbounded_channel();
         let callback_notify = Arc::new(Notify::new());
 
-        let fetch_callbacks = Arc::new(Mutex::new(HashMap::new()));
-        let fetch_error_callbacks = Arc::new(Mutex::new(HashMap::new()));
-        let stream_callbacks = Arc::new(Mutex::new(HashMap::new()));
-        let next_callback_id = Arc::new(Mutex::new(1));
-        let fetch_response_tx = Arc::new(Mutex::new(None));
+        let fetch_callbacks = Rc::new(RefCell::new(HashMap::new()));
+        let fetch_error_callbacks = Rc::new(RefCell::new(HashMap::new()));
+        let stream_callbacks = Rc::new(RefCell::new(HashMap::new()));
+        let next_callback_id = Rc::new(RefCell::new(1));
+        let fetch_response_tx = Rc::new(RefCell::new(None));
         let stream_manager = Arc::new(stream_manager::StreamManager::new());
 
         // Memory limit tracking for ArrayBuffer allocations
@@ -203,13 +205,13 @@ impl Runtime {
                 CallbackMessage::FetchError(callback_id, error_msg) => {
                     // Remove from success callbacks (cleanup)
                     {
-                        let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        let mut cbs = self.fetch_callbacks.borrow_mut();
                         cbs.remove(&callback_id);
                     }
 
                     // Get error callback and call it
                     let error_callback_opt = {
-                        let mut cbs = self.fetch_error_callbacks.lock().unwrap();
+                        let mut cbs = self.fetch_error_callbacks.borrow_mut();
                         cbs.remove(&callback_id)
                     };
 
@@ -223,13 +225,13 @@ impl Runtime {
                 }
                 CallbackMessage::FetchStreamingSuccess(callback_id, meta, stream_id) => {
                     let callback_opt = {
-                        let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        let mut cbs = self.fetch_callbacks.borrow_mut();
                         cbs.remove(&callback_id)
                     };
 
                     // Cleanup error callback
                     {
-                        let mut cbs = self.fetch_error_callbacks.lock().unwrap();
+                        let mut cbs = self.fetch_error_callbacks.borrow_mut();
                         cbs.remove(&callback_id);
                     }
 
@@ -243,7 +245,7 @@ impl Runtime {
                 }
                 CallbackMessage::StreamChunk(callback_id, chunk) => {
                     let callback_opt = {
-                        let mut cbs = self.stream_callbacks.lock().unwrap();
+                        let mut cbs = self.stream_callbacks.borrow_mut();
                         cbs.remove(&callback_id)
                     };
 
@@ -257,7 +259,7 @@ impl Runtime {
                 }
                 CallbackMessage::StorageResult(callback_id, storage_result) => {
                     let callback_opt = {
-                        let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        let mut cbs = self.fetch_callbacks.borrow_mut();
                         cbs.remove(&callback_id)
                     };
 
@@ -275,7 +277,7 @@ impl Runtime {
                 }
                 CallbackMessage::KvResult(callback_id, kv_result) => {
                     let callback_opt = {
-                        let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        let mut cbs = self.fetch_callbacks.borrow_mut();
                         cbs.remove(&callback_id)
                     };
 
@@ -289,7 +291,7 @@ impl Runtime {
                 }
                 CallbackMessage::DatabaseResult(callback_id, database_result) => {
                     let callback_opt = {
-                        let mut cbs = self.fetch_callbacks.lock().unwrap();
+                        let mut cbs = self.fetch_callbacks.borrow_mut();
                         cbs.remove(&callback_id)
                     };
 
@@ -318,7 +320,7 @@ impl Runtime {
         if let Some(exception) = tc_scope.exception() {
             let exception_string = exception
                 .to_string(&tc_scope)
-                .map(|s| s.to_rust_string_lossy(&*tc_scope))
+                .map(|s| s.to_rust_string_lossy(&tc_scope))
                 .unwrap_or_else(|| "Unknown exception".to_string());
             eprintln!(
                 "Exception during microtask processing: {}",
@@ -356,13 +358,13 @@ impl Runtime {
             CallbackMessage::FetchError(callback_id, error_msg) => {
                 // Remove from success callbacks (cleanup)
                 {
-                    let mut cbs = self.fetch_callbacks.lock().unwrap();
+                    let mut cbs = self.fetch_callbacks.borrow_mut();
                     cbs.remove(&callback_id);
                 }
 
                 // Get error callback and call it
                 let error_callback_opt = {
-                    let mut cbs = self.fetch_error_callbacks.lock().unwrap();
+                    let mut cbs = self.fetch_error_callbacks.borrow_mut();
                     cbs.remove(&callback_id)
                 };
 
@@ -376,13 +378,13 @@ impl Runtime {
             }
             CallbackMessage::FetchStreamingSuccess(callback_id, meta, stream_id) => {
                 let callback_opt = {
-                    let mut cbs = self.fetch_callbacks.lock().unwrap();
+                    let mut cbs = self.fetch_callbacks.borrow_mut();
                     cbs.remove(&callback_id)
                 };
 
                 // Cleanup error callback
                 {
-                    let mut cbs = self.fetch_error_callbacks.lock().unwrap();
+                    let mut cbs = self.fetch_error_callbacks.borrow_mut();
                     cbs.remove(&callback_id);
                 }
 
@@ -396,7 +398,7 @@ impl Runtime {
             }
             CallbackMessage::StreamChunk(callback_id, chunk) => {
                 let callback_opt = {
-                    let mut cbs = self.stream_callbacks.lock().unwrap();
+                    let mut cbs = self.stream_callbacks.borrow_mut();
                     cbs.remove(&callback_id)
                 };
 
@@ -410,7 +412,7 @@ impl Runtime {
             }
             CallbackMessage::StorageResult(callback_id, storage_result) => {
                 let callback_opt = {
-                    let mut cbs = self.fetch_callbacks.lock().unwrap();
+                    let mut cbs = self.fetch_callbacks.borrow_mut();
                     cbs.remove(&callback_id)
                 };
 
@@ -424,7 +426,7 @@ impl Runtime {
             }
             CallbackMessage::KvResult(callback_id, kv_result) => {
                 let callback_opt = {
-                    let mut cbs = self.fetch_callbacks.lock().unwrap();
+                    let mut cbs = self.fetch_callbacks.borrow_mut();
                     cbs.remove(&callback_id)
                 };
 
@@ -438,7 +440,7 @@ impl Runtime {
             }
             CallbackMessage::DatabaseResult(callback_id, database_result) => {
                 let callback_opt = {
-                    let mut cbs = self.fetch_callbacks.lock().unwrap();
+                    let mut cbs = self.fetch_callbacks.borrow_mut();
                     cbs.remove(&callback_id)
                 };
 
@@ -462,7 +464,7 @@ impl Runtime {
         use std::pin::pin;
 
         // Pump V8 platform message loop
-        while v8::Platform::pump_message_loop(self.platform, &mut self.isolate, false) {
+        while v8::Platform::pump_message_loop(self.platform, &self.isolate, false) {
             // Continue pumping until no more messages
         }
 
@@ -479,7 +481,7 @@ impl Runtime {
         if let Some(exception) = tc_scope.exception() {
             let exception_string = exception
                 .to_string(&tc_scope)
-                .map(|s| s.to_rust_string_lossy(&*tc_scope))
+                .map(|s| s.to_rust_string_lossy(&tc_scope))
                 .unwrap_or_else(|| "Unknown exception".to_string());
             eprintln!(
                 "Exception during microtask processing: {}",
@@ -511,15 +513,15 @@ impl Runtime {
 
         // Use TryCatch to capture JavaScript exceptions
         let tc_scope = pin!(v8::TryCatch::new(scope));
-        let mut tc_scope = tc_scope.init();
+        let tc_scope = tc_scope.init();
 
-        let script_obj = match v8::Script::compile(&mut tc_scope, code, None) {
+        let script_obj = match v8::Script::compile(&tc_scope, code, None) {
             Some(s) => s,
             None => {
                 if let Some(exception) = tc_scope.exception() {
                     let msg = exception
                         .to_string(&tc_scope)
-                        .map(|s| s.to_rust_string_lossy(&*tc_scope))
+                        .map(|s| s.to_rust_string_lossy(&tc_scope))
                         .unwrap_or_else(|| "Unknown error".to_string());
 
                     // Try to get more detail from message
@@ -528,7 +530,7 @@ impl Runtime {
                         let col = message.get_start_column();
                         let source_line = message
                             .get_source_line(&tc_scope)
-                            .map(|s| s.to_rust_string_lossy(&*tc_scope))
+                            .map(|s| s.to_rust_string_lossy(&tc_scope))
                             .unwrap_or_default();
 
                         return Err(format!(
@@ -544,20 +546,20 @@ impl Runtime {
             }
         };
 
-        match script_obj.run(&mut tc_scope) {
+        match script_obj.run(&tc_scope) {
             Some(_) => Ok(()),
             None => {
                 if let Some(exception) = tc_scope.exception() {
                     let msg = exception
                         .to_string(&tc_scope)
-                        .map(|s| s.to_rust_string_lossy(&*tc_scope))
+                        .map(|s| s.to_rust_string_lossy(&tc_scope))
                         .unwrap_or_else(|| "Unknown error".to_string());
 
                     // Try to get stack trace
                     if let Some(stack) = tc_scope.stack_trace() {
                         let stack_str = stack
                             .to_string(&tc_scope)
-                            .map(|s| s.to_rust_string_lossy(&*tc_scope))
+                            .map(|s| s.to_rust_string_lossy(&tc_scope))
                             .unwrap_or_default();
 
                         if !stack_str.is_empty() {

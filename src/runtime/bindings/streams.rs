@@ -1,8 +1,9 @@
 use super::super::{CallbackId, SchedulerMessage, stream_manager};
 use super::state::{ResponseStreamState, StreamState};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use v8;
 
@@ -18,17 +19,17 @@ fn native_stream_read(
 
     // Generate callback ID
     let callback_id = {
-        let mut next_id = state.next_id.lock().unwrap();
+        let mut next_id = state.next_id.borrow_mut();
         let id = *next_id;
         *next_id += 1;
         id
     };
 
     // Store callback
-    {
-        let mut callbacks = state.callbacks.lock().unwrap();
-        callbacks.insert(callback_id, resolve_global);
-    }
+    state
+        .callbacks
+        .borrow_mut()
+        .insert(callback_id, resolve_global);
 
     // Send StreamRead message to scheduler
     let _ = state
@@ -50,8 +51,8 @@ fn native_stream_cancel(scope: &mut v8::PinScope, state: &Rc<StreamState>, strea
 pub fn setup_stream_ops(
     scope: &mut v8::PinScope,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    stream_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
-    next_callback_id: Arc<Mutex<CallbackId>>,
+    stream_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    next_callback_id: Rc<RefCell<CallbackId>>,
 ) {
     let state = StreamState {
         scheduler_tx,

@@ -1,6 +1,8 @@
 use super::super::{CallbackId, SchedulerMessage, stream_manager};
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::rc::Rc;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use v8;
 
@@ -17,20 +19,23 @@ pub struct ConsoleState {
 }
 
 /// Shared state for fetch callbacks
+///
+/// Uses Rc<RefCell<...>> instead of Arc<Mutex<...>> because V8's Global<Function>
+/// is not thread-safe, so we only access these from a single thread.
 #[derive(Clone)]
 pub struct FetchState {
     pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    pub callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
-    pub error_callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
-    pub next_id: Arc<Mutex<CallbackId>>,
+    pub callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    pub error_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    pub next_id: Rc<RefCell<CallbackId>>,
 }
 
 /// Shared state for stream read callbacks (same pattern as FetchState)
 #[derive(Clone)]
 pub struct StreamState {
     pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    pub callbacks: Arc<Mutex<HashMap<CallbackId, v8::Global<v8::Function>>>>,
-    pub next_id: Arc<Mutex<CallbackId>>,
+    pub callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    pub next_id: Rc<RefCell<CallbackId>>,
 }
 
 /// State for response streaming operations

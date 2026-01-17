@@ -143,7 +143,7 @@ unsafe extern "C" fn allocate_uninitialized(allocator: &CustomAllocator, n: usiz
 unsafe extern "C" fn free(allocator: &CustomAllocator, data: *mut c_void, n: usize) {
     allocator.count.fetch_sub(n, Ordering::SeqCst);
     // SAFETY: data was allocated by allocate/allocate_uninitialized with size n
-    let _ = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(data as *mut u8, n)) };
+    let _ = unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(data as *mut u8, n)) };
 }
 
 /// Called when the allocator itself is dropped (isolate destroyed).

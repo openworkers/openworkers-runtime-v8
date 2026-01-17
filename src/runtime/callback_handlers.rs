@@ -194,8 +194,8 @@ pub fn populate_kv_result(
             if let Some(value) = maybe_value {
                 let json_str = serde_json::to_string(&value).unwrap();
                 let json_v8_str = v8::String::new(scope, &json_str).unwrap();
-                let parsed = v8::json::parse(scope, json_v8_str.into())
-                    .unwrap_or_else(|| v8::null(scope).into());
+                let parsed =
+                    v8::json::parse(scope, json_v8_str).unwrap_or_else(|| v8::null(scope).into());
                 result_obj.set(scope, value_key.into(), parsed);
             } else {
                 result_obj.set(scope, value_key.into(), v8::null(scope).into());
@@ -261,7 +261,7 @@ pub fn populate_database_result(
 
             let rows_key = v8::String::new(scope, "rows").unwrap();
             let rows_str = v8::String::new(scope, &rows_json).unwrap();
-            let parsed = v8::json::parse(scope, rows_str.into());
+            let parsed = v8::json::parse(scope, rows_str);
 
             if let Some(parsed_value) = parsed {
                 result_obj.set(scope, rows_key.into(), parsed_value);
