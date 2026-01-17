@@ -1,4 +1,4 @@
-//! Global V8 platform initialization.
+//! Global V8 platform and snapshot initialization.
 //!
 //! V8 can only be initialized once per process. This module provides
 //! a single entry point for platform initialization used by all other modules.
@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 use v8;
 
 static PLATFORM: OnceLock<v8::SharedRef<v8::Platform>> = OnceLock::new();
+static SNAPSHOT: OnceLock<Option<&'static [u8]>> = OnceLock::new();
 
 /// Get the global V8 platform, initializing it if necessary.
 ///
@@ -18,5 +19,24 @@ pub fn get_platform() -> &'static v8::SharedRef<v8::Platform> {
         v8::V8::initialize_platform(platform.clone());
         v8::V8::initialize();
         platform
+    })
+}
+
+/// Get the runtime snapshot, loading it once from disk.
+///
+/// Returns `None` if:
+/// - The snapshot file doesn't exist
+/// - The snapshot file is empty (allows running without snapshot)
+/// - The file cannot be read
+///
+/// The snapshot is leaked into static memory to avoid lifetime issues.
+pub fn get_snapshot() -> Option<&'static [u8]> {
+    *SNAPSHOT.get_or_init(|| {
+        const RUNTIME_SNAPSHOT_PATH: &str = env!("RUNTIME_SNAPSHOT_PATH");
+
+        std::fs::read(RUNTIME_SNAPSHOT_PATH)
+            .ok()
+            .filter(|bytes| !bytes.is_empty()) // Empty file = no snapshot
+            .map(|bytes| Box::leak(bytes.into_boxed_slice()) as &'static [u8])
     })
 }

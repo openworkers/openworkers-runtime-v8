@@ -1,7 +1,7 @@
 //! Legacy thread-local isolate reuse.
 
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use v8;
 
 use crate::security::CustomAllocator;
@@ -41,15 +41,8 @@ impl SharedIsolate {
         // This is critical: V8 heap limits don't cover ArrayBuffers, Uint8Array, etc.
         let array_buffer_allocator = CustomAllocator::new(heap_max, Arc::clone(&memory_limit_hit));
 
-        // Load snapshot once and cache it in static memory
-        static SNAPSHOT: OnceLock<Option<&'static [u8]>> = OnceLock::new();
-
-        let snapshot_ref = SNAPSHOT.get_or_init(|| {
-            const RUNTIME_SNAPSHOT_PATH: &str = env!("RUNTIME_SNAPSHOT_PATH");
-            std::fs::read(RUNTIME_SNAPSHOT_PATH)
-                .ok()
-                .map(|bytes| Box::leak(bytes.into_boxed_slice()) as &'static [u8])
-        });
+        // Load snapshot (centralized, handles empty file case)
+        let snapshot_ref = crate::platform::get_snapshot();
 
         // Create isolate with custom allocator and heap limits
         let isolate = if let Some(snapshot_data) = snapshot_ref {
