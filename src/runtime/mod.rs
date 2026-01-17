@@ -140,20 +140,16 @@ impl Runtime {
         let snapshot_ref = crate::platform::get_snapshot();
 
         // Create isolate with custom allocator and heap limits
-        let mut isolate = if let Some(snapshot_data) = snapshot_ref {
-            let params = v8::CreateParams::default()
-                .heap_limits(heap_initial, heap_max)
-                .array_buffer_allocator(array_buffer_allocator.into_v8_allocator())
-                .snapshot_blob((*snapshot_data).into())
-                .allow_atomics_wait(false); // Security: prevent Atomics.wait() from blocking
-            v8::Isolate::new(params)
-        } else {
-            let params = v8::CreateParams::default()
-                .heap_limits(heap_initial, heap_max)
-                .array_buffer_allocator(array_buffer_allocator.into_v8_allocator())
-                .allow_atomics_wait(false); // Security: prevent Atomics.wait() from blocking
-            v8::Isolate::new(params)
-        };
+        let mut params = v8::CreateParams::default()
+            .heap_limits(heap_initial, heap_max)
+            .array_buffer_allocator(array_buffer_allocator.into_v8_allocator())
+            .allow_atomics_wait(false); // Security: prevent Atomics.wait() from blocking
+
+        if let Some(snapshot_data) = snapshot_ref {
+            params = params.snapshot_blob((*snapshot_data).into());
+        }
+
+        let mut isolate = v8::Isolate::new(params);
 
         let use_snapshot = snapshot_ref.is_some();
 
