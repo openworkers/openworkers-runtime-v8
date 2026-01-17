@@ -497,6 +497,11 @@ pub fn setup_fetch(
                 contentType = 'multipart/form-data; boundary=' + serialized.boundary;
             }
 
+            // If body is a string or primitive, convert to Uint8Array for native consumption
+            if (body !== null && typeof body !== 'object') {
+                body = new TextEncoder().encode(String(body));
+            }
+
             return new Promise((resolve, reject) => {
                 // Convert Headers instance to plain object
                 let headersObj = {};
