@@ -16,6 +16,7 @@ use tokio::sync::{Mutex, Semaphore};
 
 use crate::LockerManagedIsolate;
 use crate::execution_context::ExecutionContext;
+use crate::gc::JsLock;
 use openworkers_core::{OperationsHandle, RuntimeLimits, Script, Task, TerminationReason};
 
 // ============================================================================
@@ -784,6 +785,9 @@ pub async fn execute_pinned(
     // Create v8::Locker for thread-safety
     let mut locker = v8::Locker::new(&mut inner.isolate.isolate);
 
+    // Register JsLock for GC tracking (applies any pending memory adjustments)
+    let _js_lock = JsLock::new(&mut locker);
+
     // Create execution context
     let ctx_result = ExecutionContext::new_with_pooled_isolate(
         &mut locker,
@@ -801,7 +805,8 @@ pub async fn execute_pinned(
         Err(e) => Err(e),
     };
 
-    // Drop the locker before releasing (not strictly necessary but cleaner)
+    // Drop JsLock and Locker before releasing
+    drop(_js_lock);
     drop(locker);
     drop(inner);
 

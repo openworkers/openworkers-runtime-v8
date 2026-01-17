@@ -9,6 +9,7 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 
 use crate::LockerManagedIsolate;
+use crate::gc::JsLock;
 use openworkers_core::RuntimeLimits;
 
 /// Global isolate pool instance
@@ -193,6 +194,9 @@ impl PooledIsolate {
         // Create v8::Locker - handles enter/exit automatically via RAII
         let mut locker = v8::Locker::new(&mut entry.isolate.isolate);
 
+        // Register JsLock for GC tracking (applies any pending memory adjustments)
+        let _js_lock = JsLock::new(&mut locker);
+
         log::trace!(
             "Isolate locked for worker {} (total_requests: {})",
             self.worker_id,
@@ -203,6 +207,8 @@ impl PooledIsolate {
         let result = f(&mut locker).await;
 
         log::trace!("Isolate unlocked for worker {}", self.worker_id);
+
+        // JsLock drops here, unregistering from thread-local
 
         // Locker drop will call exit() automatically here
         result
