@@ -971,6 +971,7 @@ dependencies = [
  "ntest",
  "openworkers-core",
  "openworkers-glue-v8",
+ "openworkers-runtime-v8-gc-derive",
  "openworkers-serde-v8",
  "openworkers-v8",
  "rand",
@@ -982,6 +983,15 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "uuid",
+]
+
+[[package]]
+name = "openworkers-runtime-v8-gc-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.111",
 ]
 
 [[package]]

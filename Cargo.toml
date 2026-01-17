@@ -1,3 +1,6 @@
+[workspace]
+members = ["gc-derive"]
+
 [package]
 name = "openworkers-runtime-v8"
 version = "0.8.10"
@@ -5,6 +8,9 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+
+# GC derive macro (internal)
+gc-derive = { package = "openworkers-runtime-v8-gc-derive", path = "gc-derive" }
 
 # Common types
 # openworkers-core = { path = "../openworkers-core" }

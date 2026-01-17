@@ -36,6 +36,7 @@
 pub mod event_loop;
 pub mod execution_context;
 pub mod execution_helpers;
+pub mod gc;
 pub mod isolate_pool;
 pub mod locker_managed_isolate;
 pub mod platform;
@@ -50,6 +51,10 @@ pub mod worker_future;
 
 // Core API
 pub use execution_context::ExecutionContext;
+pub use gc::{ExternalMemoryGuard, GcTraceable, JsLock, JsLockRef, Tracked, tracked_guard};
+
+// Re-export derive macro
+pub use gc_derive::GcTraceable as DeriveGcTraceable;
 pub use isolate_pool::{IsolatePool, PoolStats, get_pool_stats, init_pool};
 pub use locker_managed_isolate::LockerManagedIsolate;
 pub use pooled_execution::execute_pooled;
