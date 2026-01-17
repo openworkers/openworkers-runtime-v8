@@ -109,7 +109,7 @@ fn register_callbacks_with_error(
     success_fn: v8::Local<v8::Function>,
     error_fn: v8::Local<v8::Function>,
 ) -> CallbackId {
-    let callback_id = register_callback(state, scope, success_fn);
+    let callback_id = register_callback(&state, scope, success_fn);
 
     state
         .error_callbacks
@@ -133,7 +133,7 @@ where
         move |scope: &mut v8::PinScope,
               args: v8::FunctionCallbackArguments,
               mut _retval: v8::ReturnValue| {
-            let Some(state) = get_state!(scope, "__fetchState", FetchState) else {
+            let Some(state) = get_state!(scope, FetchState) else {
                 return;
             };
 
@@ -158,7 +158,7 @@ where
             let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
             let error_fn: v8::Local<v8::Function> = error_cb.try_into().unwrap();
 
-            let callback_id = register_callbacks_with_error(state, scope, success_fn, error_fn);
+            let callback_id = register_callbacks_with_error(&state, scope, success_fn, error_fn);
 
             let _ = state
                 .scheduler_tx
@@ -186,7 +186,7 @@ pub fn setup_fetch(
         next_id,
     };
 
-    store_state!(scope, "__fetchState", state);
+    store_state!(scope, state);
 
     // Create __nativeFetchStreaming for streaming fetch
     let native_fetch_streaming_fn = v8::Function::new(
@@ -194,7 +194,7 @@ pub fn setup_fetch(
         |scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut _retval: v8::ReturnValue| {
-            let Some(state) = get_state!(scope, "__fetchState", FetchState) else {
+            let Some(state) = get_state!(scope, FetchState) else {
                 return;
             };
 
@@ -218,7 +218,7 @@ pub fn setup_fetch(
             }
             let reject: v8::Local<v8::Function> = reject_val.try_into().unwrap();
 
-            let callback_id = register_callbacks_with_error(state, scope, resolve, reject);
+            let callback_id = register_callbacks_with_error(&state, scope, resolve, reject);
 
             let _ = state
                 .scheduler_tx
@@ -240,7 +240,7 @@ pub fn setup_fetch(
         |scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut _retval: v8::ReturnValue| {
-            let Some(state) = get_state!(scope, "__fetchState", FetchState) else {
+            let Some(state) = get_state!(scope, FetchState) else {
                 return;
             };
 
@@ -282,7 +282,7 @@ pub fn setup_fetch(
             }
 
             let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
-            let callback_id = register_callback(state, scope, success_fn);
+            let callback_id = register_callback(&state, scope, success_fn);
 
             let _ = state.scheduler_tx.send(SchedulerMessage::BindingStorage(
                 callback_id,
@@ -301,7 +301,7 @@ pub fn setup_fetch(
         |scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut _retval: v8::ReturnValue| {
-            let Some(state) = get_state!(scope, "__fetchState", FetchState) else {
+            let Some(state) = get_state!(scope, FetchState) else {
                 return;
             };
 
@@ -343,7 +343,7 @@ pub fn setup_fetch(
             }
 
             let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
-            let callback_id = register_callback(state, scope, success_fn);
+            let callback_id = register_callback(&state, scope, success_fn);
 
             let _ = state.scheduler_tx.send(SchedulerMessage::BindingKv(
                 callback_id,
@@ -362,7 +362,7 @@ pub fn setup_fetch(
         |scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut _retval: v8::ReturnValue| {
-            let Some(state) = get_state!(scope, "__fetchState", FetchState) else {
+            let Some(state) = get_state!(scope, FetchState) else {
                 return;
             };
 
@@ -397,7 +397,7 @@ pub fn setup_fetch(
             }
 
             let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
-            let callback_id = register_callback(state, scope, success_fn);
+            let callback_id = register_callback(&state, scope, success_fn);
 
             let _ = state.scheduler_tx.send(SchedulerMessage::BindingDatabase(
                 callback_id,

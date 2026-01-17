@@ -17,47 +17,35 @@ macro_rules! register_fn {
     }};
 }
 
-/// Store state in the global scope as a V8 External.
+/// Store state in a V8 context slot.
+///
+/// Uses the type as the slot key (type-safe, no magic strings).
 ///
 /// # Example
 /// ```ignore
 /// let state = MyState { ... };
-/// store_state!(scope, "__myState", state);
+/// store_state!(scope, state);
 /// ```
 macro_rules! store_state {
-    ($scope:expr, $name:literal, $state:expr) => {{
-        let state_ptr = Box::into_raw(Box::new($state)) as *mut std::ffi::c_void;
-        let external = v8::External::new($scope, state_ptr);
-        let global = $scope.get_current_context().global($scope);
-        let state_key = v8::String::new($scope, $name).unwrap();
-        global.set($scope, state_key.into(), external.into());
-    }};
+    ($scope:expr, $state:expr) => {
+        $scope
+            .get_current_context()
+            .set_slot(std::rc::Rc::new($state))
+    };
 }
 
-/// Get state from the global scope.
+/// Get state from a V8 context slot.
 ///
-/// Returns `Option<&'s T>` where T is the state type.
+/// Uses the type as the slot key (type-safe, no magic strings).
 ///
 /// # Example
 /// ```ignore
-/// let state: Option<&MyState> = get_state!(scope, "__myState", MyState);
+/// let Some(state) = get_state!(scope, MyState) else { return };
 /// ```
 macro_rules! get_state {
-    ($scope:expr, $name:literal, $type:ty) => {{
-        (|| -> Option<&$type> {
-            let global = $scope.get_current_context().global($scope);
-            let state_key = v8::String::new($scope, $name)?;
-            let state_val = global.get($scope, state_key.into())?;
-
-            if !state_val.is_external() {
-                return None;
-            }
-
-            let external: v8::Local<v8::External> = state_val.try_into().ok()?;
-            let state_ptr = external.value() as *const $type;
-            Some(unsafe { &*state_ptr })
-        })()
-    }};
+    ($scope:expr, $type:ty) => {
+        $scope.get_current_context().get_slot::<$type>()
+    };
 }
 
 /// Execute JavaScript code in the current scope.

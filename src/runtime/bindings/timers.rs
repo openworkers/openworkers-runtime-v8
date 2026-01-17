@@ -7,7 +7,7 @@ use v8;
 macro_rules! timer_callback {
     ($msg:ident) => {
         |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _: v8::ReturnValue| {
-            let Some(state) = get_state!(scope, "__timerState", TimerState) else {
+            let Some(state) = get_state!(scope, TimerState) else {
                 return;
             };
 
@@ -29,11 +29,11 @@ pub fn setup_timers(
     scope: &mut v8::PinScope,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
 ) {
-    // Store state in global scope
+    // Store state in context slot
     let state = TimerState {
         scheduler_tx: scheduler_tx.clone(),
     };
-    store_state!(scope, "__timerState", state);
+    store_state!(scope, state);
 
     // Register native timer functions
     let schedule_timeout_fn = v8::Function::new(scope, timer_callback!(ScheduleTimeout)).unwrap();
@@ -42,7 +42,7 @@ pub fn setup_timers(
     let clear_timer_fn = v8::Function::new(
         scope,
         |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _: v8::ReturnValue| {
-            let Some(state) = get_state!(scope, "__timerState", TimerState) else {
+            let Some(state) = get_state!(scope, TimerState) else {
                 return;
             };
 
