@@ -1,7 +1,7 @@
 //! Legacy thread-local isolate reuse.
 
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use v8;
 
 use crate::security::CustomAllocator;

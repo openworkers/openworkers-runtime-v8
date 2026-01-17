@@ -1,3 +1,6 @@
+#[macro_use]
+mod macros;
+
 mod console;
 mod fetch;
 mod state;

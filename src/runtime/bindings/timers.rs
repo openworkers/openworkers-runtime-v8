@@ -3,35 +3,11 @@ use super::state::TimerState;
 use tokio::sync::mpsc;
 use v8;
 
-/// Helper to get timer state from global scope
-fn get_timer_state<'s>(scope: &mut v8::PinScope<'s, '_>) -> Option<&'s TimerState> {
-    let global = scope.get_current_context().global(scope);
-    let state_key = v8::String::new(scope, "__timerState")?;
-    let state_val = global.get(scope, state_key.into())?;
-
-    if !state_val.is_external() {
-        return None;
-    }
-
-    let external: v8::Local<v8::External> = state_val.try_into().ok()?;
-    let state_ptr = external.value() as *const TimerState;
-    Some(unsafe { &*state_ptr })
-}
-
-/// Register a native function on the global scope
-macro_rules! register_fn {
-    ($scope:expr, $name:literal, $func:expr) => {{
-        let global = $scope.get_current_context().global($scope);
-        let key = v8::String::new($scope, $name).unwrap();
-        global.set($scope, key.into(), $func.into());
-    }};
-}
-
 /// Create a timer callback that extracts (id, delay) and sends a message
 macro_rules! timer_callback {
     ($msg:ident) => {
         |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _: v8::ReturnValue| {
-            let Some(state) = get_timer_state(scope) else {
+            let Some(state) = get_state!(scope, "__timerState", TimerState) else {
                 return;
             };
 
@@ -49,16 +25,15 @@ macro_rules! timer_callback {
     };
 }
 
-pub fn setup_timers(scope: &mut v8::PinScope, scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>) {
+pub fn setup_timers(
+    scope: &mut v8::PinScope,
+    scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+) {
     // Store state in global scope
     let state = TimerState {
         scheduler_tx: scheduler_tx.clone(),
     };
-    let state_ptr = Box::into_raw(Box::new(state)) as *mut std::ffi::c_void;
-    let external = v8::External::new(scope, state_ptr);
-    let global = scope.get_current_context().global(scope);
-    let state_key = v8::String::new(scope, "__timerState").unwrap();
-    global.set(scope, state_key.into(), external.into());
+    store_state!(scope, "__timerState", state);
 
     // Register native timer functions
     let schedule_timeout_fn = v8::Function::new(scope, timer_callback!(ScheduleTimeout)).unwrap();
@@ -67,7 +42,7 @@ pub fn setup_timers(scope: &mut v8::PinScope, scheduler_tx: mpsc::UnboundedSende
     let clear_timer_fn = v8::Function::new(
         scope,
         |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _: v8::ReturnValue| {
-            let Some(state) = get_timer_state(scope) else {
+            let Some(state) = get_state!(scope, "__timerState", TimerState) else {
                 return;
             };
 
@@ -85,7 +60,9 @@ pub fn setup_timers(scope: &mut v8::PinScope, scheduler_tx: mpsc::UnboundedSende
     register_fn!(scope, "__nativeClearTimer", clear_timer_fn);
 
     // JavaScript timer wrappers
-    let code = r#"
+    exec_js!(
+        scope,
+        r#"
         globalThis.__timerCallbacks = new Map();
         globalThis.__nextTimerId = 1;
         globalThis.__intervalIds = new Set();
@@ -126,9 +103,6 @@ pub fn setup_timers(scope: &mut v8::PinScope, scheduler_tx: mpsc::UnboundedSende
                 }
             }
         };
-    "#;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
+    "#
+    );
 }

@@ -6,8 +6,8 @@
 //! Unlike SharedIsolate which uses OwnedIsolate (auto-enter), LockerManagedIsolate
 //! uses UnenteredIsolate and requires explicit locking via v8::Locker.
 
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use v8;
 
 use crate::security::CustomAllocator;
