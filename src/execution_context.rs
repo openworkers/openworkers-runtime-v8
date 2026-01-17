@@ -923,7 +923,7 @@ impl ExecutionContext {
         wall_guard: &TimeoutGuard,
         cpu_guard: &Option<CpuEnforcer>,
     ) -> Result<HttpResponse, String> {
-        let req = &fetch_init.req;
+        let mut req = fetch_init.req;
 
         // Create channel for response notification (like JSC)
         let (response_tx, _response_rx) = tokio::sync::oneshot::channel::<String>();
@@ -970,13 +970,14 @@ impl ExecutionContext {
                     init_obj.set(scope, headers_key.into(), headers_obj.into());
 
                     // Add body if present (as Uint8Array for binary support)
-                    if let RequestBody::Bytes(body_bytes) = &req.body
+                    // Use std::mem::take to get ownership, enabling zero-copy if Bytes is unique
+                    if let RequestBody::Bytes(body_bytes) = std::mem::take(&mut req.body)
                         && !body_bytes.is_empty()
                     {
                         let len = body_bytes.len();
+                        let vec: Vec<u8> = body_bytes.into(); // zero-copy if uniquely owned
                         let backing_store =
-                            v8::ArrayBuffer::new_backing_store_from_vec(body_bytes.to_vec())
-                                .make_shared();
+                            v8::ArrayBuffer::new_backing_store_from_vec(vec).make_shared();
                         let array_buffer =
                             v8::ArrayBuffer::with_backing_store(scope, &backing_store);
                         let uint8_array = v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();

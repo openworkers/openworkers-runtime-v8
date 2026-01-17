@@ -28,7 +28,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # V8 serialization (for automatic Rust <-> JS type conversion)
-serde_v8 = { package = "openworkers-serde-v8", version = "0.1.0" }
+serde_v8 = { package = "openworkers-serde-v8", version = "0.2.0" }
 
 # V8 Glue - binding macros
 gv8 = { package = "openworkers-glue-v8", version = "0.1.0" }

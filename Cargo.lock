@@ -986,10 +986,11 @@ dependencies = [
 
 [[package]]
 name = "openworkers-serde-v8"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b205c1e1cfc913a46e9c3dedeb4c53140ea770be8087e28feb30143990b73f5"
+checksum = "89cb57930898aac65d9ab8b8082736e379762dd6497160ea46100b90a6d63d87"
 dependencies = [
+ "bytes",
  "num-bigint",
  "openworkers-v8",
  "serde",

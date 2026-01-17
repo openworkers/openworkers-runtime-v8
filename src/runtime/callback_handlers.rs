@@ -62,7 +62,8 @@ pub fn populate_stream_chunk_result(
             result_obj.set(scope, done_key.into(), done_val.into());
 
             // Create Uint8Array from bytes using backing store transfer
-            let vec = bytes.to_vec();
+            // Use Vec::from(bytes) instead of to_vec() - avoids copy if Bytes is uniquely owned
+            let vec: Vec<u8> = bytes.into();
             let len = vec.len();
             let backing_store = v8::ArrayBuffer::new_backing_store_from_vec(vec);
             let array_buffer =
