@@ -3,125 +3,107 @@ use super::state::TimerState;
 use tokio::sync::mpsc;
 use v8;
 
+/// Helper to get timer state from global scope
+fn get_timer_state<'s>(scope: &mut v8::PinScope<'s, '_>) -> Option<&'s TimerState> {
+    let global = scope.get_current_context().global(scope);
+    let state_key = v8::String::new(scope, "__timerState")?;
+    let state_val = global.get(scope, state_key.into())?;
+
+    if !state_val.is_external() {
+        return None;
+    }
+
+    let external: v8::Local<v8::External> = state_val.try_into().ok()?;
+    let state_ptr = external.value() as *const TimerState;
+    Some(unsafe { &*state_ptr })
+}
+
 pub fn setup_timers(
     scope: &mut v8::PinScope,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
 ) {
+    // Store state in global scope
     let state = TimerState {
         scheduler_tx: scheduler_tx.clone(),
     };
-
-    // Create External to hold our state
     let state_ptr = Box::into_raw(Box::new(state)) as *mut std::ffi::c_void;
     let external = v8::External::new(scope, state_ptr);
-
     let global = scope.get_current_context().global(scope);
     let state_key = v8::String::new(scope, "__timerState").unwrap();
     global.set(scope, state_key.into(), external.into());
 
-    // Create __nativeScheduleTimeout function
+    // __nativeScheduleTimeout
     let schedule_timeout_fn = v8::Function::new(
         scope,
-        |scope: &mut v8::PinScope,
-         args: v8::FunctionCallbackArguments,
-         mut _retval: v8::ReturnValue| {
-            let global = scope.get_current_context().global(scope);
-            let state_key = v8::String::new(scope, "__timerState").unwrap();
-            let state_val = global.get(scope, state_key.into()).unwrap();
+        |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _: v8::ReturnValue| {
+            let Some(state) = get_timer_state(scope) else {
+                return;
+            };
 
-            if state_val.is_external() {
-                let external: v8::Local<v8::External> = state_val.try_into().unwrap();
-                let state_ptr = external.value() as *mut TimerState;
-                let state = unsafe { &*state_ptr };
-
-                if args.length() >= 2
-                    && let Some(id_val) = args.get(0).to_uint32(scope)
-                    && let Some(delay_val) = args.get(1).to_uint32(scope)
+            if args.length() >= 2 {
+                if let (Some(id), Some(delay)) =
+                    (args.get(0).to_uint32(scope), args.get(1).to_uint32(scope))
                 {
-                    let id = id_val.value() as u64;
-                    let delay = delay_val.value() as u64;
-                    let _ = state
-                        .scheduler_tx
-                        .send(SchedulerMessage::ScheduleTimeout(id, delay));
+                    let _ = state.scheduler_tx.send(SchedulerMessage::ScheduleTimeout(
+                        id.value() as u64,
+                        delay.value() as u64,
+                    ));
                 }
             }
         },
     )
     .unwrap();
 
-    // Create __nativeScheduleInterval function
+    // __nativeScheduleInterval
     let schedule_interval_fn = v8::Function::new(
         scope,
-        |scope: &mut v8::PinScope,
-         args: v8::FunctionCallbackArguments,
-         mut _retval: v8::ReturnValue| {
-            let global = scope.get_current_context().global(scope);
-            let state_key = v8::String::new(scope, "__timerState").unwrap();
-            let state_val = global.get(scope, state_key.into()).unwrap();
+        |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _: v8::ReturnValue| {
+            let Some(state) = get_timer_state(scope) else {
+                return;
+            };
 
-            if state_val.is_external() {
-                let external: v8::Local<v8::External> = state_val.try_into().unwrap();
-                let state_ptr = external.value() as *mut TimerState;
-                let state = unsafe { &*state_ptr };
-
-                if args.length() >= 2
-                    && let Some(id_val) = args.get(0).to_uint32(scope)
-                    && let Some(interval_val) = args.get(1).to_uint32(scope)
+            if args.length() >= 2 {
+                if let (Some(id), Some(interval)) =
+                    (args.get(0).to_uint32(scope), args.get(1).to_uint32(scope))
                 {
-                    let id = id_val.value() as u64;
-                    let interval = interval_val.value() as u64;
-                    let _ = state
-                        .scheduler_tx
-                        .send(SchedulerMessage::ScheduleInterval(id, interval));
+                    let _ = state.scheduler_tx.send(SchedulerMessage::ScheduleInterval(
+                        id.value() as u64,
+                        interval.value() as u64,
+                    ));
                 }
             }
         },
     )
     .unwrap();
 
-    // Create __nativeClearTimer function
+    // __nativeClearTimer
     let clear_timer_fn = v8::Function::new(
         scope,
-        |scope: &mut v8::PinScope,
-         args: v8::FunctionCallbackArguments,
-         mut _retval: v8::ReturnValue| {
-            let global = scope.get_current_context().global(scope);
-            let state_key = v8::String::new(scope, "__timerState").unwrap();
-            let state_val = global.get(scope, state_key.into()).unwrap();
+        |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _: v8::ReturnValue| {
+            let Some(state) = get_timer_state(scope) else {
+                return;
+            };
 
-            if state_val.is_external() {
-                let external: v8::Local<v8::External> = state_val.try_into().unwrap();
-                let state_ptr = external.value() as *mut TimerState;
-                let state = unsafe { &*state_ptr };
-
-                if args.length() >= 1
-                    && let Some(id_val) = args.get(0).to_uint32(scope)
-                {
-                    let id = id_val.value() as u64;
-                    let _ = state.scheduler_tx.send(SchedulerMessage::ClearTimer(id));
-                }
+            if let Some(id) = args.get(0).to_uint32(scope) {
+                let _ = state
+                    .scheduler_tx
+                    .send(SchedulerMessage::ClearTimer(id.value() as u64));
             }
         },
     )
     .unwrap();
 
     // Register native functions
-    let schedule_timeout_key = v8::String::new(scope, "__nativeScheduleTimeout").unwrap();
-    global.set(
-        scope,
-        schedule_timeout_key.into(),
-        schedule_timeout_fn.into(),
-    );
+    let global = scope.get_current_context().global(scope);
 
-    let schedule_interval_key = v8::String::new(scope, "__nativeScheduleInterval").unwrap();
-    global.set(
-        scope,
-        schedule_interval_key.into(),
-        schedule_interval_fn.into(),
-    );
+    let key = v8::String::new(scope, "__nativeScheduleTimeout").unwrap();
+    global.set(scope, key.into(), schedule_timeout_fn.into());
 
-    let clear_timer_key = v8::String::new(scope, "__nativeClearTimer").unwrap();
-    global.set(scope, clear_timer_key.into(), clear_timer_fn.into());
+    let key = v8::String::new(scope, "__nativeScheduleInterval").unwrap();
+    global.set(scope, key.into(), schedule_interval_fn.into());
+
+    let key = v8::String::new(scope, "__nativeClearTimer").unwrap();
+    global.set(scope, key.into(), clear_timer_fn.into());
 
     // JavaScript timer wrappers
     let code = r#"

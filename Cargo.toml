@@ -27,6 +27,9 @@ env_logger = "0.11"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
+# V8 serialization (for automatic Rust <-> JS type conversion)
+serde_v8 = { package = "openworkers-serde-v8", path = "../serde-v8" }
+
 # HTTP types
 bytes = { version = "1.11", features = ["serde"] }
 
