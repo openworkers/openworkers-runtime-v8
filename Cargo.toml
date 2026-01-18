@@ -37,7 +37,7 @@ serde_json = "1.0"
 serde_v8 = { package = "openworkers-serde-v8", version = "0.2.0" }
 
 # V8 Glue - binding macros
-gv8 = { package = "openworkers-glue-v8", version = "0.1.0" }
+glue_v8 = { package = "openworkers-glue-v8", version = "0.2.0" }
 
 # HTTP types
 bytes = { version = "1.11", features = ["serde"] }

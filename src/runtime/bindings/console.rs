@@ -7,7 +7,7 @@ use v8;
 
 /// Native console log function
 /// Args: level (i32), message (String)
-#[gv8::method(state = ConsoleState)]
+#[glue_v8::method(state = ConsoleState)]
 fn console_log(scope: &mut v8::PinScope, state: &Rc<ConsoleState>, level: i32, message: String) {
     let _ = scope;
 

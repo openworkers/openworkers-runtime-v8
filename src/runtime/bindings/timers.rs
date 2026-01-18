@@ -6,7 +6,7 @@ use v8;
 
 // Native timer functions using v8g macro
 
-#[gv8::method(state = TimerState)]
+#[glue_v8::method(state = TimerState)]
 fn native_schedule_timeout(scope: &mut v8::PinScope, state: &Rc<TimerState>, id: u64, delay: u64) {
     let _ = scope;
     let _ = state
@@ -14,7 +14,7 @@ fn native_schedule_timeout(scope: &mut v8::PinScope, state: &Rc<TimerState>, id:
         .send(SchedulerMessage::ScheduleTimeout(id, delay));
 }
 
-#[gv8::method(state = TimerState)]
+#[glue_v8::method(state = TimerState)]
 fn native_schedule_interval(
     scope: &mut v8::PinScope,
     state: &Rc<TimerState>,
@@ -27,7 +27,7 @@ fn native_schedule_interval(
         .send(SchedulerMessage::ScheduleInterval(id, interval));
 }
 
-#[gv8::method(state = TimerState)]
+#[glue_v8::method(state = TimerState)]
 fn native_clear_timer(scope: &mut v8::PinScope, state: &Rc<TimerState>, id: u64) {
     let _ = scope;
     let _ = state.scheduler_tx.send(SchedulerMessage::ClearTimer(id));

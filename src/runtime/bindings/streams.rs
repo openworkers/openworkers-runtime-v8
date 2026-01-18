@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use v8;
 
 /// Native stream read - reads a chunk from a native stream
-#[gv8::method(state = Rc<StreamState>)]
+#[glue_v8::method(state = Rc<StreamState>)]
 fn native_stream_read(
     scope: &mut v8::PinScope,
     state: &Rc<StreamState>,
@@ -38,7 +38,7 @@ fn native_stream_read(
 }
 
 /// Native stream cancel - cancels a native stream
-#[gv8::method(state = Rc<StreamState>)]
+#[glue_v8::method(state = Rc<StreamState>)]
 fn native_stream_cancel(scope: &mut v8::PinScope, state: &Rc<StreamState>, stream_id: u64) {
     let _ = scope;
     let _ = state
@@ -101,14 +101,14 @@ pub fn setup_stream_ops(
 }
 
 /// Create a new response stream
-#[gv8::method(state = Rc<ResponseStreamState>)]
+#[glue_v8::method(state = Rc<ResponseStreamState>)]
 fn response_stream_create(scope: &mut v8::PinScope, state: &Rc<ResponseStreamState>) -> u64 {
     let _ = scope;
     state.manager.create_stream("response".to_string())
 }
 
 /// Write to a response stream - returns true if written, false if full/error
-#[gv8::method(state = Rc<ResponseStreamState>)]
+#[glue_v8::method(state = Rc<ResponseStreamState>)]
 fn response_stream_write(
     scope: &mut v8::PinScope,
     state: &Rc<ResponseStreamState>,
@@ -130,7 +130,7 @@ fn response_stream_write(
 }
 
 /// End a response stream
-#[gv8::method(state = Rc<ResponseStreamState>)]
+#[glue_v8::method(state = Rc<ResponseStreamState>)]
 fn response_stream_end(scope: &mut v8::PinScope, state: &Rc<ResponseStreamState>, stream_id: u64) {
     let _ = scope;
     let _ = state
@@ -139,7 +139,7 @@ fn response_stream_end(scope: &mut v8::PinScope, state: &Rc<ResponseStreamState>
 }
 
 /// Check if a response stream is closed
-#[gv8::method(state = Rc<ResponseStreamState>)]
+#[glue_v8::method(state = Rc<ResponseStreamState>)]
 fn response_stream_is_closed(
     scope: &mut v8::PinScope,
     state: &Rc<ResponseStreamState>,
