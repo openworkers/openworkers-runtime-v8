@@ -51,7 +51,10 @@ pub mod worker_future;
 
 // Core API
 pub use execution_context::ExecutionContext;
-pub use gc::{ExternalMemoryGuard, GcTraceable, JsLock, JsLockRef, Tracked, tracked_guard};
+pub use gc::{
+    DeferredDestructionQueue, ExternalMemoryGuard, GcTraceable, JsLock, JsLockRef, Tracked,
+    tracked_guard,
+};
 
 // Re-export derive macro
 pub use gc_derive::GcTraceable as DeriveGcTraceable;

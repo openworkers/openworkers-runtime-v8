@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use v8;
 
+use crate::gc::DeferredDestructionQueue;
 use crate::security::CustomAllocator;
 use openworkers_core::RuntimeLimits;
 
@@ -24,6 +25,12 @@ pub struct LockerManagedIsolate {
     pub memory_limit_hit: Arc<AtomicBool>,
     /// Whether a snapshot was used for initialization
     pub use_snapshot: bool,
+    /// Queue for deferred V8 handle destructions
+    ///
+    /// Handles dropped without the lock held are queued here and
+    /// processed on the next lock acquisition. Wrapped in Arc for
+    /// safe sharing during lock acquisition.
+    pub deferred_destruction_queue: Arc<DeferredDestructionQueue>,
 }
 
 impl LockerManagedIsolate {
@@ -69,6 +76,7 @@ impl LockerManagedIsolate {
             limits,
             memory_limit_hit,
             use_snapshot,
+            deferred_destruction_queue: Arc::new(DeferredDestructionQueue::new()),
         }
     }
 

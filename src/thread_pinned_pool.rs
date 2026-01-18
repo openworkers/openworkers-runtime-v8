@@ -781,9 +781,13 @@ pub async fn execute_pinned(
     let platform = inner.isolate.platform;
     let limits = inner.isolate.limits.clone();
     let memory_limit_hit = Arc::clone(&inner.isolate.memory_limit_hit);
+    let destruction_queue = Arc::clone(&inner.isolate.deferred_destruction_queue);
 
     // Create v8::Locker for thread-safety
     let mut locker = v8::Locker::new(&mut inner.isolate.isolate);
+
+    // Process any pending deferred handle destructions (while lock is held)
+    destruction_queue.process_all();
 
     // Register JsLock for GC tracking (applies any pending memory adjustments)
     let _js_lock = JsLock::new(&mut locker);

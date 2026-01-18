@@ -191,8 +191,14 @@ impl PooledIsolate {
         entry.total_requests += 1;
         let total_requests = entry.total_requests;
 
+        // Clone Arc to the destruction queue so we can access it after borrowing isolate
+        let destruction_queue = Arc::clone(&entry.isolate.deferred_destruction_queue);
+
         // Create v8::Locker - handles enter/exit automatically via RAII
         let mut locker = v8::Locker::new(&mut entry.isolate.isolate);
+
+        // Process any pending deferred handle destructions (while lock is held)
+        destruction_queue.process_all();
 
         // Register JsLock for GC tracking (applies any pending memory adjustments)
         let _js_lock = JsLock::new(&mut locker);

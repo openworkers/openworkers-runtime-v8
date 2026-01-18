@@ -38,6 +38,9 @@ thread_local! {
 /// // Acquire the locker first (as usual)
 /// let mut locker = v8::Locker::new(&mut isolate);
 ///
+/// // Process deferred destructions first (for pooled isolates)
+/// destruction_queue.process_all(&mut locker);
+///
 /// // Then create JsLock for GC tracking
 /// let _gc_lock = JsLock::new(&mut *locker);
 ///
@@ -54,6 +57,9 @@ impl JsLock {
     ///
     /// The isolate must already be locked via v8::Locker.
     /// This applies any pending memory adjustments and registers for `try_current()`.
+    ///
+    /// Note: For pooled isolates, call `DeferredDestructionQueue::process_all()`
+    /// BEFORE creating JsLock to ensure deferred handles are cleaned up.
     pub fn new(isolate: &mut v8::Isolate) -> Self {
         let isolate_ptr = isolate as *mut _;
 
