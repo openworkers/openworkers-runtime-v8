@@ -1,4 +1,15 @@
+use super::state::PerformanceState;
+use std::rc::Rc;
+use std::time::Instant;
 use v8;
+
+/// Native performance.now() - returns elapsed milliseconds since worker start
+/// Rounded to 100µs precision to mitigate timing attacks
+#[glue_v8::method(fast, state = Rc<PerformanceState>)]
+fn performance_now(state: &Rc<PerformanceState>) -> f64 {
+    let micros = state.start.elapsed().as_micros() / 100 * 100;
+    micros as f64 / 1000.0
+}
 
 /// Setup global aliases for compatibility with browser/Node.js code
 /// Adds `self` and `global` as aliases for `globalThis`
@@ -14,30 +25,16 @@ pub fn setup_global_aliases(scope: &mut v8::PinScope) {
 }
 
 pub fn setup_performance(scope: &mut v8::PinScope) {
-    use std::time::Instant;
+    let state = Rc::new(PerformanceState {
+        start: Instant::now(),
+    });
 
-    // Store start time
-    let start = Box::into_raw(Box::new(Instant::now())) as *mut std::ffi::c_void;
-    let external = v8::External::new(scope, start);
+    // Store in context slot to keep Rc alive for the context's lifetime
+    scope.get_current_context().set_slot(state.clone());
 
-    let now_fn = v8::Function::builder(
-        |scope: &mut v8::PinScope,
-         args: v8::FunctionCallbackArguments,
-         mut retval: v8::ReturnValue| {
-            let data = args.data();
-
-            if let Ok(external) = v8::Local::<v8::External>::try_from(data) {
-                let start = unsafe { &*(external.value() as *const Instant) };
-                // Round to 100µs precision to mitigate timing attacks
-                let micros = start.elapsed().as_micros() / 100 * 100;
-                let elapsed_ms = micros as f64 / 1000.0;
-                retval.set(v8::Number::new(scope, elapsed_ms).into());
-            }
-        },
-    )
-    .data(external.into())
-    .build(scope)
-    .unwrap();
+    let now_fn = performance_now_v8_template(scope, &state)
+        .get_function(scope)
+        .unwrap();
 
     let context = scope.get_current_context();
     let global = context.global(scope);

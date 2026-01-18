@@ -43,3 +43,9 @@ pub struct StreamState {
 pub struct ResponseStreamState {
     pub manager: Arc<stream_manager::StreamManager>,
 }
+
+/// State for performance.now() timing
+#[derive(Clone)]
+pub struct PerformanceState {
+    pub start: std::time::Instant,
+}
