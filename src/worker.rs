@@ -1897,6 +1897,74 @@ pub(crate) fn setup_es_modules_handler(
             };
         }
 
+        // Same for task events (ES modules style)
+        if (typeof globalThis.default === 'object' && globalThis.default !== null && typeof globalThis.default.task === 'function') {
+            const moduleTask = globalThis.default.task;
+
+            // Wrap to pass env and ctx, and handle return value
+            globalThis.__taskHandler = async function(event) {
+                const waitUntilPromises = [];
+                globalThis.__taskResult = { success: true };
+
+                event.waitUntil = function(promise) {
+                    waitUntilPromises.push(Promise.resolve(promise));
+                };
+
+                event.respondWith = function(result) {
+                    if (result && typeof result === 'object') {
+                        globalThis.__taskResult = {
+                            success: result.success !== false,
+                            data: result.data,
+                            error: result.error
+                        };
+                    } else {
+                        globalThis.__taskResult = { success: true, data: result };
+                    }
+                };
+
+                const ctx = {
+                    waitUntil: event.waitUntil
+                };
+
+                try {
+                    const result = await moduleTask(event, globalThis.env, ctx);
+
+                    // If handler returns a value and respondWith wasn't called, use it
+                    if (result !== undefined && globalThis.__taskResult.data === undefined) {
+                        if (result && typeof result === 'object' && 'success' in result) {
+                            globalThis.__taskResult = {
+                                success: result.success !== false,
+                                data: result.data,
+                                error: result.error
+                            };
+                        } else {
+                            globalThis.__taskResult = { success: true, data: result };
+                        }
+                    }
+
+                    // Wait for all waitUntil promises
+                    if (waitUntilPromises.length > 0) {
+                        await Promise.all(waitUntilPromises);
+                    }
+                } catch (e) {
+                    globalThis.__taskResult = {
+                        success: false,
+                        error: e.message || String(e)
+                    };
+                } finally {
+                    globalThis.__requestComplete = true;
+                }
+            };
+        }
+
+        // If export default exists but no task, and no addEventListener handler, create a fallback
+        if (typeof globalThis.default === 'object' && globalThis.default !== null && typeof globalThis.default.task !== 'function' && typeof globalThis.__taskHandler !== 'function') {
+            // Fall back to scheduled handler if it exists (backward compat)
+            if (typeof globalThis.__scheduledHandler === 'function') {
+                globalThis.__taskHandler = globalThis.__scheduledHandler;
+            }
+        }
+
         // Final fallback: if __triggerFetch is still not defined (no addEventListener, no valid export default),
         // create a 501 handler. This handles cases like:
         // - globalThis.default = null

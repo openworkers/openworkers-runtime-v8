@@ -327,3 +327,182 @@ async fn test_task_event_schedule_source() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_task_event_es_modules_style() {
+    run_in_local(|| async {
+        // ES modules style: export default { task(event, env, ctx) }
+        // Transpiled as: globalThis.default = { task: function(event, env, ctx) { ... } }
+        let code = r#"
+            globalThis.default = {
+                async task(event, env, ctx) {
+                    // Can use return value instead of respondWith
+                    return {
+                        success: true,
+                        data: {
+                            taskId: event.taskId,
+                            hasPayload: event.payload !== null,
+                            style: 'es-modules'
+                        }
+                    };
+                }
+            };
+        "#;
+
+        let script = Script::new(code);
+        let mut worker = Worker::new(script, None).await.unwrap();
+
+        let payload = serde_json::json!({ "test": true });
+        let (task, rx) = Event::task(
+            "esm-test".to_string(),
+            Some(payload),
+            Some(TaskSource::Invoke { origin: None }),
+            1,
+        );
+        let result = worker.exec(task).await;
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+
+        let task_result = rx.await.unwrap();
+        assert!(task_result.success, "Task should succeed");
+
+        let data = task_result.data.unwrap();
+        assert_eq!(data["taskId"], "esm-test");
+        assert_eq!(data["hasPayload"], true);
+        assert_eq!(data["style"], "es-modules");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_task_event_es_modules_with_respond_with() {
+    run_in_local(|| async {
+        // ES modules can also use respondWith
+        let code = r#"
+            globalThis.default = {
+                task(event, env, ctx) {
+                    event.respondWith({
+                        success: true,
+                        data: { method: 'respondWith' }
+                    });
+                }
+            };
+        "#;
+
+        let script = Script::new(code);
+        let mut worker = Worker::new(script, None).await.unwrap();
+
+        let (task, rx) = Event::task(
+            "esm-respond-test".to_string(),
+            None,
+            Some(TaskSource::Invoke { origin: None }),
+            1,
+        );
+        let result = worker.exec(task).await;
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+
+        let task_result = rx.await.unwrap();
+        assert!(task_result.success, "Task should succeed");
+        assert_eq!(task_result.data.unwrap()["method"], "respondWith");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_task_event_es_modules_error() {
+    run_in_local(|| async {
+        let code = r#"
+            globalThis.default = {
+                task(event, env, ctx) {
+                    throw new Error("ES modules error");
+                }
+            };
+        "#;
+
+        let script = Script::new(code);
+        let mut worker = Worker::new(script, None).await.unwrap();
+
+        let (task, rx) = Event::task(
+            "esm-error-test".to_string(),
+            None,
+            Some(TaskSource::Invoke { origin: None }),
+            1,
+        );
+        let result = worker.exec(task).await;
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+
+        let task_result = rx.await.unwrap();
+        assert!(!task_result.success, "Task should fail");
+        assert!(task_result.error.unwrap().contains("ES modules error"));
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_task_respond_with_priority_over_return() {
+    run_in_local(|| async {
+        // respondWith should take priority over return value
+        let code = r#"
+            addEventListener('task', (event) => {
+                event.respondWith({
+                    success: true,
+                    data: { source: 'respondWith' }
+                });
+                // Return value should be ignored since respondWith was called
+                return { success: true, data: { source: 'return' } };
+            });
+        "#;
+
+        let script = Script::new(code);
+        let mut worker = Worker::new(script, None).await.unwrap();
+
+        let (task, rx) = Event::task(
+            "priority-test".to_string(),
+            None,
+            Some(TaskSource::Invoke { origin: None }),
+            1,
+        );
+        let result = worker.exec(task).await;
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+
+        let task_result = rx.await.unwrap();
+        assert!(task_result.success, "Task should succeed");
+        // respondWith should win
+        assert_eq!(task_result.data.unwrap()["source"], "respondWith");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_task_es_modules_respond_with_priority() {
+    run_in_local(|| async {
+        // Same for ES modules style
+        let code = r#"
+            globalThis.default = {
+                task(event, env, ctx) {
+                    event.respondWith({
+                        success: true,
+                        data: { source: 'respondWith' }
+                    });
+                    return { success: true, data: { source: 'return' } };
+                }
+            };
+        "#;
+
+        let script = Script::new(code);
+        let mut worker = Worker::new(script, None).await.unwrap();
+
+        let (task, rx) = Event::task(
+            "esm-priority-test".to_string(),
+            None,
+            Some(TaskSource::Invoke { origin: None }),
+            1,
+        );
+        let result = worker.exec(task).await;
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
+
+        let task_result = rx.await.unwrap();
+        assert!(task_result.success, "Task should succeed");
+        assert_eq!(task_result.data.unwrap()["source"], "respondWith");
+    })
+    .await;
+}
