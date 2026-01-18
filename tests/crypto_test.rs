@@ -1,7 +1,7 @@
 mod common;
 
 use common::run_in_local;
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task};
+use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, Script};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
@@ -31,7 +31,7 @@ async fn test_get_random_values() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -73,7 +73,7 @@ async fn test_digest_sha256() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -109,7 +109,7 @@ async fn test_digest_sha512() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -161,7 +161,7 @@ async fn test_hmac_sign_verify() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -217,7 +217,7 @@ async fn test_hmac_different_algorithms() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -283,7 +283,7 @@ async fn test_ecdsa_sign_verify() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -336,7 +336,7 @@ async fn test_ecdsa_verify_with_private_key() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -449,7 +449,7 @@ async fn test_rsa_sign_verify() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 

@@ -9,7 +9,7 @@
 mod common;
 
 use common::run_in_local;
-use openworkers_core::{DefaultOps, OperationsHandle, RuntimeLimits, Script, Task};
+use openworkers_core::{DefaultOps, Event, OperationsHandle, RuntimeLimits, Script};
 use openworkers_runtime_v8::{Worker, execute_pooled, init_pool};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -60,7 +60,7 @@ async fn bench_sequential_workers_with_io() {
                 .unwrap();
 
             // Execute JS
-            let (task, rx) = Task::scheduled(1000);
+            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
             worker.exec(task).await.unwrap();
             rx.await.unwrap();
 
@@ -124,7 +124,7 @@ async fn bench_concurrent_pool_with_io() {
 
                 // Execute JS using pool
                 let script = Script::new(SCHEDULED_SCRIPT);
-                let (task, rx) = Task::scheduled(1000);
+                let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
                 execute_pooled(&worker_id, script, ops, task).await.unwrap();
                 rx.await.unwrap();
 
@@ -204,7 +204,7 @@ async fn bench_high_concurrency_pool() {
 
                 // Execute JS
                 let script = Script::new(SCHEDULED_SCRIPT);
-                let (task, rx) = Task::scheduled(1000);
+                let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
                 execute_pooled(&worker_id, script, ops, task).await.unwrap();
                 rx.await.unwrap();
 

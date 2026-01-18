@@ -1,7 +1,7 @@
 mod common;
 
 use common::run_in_local;
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task};
+use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, Script};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
@@ -34,7 +34,7 @@ async fn test_env_variables() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(request);
+        let (task, rx) = Event::fetch(request);
         worker.exec(task).await.expect("Task should execute");
 
         let response = rx.await.expect("Should receive response");
@@ -70,7 +70,7 @@ async fn test_env_empty() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(request);
+        let (task, rx) = Event::fetch(request);
         worker.exec(task).await.expect("Task should execute");
 
         let response = rx.await.expect("Should receive response");
@@ -113,7 +113,7 @@ async fn test_env_readonly() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(request);
+        let (task, rx) = Event::fetch(request);
         worker.exec(task).await.expect("Task should execute");
 
         let response = rx.await.expect("Should receive response");

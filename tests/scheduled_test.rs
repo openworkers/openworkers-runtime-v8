@@ -1,7 +1,7 @@
 mod common;
 
 use common::run_in_local;
-use openworkers_core::{Script, Task};
+use openworkers_core::{Event, Script};
 use openworkers_runtime_v8::Worker;
 
 #[tokio::test(flavor = "current_thread")]
@@ -17,12 +17,13 @@ async fn test_scheduled_sync_handler() {
         let script = Script::new(code);
         let mut worker = Worker::new(script, None).await.unwrap();
 
-        let (task, rx) = Task::scheduled(1234567890);
+        let (task, rx) = Event::from_schedule("test-1".to_string(), 1234567890);
         let result = worker.exec(task).await;
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
 
         // Verify callback was called
-        rx.await.unwrap();
+        let task_result = rx.await.unwrap();
+        assert!(task_result.success, "Task should succeed");
 
         // Check global was set
         let executed = worker.get_global_u32("scheduledExecuted");
@@ -46,11 +47,12 @@ async fn test_scheduled_async_handler() {
         let script = Script::new(code);
         let mut worker = Worker::new(script, None).await.unwrap();
 
-        let (task, rx) = Task::scheduled(1234567890);
+        let (task, rx) = Event::from_schedule("test-2".to_string(), 1234567890);
         let result = worker.exec(task).await;
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
 
-        rx.await.unwrap();
+        let task_result = rx.await.unwrap();
+        assert!(task_result.success, "Task should succeed");
 
         // The async handler should have completed
         let value = worker.get_global_u32("asyncValue");
@@ -87,11 +89,12 @@ async fn test_scheduled_with_wait_until() {
         let script = Script::new(code);
         let mut worker = Worker::new(script, None).await.unwrap();
 
-        let (task, rx) = Task::scheduled(1234567890);
+        let (task, rx) = Event::from_schedule("test-3".to_string(), 1234567890);
         let result = worker.exec(task).await;
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
 
-        rx.await.unwrap();
+        let task_result = rx.await.unwrap();
+        assert!(task_result.success, "Task should succeed");
 
         // Both handler and waitUntil should have completed
         let handler_done = worker.get_global_u32("handlerDone");
@@ -121,11 +124,12 @@ async fn test_scheduled_es_modules_style() {
         let script = Script::new(code);
         let mut worker = Worker::new(script, None).await.unwrap();
 
-        let (task, rx) = Task::scheduled(1234567890);
+        let (task, rx) = Event::from_schedule("test-4".to_string(), 1234567890);
         let result = worker.exec(task).await;
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
 
-        rx.await.unwrap();
+        let task_result = rx.await.unwrap();
+        assert!(task_result.success, "Task should succeed");
 
         let value = worker.get_global_u32("esModuleScheduled");
         assert_eq!(value, Some(1), "esModuleScheduled should be true");

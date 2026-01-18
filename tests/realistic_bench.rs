@@ -26,8 +26,8 @@ mod common;
 
 use common::run_in_local;
 use openworkers_core::{
-    HttpMethod, HttpRequest, HttpResponse, LogLevel, OpFuture, OperationsHandler, RequestBody,
-    ResponseBody, RuntimeLimits, Script, Task,
+    Event, HttpMethod, HttpRequest, HttpResponse, LogLevel, OpFuture, OperationsHandler,
+    RequestBody, ResponseBody, RuntimeLimits, Script,
 };
 use openworkers_runtime_v8::{Worker, execute_pinned, execute_pooled, init_pinned_pool, init_pool};
 use rand::Rng;
@@ -248,7 +248,7 @@ async fn bench_legacy_simple() {
                 .await
                 .unwrap();
 
-            let (task, rx) = Task::fetch(make_request());
+            let (task, rx) = Event::fetch(make_request());
             worker.exec(task).await.unwrap();
             let _response = rx.await.unwrap();
 
@@ -287,7 +287,7 @@ async fn bench_legacy_with_fetch() {
                 .await
                 .unwrap();
 
-            let (task, rx) = Task::fetch(make_request());
+            let (task, rx) = Event::fetch(make_request());
             worker.exec(task).await.unwrap();
             let _response = rx.await.unwrap();
 
@@ -325,7 +325,7 @@ async fn bench_shared_simple() {
         for i in 0..iterations {
             let worker_id = format!("shared-simple-{}", i % 10);
             let script = Script::new(SIMPLE_HANDLER);
-            let (task, rx) = Task::fetch(make_request());
+            let (task, rx) = Event::fetch(make_request());
 
             execute_pooled(&worker_id, script, ops.clone(), task)
                 .await
@@ -366,7 +366,7 @@ async fn bench_shared_with_fetch() {
         for i in 0..iterations {
             let worker_id = format!("shared-fetch-{}", i % 10);
             let script = Script::new(FETCH_HANDLER);
-            let (task, rx) = Task::fetch(make_request());
+            let (task, rx) = Event::fetch(make_request());
 
             execute_pooled(&worker_id, script, ops.clone(), task)
                 .await
@@ -407,7 +407,7 @@ async fn bench_shared_multi_fetch() {
         for i in 0..iterations {
             let worker_id = format!("shared-multi-{}", i % 5);
             let script = Script::new(MULTI_FETCH_HANDLER);
-            let (task, rx) = Task::fetch(make_request());
+            let (task, rx) = Event::fetch(make_request());
 
             execute_pooled(&worker_id, script, ops.clone(), task)
                 .await
@@ -448,7 +448,7 @@ async fn bench_pinned_simple() {
         for i in 0..iterations {
             let worker_id = format!("pinned-simple-{}", i % 10);
             let script = Script::new(SIMPLE_HANDLER);
-            let (task, rx) = Task::fetch(make_request());
+            let (task, rx) = Event::fetch(make_request());
 
             execute_pinned(&worker_id, script, ops.clone(), task)
                 .await
@@ -489,7 +489,7 @@ async fn bench_pinned_with_fetch() {
         for i in 0..iterations {
             let worker_id = format!("pinned-fetch-{}", i % 10);
             let script = Script::new(FETCH_HANDLER);
-            let (task, rx) = Task::fetch(make_request());
+            let (task, rx) = Event::fetch(make_request());
 
             execute_pinned(&worker_id, script, ops.clone(), task)
                 .await
@@ -530,7 +530,7 @@ async fn bench_pinned_multi_fetch() {
         for i in 0..iterations {
             let worker_id = format!("pinned-multi-{}", i % 5);
             let script = Script::new(MULTI_FETCH_HANDLER);
-            let (task, rx) = Task::fetch(make_request());
+            let (task, rx) = Event::fetch(make_request());
 
             execute_pinned(&worker_id, script, ops.clone(), task)
                 .await

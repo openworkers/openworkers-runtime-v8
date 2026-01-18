@@ -1,7 +1,7 @@
 mod common;
 
 use common::run_in_local;
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task};
+use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, Script};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
@@ -33,7 +33,7 @@ async fn test_url_search_params_basic() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -91,7 +91,7 @@ async fn test_url_search_params_methods() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -135,7 +135,7 @@ async fn test_url_search_params_iteration() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -177,7 +177,7 @@ async fn test_url_with_search_params() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 

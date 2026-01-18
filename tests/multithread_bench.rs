@@ -6,7 +6,7 @@
 //! Run with:
 //!   cargo test --test multithread_bench -- --nocapture --test-threads=1
 
-use openworkers_core::{DefaultOps, OperationsHandle, RuntimeLimits, Script, Task};
+use openworkers_core::{DefaultOps, Event, OperationsHandle, RuntimeLimits, Script};
 use openworkers_runtime_v8::{Worker, execute_pinned, execute_pooled, init_pinned_pool, init_pool};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
@@ -107,7 +107,7 @@ fn bench_shared_pool(config: &BenchConfig) -> BenchResult {
                                 let worker_id =
                                     format!("shared-t{}-w{}", thread_id, i % config.num_workers);
                                 let script = Script::new(SCRIPT);
-                                let (task, rx) = Task::scheduled(1000);
+                                let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
                                 execute_pooled(&worker_id, script, ops.clone(), task)
                                     .await
@@ -169,7 +169,7 @@ fn bench_pinned_pool(config: &BenchConfig) -> BenchResult {
                                 let worker_id =
                                     format!("pinned-t{}-w{}", thread_id, i % config.num_workers);
                                 let script = Script::new(SCRIPT);
-                                let (task, rx) = Task::scheduled(1000);
+                                let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
                                 execute_pinned(&worker_id, script, ops.clone(), task)
                                     .await
@@ -231,7 +231,7 @@ fn bench_legacy(config: &BenchConfig) -> BenchResult {
                                     .await
                                     .unwrap();
 
-                                let (task, rx) = Task::scheduled(1000);
+                                let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
                                 worker.exec(task).await.unwrap();
                                 rx.await.unwrap();
 

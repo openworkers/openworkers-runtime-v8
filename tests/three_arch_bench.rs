@@ -13,7 +13,7 @@
 mod common;
 
 use common::run_in_local;
-use openworkers_core::{DefaultOps, OperationsHandle, RuntimeLimits, Script, Task};
+use openworkers_core::{DefaultOps, Event, OperationsHandle, RuntimeLimits, Script};
 use openworkers_runtime_v8::{Worker, execute_pinned, execute_pooled, init_pinned_pool, init_pool};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -91,7 +91,7 @@ async fn bench_legacy_standard() {
                 .await
                 .unwrap();
 
-            let (task, rx) = Task::scheduled(1000);
+            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
             worker.exec(task).await.unwrap();
             rx.await.unwrap();
 
@@ -124,7 +124,7 @@ async fn bench_legacy_cpu_bound() {
                 .await
                 .unwrap();
 
-            let (task, rx) = Task::scheduled(1000);
+            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
             worker.exec(task).await.unwrap();
             rx.await.unwrap();
 
@@ -162,7 +162,7 @@ async fn bench_shared_standard() {
         for i in 0..iterations {
             let worker_id = format!("shared-worker-{}", i % 10); // 10 unique workers
             let script = Script::new(SIMPLE_SCRIPT);
-            let (task, rx) = Task::scheduled(1000);
+            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
             execute_pooled(&worker_id, script, ops.clone(), task)
                 .await
@@ -205,7 +205,7 @@ async fn bench_shared_cpu_bound() {
         for i in 0..iterations {
             let worker_id = format!("shared-cpu-{}", i % 10);
             let script = Script::new(CPU_HEAVY_SCRIPT);
-            let (task, rx) = Task::scheduled(1000);
+            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
             execute_pooled(&worker_id, script, ops.clone(), task)
                 .await
@@ -239,7 +239,7 @@ async fn bench_shared_warm_cache() {
         // Pre-warm
         {
             let script = Script::new(SIMPLE_SCRIPT);
-            let (task, rx) = Task::scheduled(1000);
+            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
             execute_pooled("warm-shared", script, ops.clone(), task)
                 .await
                 .unwrap();
@@ -250,7 +250,7 @@ async fn bench_shared_warm_cache() {
 
         for i in 0..iterations {
             let script = Script::new(SIMPLE_SCRIPT);
-            let (task, rx) = Task::scheduled(1000);
+            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
             execute_pooled("warm-shared", script, ops.clone(), task)
                 .await
@@ -291,7 +291,7 @@ async fn bench_pinned_standard() {
         for i in 0..iterations {
             let worker_id = format!("pinned-worker-{}", i % 10);
             let script = Script::new(SIMPLE_SCRIPT);
-            let (task, rx) = Task::scheduled(1000);
+            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
             execute_pinned(&worker_id, script, ops.clone(), task)
                 .await
@@ -334,7 +334,7 @@ async fn bench_pinned_cpu_bound() {
         for i in 0..iterations {
             let worker_id = format!("pinned-cpu-{}", i % 10);
             let script = Script::new(CPU_HEAVY_SCRIPT);
-            let (task, rx) = Task::scheduled(1000);
+            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
             execute_pinned(&worker_id, script, ops.clone(), task)
                 .await
@@ -368,7 +368,7 @@ async fn bench_pinned_warm_cache() {
         // Pre-warm
         {
             let script = Script::new(SIMPLE_SCRIPT);
-            let (task, rx) = Task::scheduled(1000);
+            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
             execute_pinned("warm-pinned", script, ops.clone(), task)
                 .await
                 .unwrap();
@@ -379,7 +379,7 @@ async fn bench_pinned_warm_cache() {
 
         for i in 0..iterations {
             let script = Script::new(SIMPLE_SCRIPT);
-            let (task, rx) = Task::scheduled(1000);
+            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
             execute_pinned("warm-pinned", script, ops.clone(), task)
                 .await

@@ -3,7 +3,7 @@
 mod common;
 
 use common::run_in_local;
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task, WorkerCode};
+use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, Script, WorkerCode};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
@@ -31,7 +31,7 @@ async fn test_es_modules_fetch() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -75,7 +75,7 @@ async fn test_es_modules_with_env() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -111,7 +111,7 @@ async fn test_es_modules_priority_over_addeventlistener() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -155,7 +155,7 @@ async fn test_es_modules_wait_until() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -224,7 +224,7 @@ async fn test_es_modules_multiple_wait_until() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let _response = rx.await.unwrap();
 
@@ -267,7 +267,7 @@ async fn test_service_worker_wait_until() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -327,7 +327,7 @@ async fn test_es_modules_sse_streaming() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
 
         // Should complete within 5 seconds (3 events * 50ms = 150ms minimum)
         let result =

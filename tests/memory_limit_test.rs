@@ -2,7 +2,7 @@ mod common;
 
 use common::run_in_local;
 use openworkers_core::{
-    HttpMethod, HttpRequest, RequestBody, RuntimeLimits, Script, Task, TerminationReason,
+    Event, HttpMethod, HttpRequest, RequestBody, RuntimeLimits, Script, TerminationReason,
 };
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
@@ -43,7 +43,7 @@ async fn test_memory_limit_arraybuffer_allocation() {
             body: RequestBody::None,
         };
 
-        let (task, _rx) = Task::fetch(req);
+        let (task, _rx) = Event::fetch(req);
         let result = worker.exec(task).await;
 
         // exec() should return MemoryLimit termination reason
@@ -92,7 +92,7 @@ async fn test_memory_limit_uint8array_allocation() {
             body: RequestBody::None,
         };
 
-        let (task, _rx) = Task::fetch(req);
+        let (task, _rx) = Event::fetch(req);
         let result = worker.exec(task).await;
 
         // exec() should return MemoryLimit termination reason
@@ -147,7 +147,7 @@ async fn test_memory_limit_incremental_allocation() {
             body: RequestBody::None,
         };
 
-        let (task, _rx) = Task::fetch(req);
+        let (task, _rx) = Event::fetch(req);
         let result = worker.exec(task).await;
 
         // exec() should return MemoryLimit termination reason
@@ -198,7 +198,7 @@ async fn test_memory_within_limit() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         let result = worker.exec(task).await;
 
         // exec() should return Ok - no memory limit hit

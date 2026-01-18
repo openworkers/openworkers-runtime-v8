@@ -1,7 +1,7 @@
 mod common;
 
 use common::run_in_local;
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task};
+use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, Script};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 use std::time::Instant;
@@ -30,7 +30,7 @@ async fn bench_simple_response() {
                 body: RequestBody::None,
             };
 
-            let (task, rx) = Task::fetch(req);
+            let (task, rx) = Event::fetch(req);
             worker.exec(task).await.unwrap();
             rx.await.unwrap();
         }
@@ -79,7 +79,7 @@ async fn bench_async_response() {
                 body: RequestBody::None,
             };
 
-            let (task, rx) = Task::fetch(req);
+            let (task, rx) = Event::fetch(req);
             worker.exec(task).await.unwrap();
             rx.await.unwrap();
         }
@@ -174,7 +174,7 @@ async fn bench_complex_scenario() {
                 body: RequestBody::None,
             };
 
-            let (task, rx) = Task::fetch(req);
+            let (task, rx) = Event::fetch(req);
             worker.exec(task).await.unwrap();
             rx.await.unwrap();
         }

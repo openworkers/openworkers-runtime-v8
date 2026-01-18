@@ -24,7 +24,7 @@ use crate::runtime::{bindings, crypto, streams, text_encoding};
 use crate::security::{CpuEnforcer, TimeoutGuard};
 use crate::shared_isolate::SharedIsolate;
 use openworkers_core::{
-    HttpResponse, OperationsHandle, RequestBody, ResponseBody, RuntimeLimits, Script, Task,
+    Event, HttpResponse, OperationsHandle, RequestBody, ResponseBody, RuntimeLimits, Script,
     TerminationReason, WorkerCode,
 };
 
@@ -754,7 +754,7 @@ impl ExecutionContext {
     }
 
     /// Execute a task in this context
-    pub async fn exec(&mut self, mut task: Task) -> Result<(), TerminationReason> {
+    pub async fn exec(&mut self, mut task: Event) -> Result<(), TerminationReason> {
         // Check if aborted before starting
         if self.aborted.load(Ordering::SeqCst) {
             return Err(TerminationReason::Aborted);
@@ -773,18 +773,18 @@ impl ExecutionContext {
 
         // Execute the task
         let result = match task {
-            Task::Fetch(ref mut init) => {
+            Event::Fetch(ref mut init) => {
                 let fetch_init = init.take().ok_or(TerminationReason::Other(
                     "FetchInit already consumed".to_string(),
                 ))?;
                 self.trigger_fetch_event(fetch_init, &wall_guard, &cpu_guard)
                     .await
             }
-            Task::Scheduled(ref mut init) => {
-                let scheduled_init = init.take().ok_or(TerminationReason::Other(
-                    "ScheduledInit already consumed".to_string(),
+            Event::Task(ref mut init) => {
+                let task_init = init.take().ok_or(TerminationReason::Other(
+                    "TaskInit already consumed".to_string(),
                 ))?;
-                self.trigger_scheduled_event(scheduled_init, &wall_guard, &cpu_guard)
+                self.trigger_task_event(task_init, &wall_guard, &cpu_guard)
                     .await
                     .map(|_| HttpResponse {
                         status: 200,
@@ -1192,14 +1192,20 @@ impl ExecutionContext {
         })
     }
 
-    /// Trigger a scheduled event
-    async fn trigger_scheduled_event(
+    /// Trigger a task event
+    async fn trigger_task_event(
         &mut self,
-        scheduled_init: openworkers_core::ScheduledInit,
+        task_init: openworkers_core::TaskInit,
         wall_guard: &TimeoutGuard,
         cpu_guard: &Option<CpuEnforcer>,
     ) -> Result<(), String> {
-        // Trigger scheduled handler
+        // Extract scheduled time if this is a schedule-triggered task
+        let scheduled_time = match &task_init.source {
+            Some(openworkers_core::TaskSource::Schedule { time }) => Some(*time),
+            _ => None,
+        };
+
+        // Trigger task handler
         {
             use std::pin::pin;
             unsafe {
@@ -1210,22 +1216,66 @@ impl ExecutionContext {
                 let scope = &mut v8::ContextScope::new(&mut scope, context);
 
                 let global = context.global(scope);
-                let handler_key = v8::String::new(scope, "__scheduledHandler").unwrap();
 
-                if let Some(handler_val) = global.get(scope, handler_key.into())
+                // Try __taskHandler first (new unified handler)
+                let task_handler_key = v8::String::new(scope, "__taskHandler").unwrap();
+                let scheduled_handler_key = v8::String::new(scope, "__scheduledHandler").unwrap();
+
+                if let Some(handler_val) = global.get(scope, task_handler_key.into())
                     && handler_val.is_function()
                 {
                     let handler_fn: v8::Local<v8::Function> = handler_val.try_into().unwrap();
 
-                    // Create event object
+                    // Create event object with full task info
                     let event_obj = v8::Object::new(scope);
-                    let time_key = v8::String::new(scope, "scheduledTime").unwrap();
-                    let time_val = v8::Number::new(scope, scheduled_init.time as f64);
-                    event_obj.set(scope, time_key.into(), time_val.into());
+
+                    // Set taskId
+                    let id_key = v8::String::new(scope, "taskId").unwrap();
+                    let id_val = v8::String::new(scope, &task_init.task_id).unwrap();
+                    event_obj.set(scope, id_key.into(), id_val.into());
+
+                    // Set attempt
+                    let attempt_key = v8::String::new(scope, "attempt").unwrap();
+                    let attempt_val = v8::Number::new(scope, task_init.attempt as f64);
+                    event_obj.set(scope, attempt_key.into(), attempt_val.into());
+
+                    // Set payload if present
+                    if let Some(payload) = &task_init.payload {
+                        let payload_key = v8::String::new(scope, "payload").unwrap();
+                        let payload_str = serde_json::to_string(payload).unwrap_or_default();
+                        let payload_json = v8::String::new(scope, &payload_str).unwrap();
+                        if let Some(parsed) = v8::json::parse(scope, payload_json) {
+                            event_obj.set(scope, payload_key.into(), parsed);
+                        }
+                    }
+
+                    // Set scheduledTime for backward compat
+                    if let Some(time) = scheduled_time {
+                        let time_key = v8::String::new(scope, "scheduledTime").unwrap();
+                        let time_val = v8::Number::new(scope, time as f64);
+                        event_obj.set(scope, time_key.into(), time_val.into());
+                    }
 
                     let result = handler_fn.call(scope, global.into(), &[event_obj.into()]);
 
-                    // If call returned None, V8 was terminated (CPU/wall-clock timeout)
+                    if result.is_none() {
+                        return Err("Execution terminated".to_string());
+                    }
+                } else if let Some(handler_val) = global.get(scope, scheduled_handler_key.into())
+                    && handler_val.is_function()
+                {
+                    // Fallback to __scheduledHandler for backward compat
+                    let handler_fn: v8::Local<v8::Function> = handler_val.try_into().unwrap();
+
+                    let event_obj = v8::Object::new(scope);
+                    if let Some(time) = scheduled_time {
+                        let time_key = v8::String::new(scope, "scheduledTime").unwrap();
+                        let time_val = v8::Number::new(scope, time as f64);
+                        event_obj.set(scope, time_key.into(), time_val.into());
+                    }
+
+                    let result = handler_fn.call(scope, global.into(), &[event_obj.into()]);
+
                     if result.is_none() {
                         return Err("Execution terminated".to_string());
                     }
@@ -1234,11 +1284,71 @@ impl ExecutionContext {
         }
 
         // Wait for handler to complete (including async work and waitUntil promises)
-        // No abort detection needed for scheduled events (no streaming response)
+        // No abort detection needed for task events (no streaming response)
         self.await_event_loop(wall_guard, cpu_guard, EventLoopExit::HandlerComplete, None)
             .await?;
 
-        let _ = scheduled_init.res_tx.send(());
+        // Read __taskResult from JS and send it back
+        let task_result = {
+            use std::pin::pin;
+            unsafe {
+                let isolate = &mut *self.isolate;
+                let scope = pin!(v8::HandleScope::new(isolate));
+                let mut scope = scope.init();
+                let context = v8::Local::new(&scope, &self.context);
+                let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+                let global = context.global(scope);
+                let result_key = v8::String::new(scope, "__taskResult").unwrap();
+
+                if let Some(result_val) = global.get(scope, result_key.into()) {
+                    if result_val.is_object() {
+                        let result_obj: v8::Local<v8::Object> = result_val.try_into().unwrap();
+
+                        // Extract success
+                        let success_key = v8::String::new(scope, "success").unwrap();
+                        let success = result_obj
+                            .get(scope, success_key.into())
+                            .map(|v| v.is_true())
+                            .unwrap_or(true);
+
+                        // Extract data (serialize to JSON)
+                        let data_key = v8::String::new(scope, "data").unwrap();
+                        let data = result_obj.get(scope, data_key.into()).and_then(|v| {
+                            if v.is_undefined() || v.is_null() {
+                                None
+                            } else {
+                                let json_str = v8::json::stringify(scope, v)?;
+                                let json_string = json_str.to_rust_string_lossy(scope);
+                                serde_json::from_str(&json_string).ok()
+                            }
+                        });
+
+                        // Extract error
+                        let error_key = v8::String::new(scope, "error").unwrap();
+                        let error = result_obj.get(scope, error_key.into()).and_then(|v| {
+                            if v.is_undefined() || v.is_null() {
+                                None
+                            } else {
+                                Some(v.to_rust_string_lossy(scope))
+                            }
+                        });
+
+                        openworkers_core::TaskResult {
+                            success,
+                            data,
+                            error,
+                        }
+                    } else {
+                        openworkers_core::TaskResult::success()
+                    }
+                } else {
+                    openworkers_core::TaskResult::success()
+                }
+            }
+        };
+
+        let _ = task_init.res_tx.send(task_result);
         Ok(())
     }
 

@@ -11,7 +11,8 @@ struct TestBuffer {
     data: Vec<u8>,
     #[gc(track)]
     name: String,
-    // Not tracked
+    // Not tracked (intentionally unused to test that non-tracked fields are ignored)
+    #[allow(dead_code)]
     id: u64,
 }
 
@@ -30,6 +31,8 @@ fn test_derive_gc_traceable() {
 #[derive(DeriveGcTraceable)]
 #[gc(crate_path = "crate")]
 struct EmptyStruct {
+    // Intentionally not tracked to test zero-size result
+    #[allow(dead_code)]
     value: u64,
 }
 

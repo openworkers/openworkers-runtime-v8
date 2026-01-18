@@ -3,7 +3,7 @@ mod common;
 use common::run_in_local;
 #[cfg(target_os = "linux")]
 use openworkers_core::TerminationReason;
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody, RuntimeLimits, Script, Task};
+use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, RuntimeLimits, Script};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
@@ -45,7 +45,7 @@ async fn test_wall_clock_timeout_infinite_loop() {
             body: RequestBody::None,
         };
 
-        let (task, _rx) = Task::fetch(req);
+        let (task, _rx) = Event::fetch(req);
         let result = worker.exec(task).await;
 
         // exec() should return WallClockTimeout termination reason
@@ -96,7 +96,7 @@ async fn test_wall_clock_timeout_async_loop() {
             body: RequestBody::None,
         };
 
-        let (task, _rx) = Task::fetch(req);
+        let (task, _rx) = Event::fetch(req);
         let result = worker.exec(task).await;
 
         // Should be wall-clock timeout since it's waiting (not computing)
@@ -144,7 +144,7 @@ async fn test_fast_execution_no_timeout() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         let result = worker.exec(task).await;
 
         // Should succeed - no timeout
@@ -194,7 +194,7 @@ async fn test_disabled_timeout_allows_long_execution() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         let result = worker.exec(task).await;
 
         // Should succeed since timeout is disabled
@@ -246,7 +246,7 @@ mod cpu_tests {
                 body: RequestBody::None,
             };
 
-            let (task, _rx) = Task::fetch(req);
+            let (task, _rx) = Event::fetch(req);
             let result = worker.exec(task).await;
 
             // exec() should return CpuTimeLimit termination reason
@@ -294,7 +294,7 @@ mod cpu_tests {
                 body: RequestBody::None,
             };
 
-            let (task, _rx) = Task::fetch(req);
+            let (task, _rx) = Event::fetch(req);
             let result = worker.exec(task).await;
 
             // Should be terminated by CPU limit
@@ -342,7 +342,7 @@ mod cpu_tests {
                 body: RequestBody::None,
             };
 
-            let (task, rx) = Task::fetch(req);
+            let (task, rx) = Event::fetch(req);
             let result = worker.exec(task).await;
 
             // Should succeed - sleep doesn't count as CPU time
@@ -386,7 +386,7 @@ mod cpu_tests {
                 body: RequestBody::None,
             };
 
-            let (task, _rx) = Task::fetch(req);
+            let (task, _rx) = Event::fetch(req);
             let result = worker.exec(task).await;
 
             // CPU limit should be hit first since it's 200ms

@@ -1,7 +1,7 @@
 mod common;
 
 use common::run_in_local;
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task};
+use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, Script};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
@@ -28,7 +28,7 @@ async fn test_set_timeout() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         let result = worker.exec(task).await;
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
 
@@ -72,7 +72,7 @@ async fn test_set_interval_and_clear() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         rx.await.unwrap();
 
@@ -111,7 +111,7 @@ async fn test_clear_timeout() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         rx.await.unwrap();
 
@@ -151,7 +151,7 @@ async fn test_async_response() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         let result = worker.exec(task).await;
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result);
 
@@ -192,7 +192,7 @@ async fn test_promise_rejection_handling() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
 
         let response = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx)
@@ -236,7 +236,7 @@ async fn test_multiple_async_operations() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
 
         let response = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx)
@@ -278,7 +278,7 @@ async fn test_custom_headers() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
 
         let response = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx)

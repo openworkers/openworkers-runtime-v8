@@ -17,7 +17,7 @@ use tokio::sync::{Mutex, Semaphore};
 use crate::LockerManagedIsolate;
 use crate::execution_context::ExecutionContext;
 use crate::gc::JsLock;
-use openworkers_core::{OperationsHandle, RuntimeLimits, Script, Task, TerminationReason};
+use openworkers_core::{Event, OperationsHandle, RuntimeLimits, Script, TerminationReason};
 
 // ============================================================================
 // Configuration
@@ -682,7 +682,7 @@ pub async fn execute_pinned(
     owner_id: &str,
     script: Script,
     ops: OperationsHandle,
-    task: Task,
+    task: Event,
 ) -> Result<(), TerminationReason> {
     TOTAL_REQUESTS.fetch_add(1, Ordering::Relaxed);
 

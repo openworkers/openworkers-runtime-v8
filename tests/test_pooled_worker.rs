@@ -3,7 +3,7 @@
 mod common;
 
 use common::run_in_local;
-use openworkers_core::{DefaultOps, OperationsHandle, RuntimeLimits, Script, Task};
+use openworkers_core::{DefaultOps, Event, OperationsHandle, RuntimeLimits, Script};
 use openworkers_runtime_v8::{get_pool_stats, init_pool};
 use std::sync::Arc;
 
@@ -48,7 +48,7 @@ async fn test_execute_pooled_simple() {
         let script = Script::new(code);
 
         // Create a scheduled task
-        let (task, _rx) = Task::scheduled(1000);
+        let (task, _rx) = Event::from_schedule("test-pooled".to_string(), 1000);
 
         // Create operations handle (DefaultOps for testing)
         let ops: OperationsHandle = Arc::new(DefaultOps);

@@ -74,8 +74,8 @@ pub use worker_future::WorkerFuture;
 
 // Re-export common types from openworkers-core
 pub use openworkers_core::{
-    FetchInit, HttpMethod, HttpRequest, HttpResponse, HttpResponseMeta, LogEvent, LogLevel,
-    Operation, OperationResult, OperationsHandle, OperationsHandler, RequestBody, ResponseBody,
-    ResponseSender, RuntimeLimits, ScheduledInit, Script, Task, TaskType, TerminationReason,
-    Worker as WorkerTrait,
+    Event, EventType, FetchInit, HttpMethod, HttpRequest, HttpResponse, HttpResponseMeta, LogEvent,
+    LogLevel, Operation, OperationResult, OperationsHandle, OperationsHandler, RequestBody,
+    ResponseBody, ResponseSender, RuntimeLimits, Script, TaskInit, TaskResult, TaskSource,
+    TerminationReason, Worker as WorkerTrait,
 };

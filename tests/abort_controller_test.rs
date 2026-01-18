@@ -1,7 +1,7 @@
 mod common;
 
 use common::run_in_local;
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task};
+use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, Script};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
@@ -37,7 +37,7 @@ async fn test_abort_controller_basic() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -76,7 +76,7 @@ async fn test_abort_signal_listener() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -109,7 +109,7 @@ async fn test_abort_signal_reason() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -141,7 +141,7 @@ async fn test_abort_signal_static_abort() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 

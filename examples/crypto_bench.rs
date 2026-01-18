@@ -1,5 +1,5 @@
 // Quick crypto benchmark
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task};
+use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, Script};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 use tokio::task::LocalSet;
@@ -61,7 +61,7 @@ async fn benchmark_hmac() {
         body: RequestBody::None,
     };
 
-    let (task, rx) = Task::fetch(req);
+    let (task, rx) = Event::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
     let body = response.body.collect().await.unwrap();
@@ -115,7 +115,7 @@ async fn benchmark_ecdsa() {
         body: RequestBody::None,
     };
 
-    let (task, rx) = Task::fetch(req);
+    let (task, rx) = Event::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
     let body = response.body.collect().await.unwrap();
@@ -154,7 +154,7 @@ async fn benchmark_sha256() {
         body: RequestBody::None,
     };
 
-    let (task, rx) = Task::fetch(req);
+    let (task, rx) = Event::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
     let body = response.body.collect().await.unwrap();
@@ -234,7 +234,7 @@ async fn benchmark_rsa() {
         body: RequestBody::None,
     };
 
-    let (task, rx) = Task::fetch(req);
+    let (task, rx) = Event::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
     let body = response.body.collect().await.unwrap();

@@ -11,7 +11,7 @@
 mod common;
 
 use common::run_in_local;
-use openworkers_core::{DefaultOps, OperationsHandle, RuntimeLimits, Script, Task};
+use openworkers_core::{DefaultOps, Event, OperationsHandle, RuntimeLimits, Script};
 use openworkers_runtime_v8::{Worker, execute_pooled, init_pool};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -54,7 +54,7 @@ async fn bench_legacy_standard() {
                 .await
                 .unwrap();
 
-            let (task, rx) = Task::scheduled(1000);
+            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
             worker.exec(task).await.unwrap();
             rx.await.unwrap();
 
@@ -104,7 +104,7 @@ async fn bench_legacy_cpu_bound() {
                 .await
                 .unwrap();
 
-            let (task, rx) = Task::scheduled(1000);
+            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
             worker.exec(task).await.unwrap();
             rx.await.unwrap();
 
@@ -152,7 +152,7 @@ async fn bench_pool_standard() {
         for i in 0..iterations {
             let worker_id = format!("worker-{}", i);
             let script = Script::new(SIMPLE_SCRIPT);
-            let (task, rx) = Task::scheduled(1000);
+            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
             execute_pooled(&worker_id, script, ops.clone(), task)
                 .await
@@ -204,7 +204,7 @@ async fn bench_pool_cpu_bound() {
         for i in 0..iterations {
             let worker_id = format!("cpu-worker-{}", i);
             let script = Script::new(SIMPLE_SCRIPT);
-            let (task, rx) = Task::scheduled(1000);
+            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
             execute_pooled(&worker_id, script, ops.clone(), task)
                 .await
@@ -245,7 +245,7 @@ async fn bench_pool_warm_cache() {
         // Pre-warm
         {
             let script = Script::new(SIMPLE_SCRIPT);
-            let (task, rx) = Task::scheduled(1000);
+            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
             execute_pooled("warm-worker", script, ops.clone(), task)
                 .await
                 .unwrap();
@@ -257,7 +257,7 @@ async fn bench_pool_warm_cache() {
         for i in 0..iterations {
             // Same worker_id = cache hit
             let script = Script::new(SIMPLE_SCRIPT);
-            let (task, rx) = Task::scheduled(1000);
+            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
             execute_pooled("warm-worker", script, ops.clone(), task)
                 .await

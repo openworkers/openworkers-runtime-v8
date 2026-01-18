@@ -1,7 +1,7 @@
 mod common;
 
 use common::run_in_local;
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody, RuntimeLimits, Script, Task};
+use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, RuntimeLimits, Script};
 use openworkers_runtime_v8::Worker;
 use openworkers_runtime_v8::security::{CpuTimer, get_thread_cpu_time};
 use std::collections::HashMap;
@@ -92,7 +92,7 @@ async fn test_exec_cpu_time_measurement() {
         // Measure CPU time around exec
         let timer = CpuTimer::start();
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         let result = worker.exec(task).await;
 
         let cpu_time = timer.elapsed();
@@ -147,7 +147,7 @@ async fn test_exec_cpu_time_excludes_async_wait() {
 
         let timer = CpuTimer::start();
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         let result = worker.exec(task).await;
 
         let cpu_time = timer.elapsed();
@@ -213,7 +213,7 @@ async fn test_exec_cpu_intensive_uses_more_cpu_time() {
             body: RequestBody::None,
         };
         let timer = CpuTimer::start();
-        let (task, _rx) = Task::fetch(req);
+        let (task, _rx) = Event::fetch(req);
         let _ = worker.exec(task).await.unwrap();
         let light_cpu = timer.elapsed();
 
@@ -227,7 +227,7 @@ async fn test_exec_cpu_intensive_uses_more_cpu_time() {
             body: RequestBody::None,
         };
         let timer = CpuTimer::start();
-        let (task, _rx) = Task::fetch(req);
+        let (task, _rx) = Event::fetch(req);
         let _ = worker.exec(task).await.unwrap();
         let heavy_cpu = timer.elapsed();
 

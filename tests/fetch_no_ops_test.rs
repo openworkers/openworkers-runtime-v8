@@ -3,7 +3,7 @@
 mod common;
 
 use common::run_in_local;
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task};
+use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, Script};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -40,7 +40,7 @@ async fn fetch_without_ops_should_reject_not_hang() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
 
         // Should complete within 1 second (not hang for 30s wall timeout)
         let result = timeout(Duration::from_secs(1), async {

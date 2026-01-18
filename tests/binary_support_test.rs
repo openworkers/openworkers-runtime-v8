@@ -1,7 +1,7 @@
 mod common;
 
 use common::run_in_local;
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task};
+use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, Script};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
@@ -26,7 +26,7 @@ async fn test_binary_response() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         let result = worker.exec(task).await;
 
         assert!(result.is_ok());
@@ -65,7 +65,7 @@ async fn test_text_method_with_binary() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         let result = worker.exec(task).await;
 
         assert!(result.is_ok());
@@ -109,7 +109,7 @@ async fn test_array_buffer_method() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         let result = worker.exec(task).await;
 
         assert!(result.is_ok());
@@ -140,7 +140,7 @@ async fn test_string_still_works() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         let result = worker.exec(task).await;
 
         assert!(result.is_ok());

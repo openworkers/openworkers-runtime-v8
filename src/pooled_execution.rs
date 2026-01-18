@@ -5,7 +5,7 @@
 
 use crate::execution_context::ExecutionContext;
 use crate::isolate_pool::get_pool;
-use openworkers_core::{OperationsHandle, Script, Task, TerminationReason};
+use openworkers_core::{Event, OperationsHandle, Script, TerminationReason};
 
 /// Execute a worker script using the isolate pool
 ///
@@ -29,7 +29,7 @@ use openworkers_core::{OperationsHandle, Script, Task, TerminationReason};
 ///
 /// # Example
 /// ```ignore
-/// use openworkers_runtime_v8::{execute_pooled, RuntimeLimits, Script, Task};
+/// use openworkers_runtime_v8::{execute_pooled, RuntimeLimits, Script, Event};
 ///
 /// let result = execute_pooled(
 ///     "worker_123",
@@ -42,7 +42,7 @@ pub async fn execute_pooled(
     worker_id: &str,
     script: Script,
     ops: OperationsHandle,
-    task: Task,
+    task: Event,
 ) -> Result<(), TerminationReason> {
     // Acquire isolate from pool
     let pool = get_pool();

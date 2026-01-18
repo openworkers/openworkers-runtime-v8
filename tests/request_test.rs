@@ -2,7 +2,7 @@ mod common;
 
 use bytes::Bytes;
 use common::run_in_local;
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody, Script, Task};
+use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, Script};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
@@ -39,7 +39,7 @@ async fn test_request_basic() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -77,7 +77,7 @@ async fn test_request_method_url() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -121,7 +121,7 @@ async fn test_request_headers() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -158,7 +158,7 @@ async fn test_request_body_text() {
             body: RequestBody::Bytes(Bytes::from("Hello, World!")),
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -195,7 +195,7 @@ async fn test_request_body_json() {
             body: RequestBody::Bytes(Bytes::from(r#"{"name":"test","value":42}"#)),
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -239,7 +239,7 @@ async fn test_request_clone() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -284,7 +284,7 @@ async fn test_request_from_request() {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
