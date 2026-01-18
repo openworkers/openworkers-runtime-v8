@@ -948,9 +948,9 @@ dependencies = [
 
 [[package]]
 name = "openworkers-glue-v8"
-version = "0.2.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13b11c6e31ab1a5151fb86140eab60a8b4fa55a64437d50f60669100ac034cc7"
+checksum = "bc769bda5e342bc28a5cd5e0fcb6f14437bf0e07dc1a2790d661693d1980a4d4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -959,7 +959,7 @@ dependencies = [
 
 [[package]]
 name = "openworkers-runtime-v8"
-version = "0.8.11"
+version = "0.8.12"
 dependencies = [
  "bytes",
  "criterion",

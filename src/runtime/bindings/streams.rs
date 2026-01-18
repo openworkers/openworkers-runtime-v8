@@ -54,16 +54,21 @@ pub fn setup_stream_ops(
     stream_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
     next_callback_id: Rc<RefCell<CallbackId>>,
 ) {
-    let state = StreamState {
+    let state = Rc::new(StreamState {
         scheduler_tx,
         callbacks: stream_callbacks,
         next_id: next_callback_id,
-    };
+    });
 
-    store_state!(scope, state);
+    // Store in context slot to keep Rc alive for the context's lifetime
+    scope.get_current_context().set_slot(state.clone());
 
-    let stream_read_fn = v8::Function::new(scope, native_stream_read_v8).unwrap();
-    let stream_cancel_fn = v8::Function::new(scope, native_stream_cancel_v8).unwrap();
+    let stream_read_fn = native_stream_read_v8_template(scope, &state)
+        .get_function(scope)
+        .unwrap();
+    let stream_cancel_fn = native_stream_cancel_v8_template(scope, &state)
+        .get_function(scope)
+        .unwrap();
 
     register_fn!(scope, "__nativeStreamRead", stream_read_fn);
     register_fn!(scope, "__nativeStreamCancel", stream_cancel_fn);
@@ -155,16 +160,25 @@ pub fn setup_response_stream_ops(
     scope: &mut v8::PinScope,
     stream_manager: Arc<stream_manager::StreamManager>,
 ) {
-    let state = ResponseStreamState {
+    let state = Rc::new(ResponseStreamState {
         manager: stream_manager,
-    };
+    });
 
-    store_state!(scope, state);
+    // Store in context slot to keep Rc alive for the context's lifetime
+    scope.get_current_context().set_slot(state.clone());
 
-    let create_fn = v8::Function::new(scope, response_stream_create_v8).unwrap();
-    let write_fn = v8::Function::new(scope, response_stream_write_v8).unwrap();
-    let end_fn = v8::Function::new(scope, response_stream_end_v8).unwrap();
-    let is_closed_fn = v8::Function::new(scope, response_stream_is_closed_v8).unwrap();
+    let create_fn = response_stream_create_v8_template(scope, &state)
+        .get_function(scope)
+        .unwrap();
+    let write_fn = response_stream_write_v8_template(scope, &state)
+        .get_function(scope)
+        .unwrap();
+    let end_fn = response_stream_end_v8_template(scope, &state)
+        .get_function(scope)
+        .unwrap();
+    let is_closed_fn = response_stream_is_closed_v8_template(scope, &state)
+        .get_function(scope)
+        .unwrap();
 
     register_fn!(scope, "__responseStreamCreate", create_fn);
     register_fn!(scope, "__responseStreamWrite", write_fn);

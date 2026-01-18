@@ -4,32 +4,27 @@ use std::rc::Rc;
 use tokio::sync::mpsc;
 use v8;
 
-// Native timer functions using v8g macro
+// Native timer functions using glue_v8 macro with Fast API
+//
+// These functions use primitive types (u64) and Fast API with state.
+// State is passed via FunctionTemplate data (External containing Rc<TimerState>).
 
-#[glue_v8::method(state = TimerState)]
-fn native_schedule_timeout(scope: &mut v8::PinScope, state: &Rc<TimerState>, id: u64, delay: u64) {
-    let _ = scope;
+#[glue_v8::method(fast, state = Rc<TimerState>)]
+fn native_schedule_timeout(state: &Rc<TimerState>, id: u64, delay: u64) {
     let _ = state
         .scheduler_tx
         .send(SchedulerMessage::ScheduleTimeout(id, delay));
 }
 
-#[glue_v8::method(state = TimerState)]
-fn native_schedule_interval(
-    scope: &mut v8::PinScope,
-    state: &Rc<TimerState>,
-    id: u64,
-    interval: u64,
-) {
-    let _ = scope;
+#[glue_v8::method(fast, state = Rc<TimerState>)]
+fn native_schedule_interval(state: &Rc<TimerState>, id: u64, interval: u64) {
     let _ = state
         .scheduler_tx
         .send(SchedulerMessage::ScheduleInterval(id, interval));
 }
 
-#[glue_v8::method(state = TimerState)]
-fn native_clear_timer(scope: &mut v8::PinScope, state: &Rc<TimerState>, id: u64) {
-    let _ = scope;
+#[glue_v8::method(fast, state = Rc<TimerState>)]
+fn native_clear_timer(state: &Rc<TimerState>, id: u64) {
     let _ = state.scheduler_tx.send(SchedulerMessage::ClearTimer(id));
 }
 
@@ -37,16 +32,24 @@ pub fn setup_timers(
     scope: &mut v8::PinScope,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
 ) {
-    // Store state in context slot
-    let state = TimerState {
+    // Create state for timer functions
+    let state = Rc::new(TimerState {
         scheduler_tx: scheduler_tx.clone(),
-    };
-    store_state!(scope, state);
+    });
 
-    // Register native functions using generated wrappers
-    let schedule_timeout_fn = v8::Function::new(scope, native_schedule_timeout_v8).unwrap();
-    let schedule_interval_fn = v8::Function::new(scope, native_schedule_interval_v8).unwrap();
-    let clear_timer_fn = v8::Function::new(scope, native_clear_timer_v8).unwrap();
+    // Store in context slot to keep Rc alive for the context's lifetime
+    scope.get_current_context().set_slot(state.clone());
+
+    // Register native functions using Fast API templates
+    let schedule_timeout_fn = native_schedule_timeout_v8_template(scope, &state)
+        .get_function(scope)
+        .unwrap();
+    let schedule_interval_fn = native_schedule_interval_v8_template(scope, &state)
+        .get_function(scope)
+        .unwrap();
+    let clear_timer_fn = native_clear_timer_v8_template(scope, &state)
+        .get_function(scope)
+        .unwrap();
 
     register_fn!(scope, "__nativeScheduleTimeout", schedule_timeout_fn);
     register_fn!(scope, "__nativeScheduleInterval", schedule_interval_fn);

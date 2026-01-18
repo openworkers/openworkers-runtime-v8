@@ -7,10 +7,8 @@ use v8;
 
 /// Native console log function
 /// Args: level (i32), message (String)
-#[glue_v8::method(state = ConsoleState)]
-fn console_log(scope: &mut v8::PinScope, state: &Rc<ConsoleState>, level: i32, message: String) {
-    let _ = scope;
-
+#[glue_v8::method(state = Rc<ConsoleState>)]
+fn console_log(_scope: &mut v8::PinScope, state: &Rc<ConsoleState>, level: i32, message: String) {
     let log_level = match level {
         0 => LogLevel::Error,
         1 => LogLevel::Warn,
@@ -29,12 +27,16 @@ pub fn setup_console(
     scope: &mut v8::PinScope,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
 ) {
-    // Store state in context slot
-    let state = ConsoleState { scheduler_tx };
-    store_state!(scope, state);
+    // Create state (passed via FunctionTemplate data)
+    let state = Rc::new(ConsoleState { scheduler_tx });
 
-    // Register native console_log using generated wrapper
-    let console_log_fn = v8::Function::new(scope, console_log_v8).unwrap();
+    // Store in context slot to keep Rc alive for the context's lifetime
+    scope.get_current_context().set_slot(state.clone());
+
+    // Register native console_log using generated template
+    let console_log_fn = console_log_v8_template(scope, &state)
+        .get_function(scope)
+        .unwrap();
     register_fn!(scope, "__console_log", console_log_fn);
 
     // Setup console object using JS that calls __console_log

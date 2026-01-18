@@ -3,7 +3,7 @@ members = ["gc-derive"]
 
 [package]
 name = "openworkers-runtime-v8"
-version = "0.8.11"
+version = "0.8.12"
 edition = "2024"
 license = "MIT"
 
@@ -37,7 +37,7 @@ serde_json = "1.0"
 serde_v8 = { package = "openworkers-serde-v8", version = "0.2.0" }
 
 # V8 Glue - binding macros
-glue_v8 = { package = "openworkers-glue-v8", version = "0.2.0" }
+glue_v8 = { package = "openworkers-glue-v8", version = "0.4.0" }
 
 # HTTP types
 bytes = { version = "1.11", features = ["serde"] }
