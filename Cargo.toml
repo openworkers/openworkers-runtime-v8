@@ -3,7 +3,7 @@ members = ["gc-derive"]
 
 [package]
 name = "openworkers-runtime-v8"
-version = "0.8.10"
+version = "0.8.11"
 edition = "2024"
 license = "MIT"
 
