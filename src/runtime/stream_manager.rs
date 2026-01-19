@@ -178,6 +178,51 @@ impl StreamManager {
     pub fn has_sender(&self, stream_id: StreamId) -> bool {
         self.senders.lock().unwrap().contains_key(&stream_id)
     }
+
+    /// Create a stream and spawn a pump task to forward data from a receiver.
+    /// Returns the stream ID that can be passed to JavaScript.
+    ///
+    /// This is the standard way to bridge a Rust mpsc::Receiver<Result<Bytes, String>>
+    /// (e.g., from a streaming HTTP request body) to a JavaScript ReadableStream.
+    pub fn pump_request_body(
+        self: &std::sync::Arc<Self>,
+        rx: tokio::sync::mpsc::Receiver<Result<bytes::Bytes, String>>,
+    ) -> StreamId {
+        let stream_id = self.create_stream("request_body".to_string());
+        let stream_manager = self.clone();
+
+        tokio::spawn(async move {
+            let mut rx = rx;
+
+            while let Some(result) = rx.recv().await {
+                match result {
+                    Ok(bytes) => {
+                        if stream_manager
+                            .write_chunk(stream_id, StreamChunk::Data(bytes))
+                            .await
+                            .is_err()
+                        {
+                            // Stream closed by consumer
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = stream_manager
+                            .write_chunk(stream_id, StreamChunk::Error(e))
+                            .await;
+                        break;
+                    }
+                }
+            }
+
+            // Signal end of stream
+            let _ = stream_manager
+                .write_chunk(stream_id, StreamChunk::Done)
+                .await;
+        });
+
+        stream_id
+    }
 }
 
 impl Default for StreamManager {

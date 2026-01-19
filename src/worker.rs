@@ -778,51 +778,15 @@ impl Worker {
         }
 
         // Handle streaming request body - set up pump before entering V8
-        let body_stream_id: Option<u64> =
-            if let RequestBody::Stream(rx) = std::mem::take(&mut req.body) {
-                use crate::runtime::stream_manager::StreamChunk;
-
-                let stream_id = self
-                    .runtime
-                    .stream_manager
-                    .create_stream("request_body".to_string());
-                let stream_manager = self.runtime.stream_manager.clone();
-
-                // Spawn task to pump data from request body receiver to StreamManager
-                tokio::spawn(async move {
-                    let mut rx = rx;
-
-                    while let Some(result) = rx.recv().await {
-                        match result {
-                            Ok(bytes) => {
-                                if stream_manager
-                                    .write_chunk(stream_id, StreamChunk::Data(bytes))
-                                    .await
-                                    .is_err()
-                                {
-                                    // Stream closed by consumer
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                let _ = stream_manager
-                                    .write_chunk(stream_id, StreamChunk::Error(e))
-                                    .await;
-                                break;
-                            }
-                        }
-                    }
-
-                    // Signal end of stream
-                    let _ = stream_manager
-                        .write_chunk(stream_id, StreamChunk::Done)
-                        .await;
-                });
-
-                Some(stream_id)
-            } else {
-                None
+        // Note: Only take the body if it's a Stream, otherwise leave it for later
+        let body_stream_id: Option<u64> = if matches!(&req.body, RequestBody::Stream(_)) {
+            let RequestBody::Stream(rx) = std::mem::take(&mut req.body) else {
+                unreachable!()
             };
+            Some(self.runtime.stream_manager.pump_request_body(rx))
+        } else {
+            None
+        };
 
         // Trigger fetch handler
         {
