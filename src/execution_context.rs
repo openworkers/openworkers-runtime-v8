@@ -934,6 +934,52 @@ impl ExecutionContext {
             *tx_lock = Some(response_tx);
         }
 
+        // Handle streaming request body - set up pump before entering V8
+        let body_stream_id: Option<u64> =
+            if let RequestBody::Stream(rx) = std::mem::take(&mut req.body) {
+                use crate::runtime::stream_manager::StreamChunk;
+
+                let stream_id = self
+                    .stream_manager
+                    .create_stream("request_body".to_string());
+                let stream_manager = self.stream_manager.clone();
+
+                // Spawn task to pump data from request body receiver to StreamManager
+                tokio::spawn(async move {
+                    let mut rx = rx;
+
+                    while let Some(result) = rx.recv().await {
+                        match result {
+                            Ok(bytes) => {
+                                if stream_manager
+                                    .write_chunk(stream_id, StreamChunk::Data(bytes))
+                                    .await
+                                    .is_err()
+                                {
+                                    // Stream closed by consumer
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                let _ = stream_manager
+                                    .write_chunk(stream_id, StreamChunk::Error(e))
+                                    .await;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Signal end of stream
+                    let _ = stream_manager
+                        .write_chunk(stream_id, StreamChunk::Done)
+                        .await;
+                });
+
+                Some(stream_id)
+            } else {
+                None
+            };
+
         // Trigger fetch handler
         {
             use std::pin::pin;
@@ -969,11 +1015,16 @@ impl ExecutionContext {
                     let headers_key = v8::String::new(scope, "headers").unwrap();
                     init_obj.set(scope, headers_key.into(), headers_obj.into());
 
-                    // Add body if present (as Uint8Array for binary support)
-                    // Use std::mem::take to get ownership, enabling zero-copy if Bytes is unique
-                    if let RequestBody::Bytes(body_bytes) = std::mem::take(&mut req.body)
+                    // Add body - either as stream ID or buffered Uint8Array
+                    if let Some(stream_id) = body_stream_id {
+                        // Streaming body - pass stream ID so JS can create ReadableStream
+                        let stream_id_key = v8::String::new(scope, "_bodyStreamId").unwrap();
+                        let stream_id_val = v8::Number::new(scope, stream_id as f64);
+                        init_obj.set(scope, stream_id_key.into(), stream_id_val.into());
+                    } else if let RequestBody::Bytes(body_bytes) = std::mem::take(&mut req.body)
                         && !body_bytes.is_empty()
                     {
+                        // Buffered body - pass as Uint8Array for binary support
                         let len = body_bytes.len();
                         let vec: Vec<u8> = body_bytes.into(); // zero-copy if uniquely owned
                         let backing_store =

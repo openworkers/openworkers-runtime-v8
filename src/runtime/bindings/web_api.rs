@@ -732,7 +732,13 @@ pub fn setup_request(scope: &mut v8::PinScope) {
                     this.url = String(input);
                     this.method = (init.method || 'GET').toUpperCase();
                     this.headers = new Headers(init.headers);
-                    this._initBody(init.body);
+
+                    // Handle streaming body from native (passed as _bodyStreamId)
+                    if (init._bodyStreamId !== undefined) {
+                        this.body = __createNativeStream(init._bodyStreamId);
+                    } else {
+                        this._initBody(init.body);
+                    }
                 }
 
                 this.bodyUsed = false;

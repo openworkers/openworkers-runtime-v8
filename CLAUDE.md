@@ -23,6 +23,10 @@ Multiple runtimes exist (V8, QuickJS, JSC). Runner picks one.
 3. Run tests
 4. Run benchmarks (after refactoring)
 
+## Version bump
+
+After bumping version in `Cargo.toml`, run `cargo check` to update `Cargo.lock` before committing.
+
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md)
