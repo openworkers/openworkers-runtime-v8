@@ -15,7 +15,7 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::{Notify, mpsc};
 use v8;
 
-use crate::security::CustomAllocator;
+use crate::security::{CustomAllocator, HeapLimitState, install_heap_limit_callback};
 use openworkers_core::{RuntimeLimits, WorkerCode};
 
 // Re-export scheduler types
@@ -47,6 +47,10 @@ pub struct Runtime {
     /// but callback_notify is still used by the event loop to signal.
     #[allow(dead_code)]
     pub(crate) callback_notify: Arc<Notify>,
+    /// Heap limit state - must be kept alive for the isolate's lifetime
+    /// Dropped after isolate, so the callback pointer remains valid
+    #[allow(dead_code)]
+    _heap_limit_state: Box<HeapLimitState>,
 }
 
 impl Runtime {
@@ -99,6 +103,10 @@ impl Runtime {
         }
 
         let mut isolate = v8::Isolate::new(params);
+
+        // Install heap limit callback to prevent V8 OOM from crashing the process
+        let heap_limit_state =
+            install_heap_limit_callback(&mut isolate, Arc::clone(&memory_limit_hit), heap_max);
 
         let use_snapshot = snapshot_ref.is_some();
 
@@ -166,6 +174,7 @@ impl Runtime {
             memory_limit_hit,
             limits,
             callback_notify: callback_notify.clone(),
+            _heap_limit_state: heap_limit_state,
         };
 
         (runtime, scheduler_rx, callback_tx, callback_notify)

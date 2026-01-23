@@ -37,6 +37,7 @@ pub mod event_loop;
 pub mod execution_context;
 pub mod execution_helpers;
 pub mod gc;
+pub mod icudata;
 pub mod isolate_pool;
 pub mod locker_managed_isolate;
 pub mod platform;

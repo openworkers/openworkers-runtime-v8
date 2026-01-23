@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicBool;
 use v8;
 
 use crate::gc::DeferredDestructionQueue;
-use crate::security::CustomAllocator;
+use crate::security::{CustomAllocator, HeapLimitState, install_heap_limit_callback};
 use openworkers_core::RuntimeLimits;
 
 /// A reusable V8 isolate that requires explicit locking via v8::Locker
@@ -31,6 +31,9 @@ pub struct LockerManagedIsolate {
     /// processed on the next lock acquisition. Wrapped in Arc for
     /// safe sharing during lock acquisition.
     pub deferred_destruction_queue: Arc<DeferredDestructionQueue>,
+    /// Heap limit state - must be kept alive for the isolate's lifetime
+    #[allow(dead_code)]
+    _heap_limit_state: Box<HeapLimitState>,
 }
 
 impl LockerManagedIsolate {
@@ -66,7 +69,14 @@ impl LockerManagedIsolate {
             params = params.snapshot_blob((*snapshot_data).into());
         }
 
-        let isolate = v8::Isolate::new_unentered(params);
+        let mut isolate = v8::Isolate::new_unentered(params);
+
+        // Install heap limit callback to prevent V8 OOM from crashing the process
+        // We need to lock the isolate temporarily to add the callback
+        let heap_limit_state = {
+            let mut locker = v8::Locker::new(&mut isolate);
+            install_heap_limit_callback(&mut locker, Arc::clone(&memory_limit_hit), heap_max)
+        };
 
         let use_snapshot = snapshot_ref.is_some();
 
@@ -77,6 +87,7 @@ impl LockerManagedIsolate {
             memory_limit_hit,
             use_snapshot,
             deferred_destruction_queue: Arc::new(DeferredDestructionQueue::new()),
+            _heap_limit_state: heap_limit_state,
         }
     }
 

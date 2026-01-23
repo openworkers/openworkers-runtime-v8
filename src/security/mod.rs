@@ -6,6 +6,7 @@
 //! ## Components
 //!
 //! - [`array_buffer_allocator`]: Custom V8 ArrayBuffer allocator with memory limits
+//! - [`heap_limit`]: Near-heap-limit callback to prevent V8 OOM crashes
 //! - [`timeout_guard`]: Wall-clock timeout enforcement via watchdog thread
 //! - [`cpu_enforcer`]: CPU time limit enforcement via POSIX timers (Linux only)
 //!
@@ -29,9 +30,11 @@
 mod array_buffer_allocator;
 mod cpu_enforcer;
 mod cpu_timer;
+mod heap_limit;
 mod timeout_guard;
 
 pub use array_buffer_allocator::CustomAllocator;
 pub use cpu_enforcer::CpuEnforcer;
 pub use cpu_timer::{CpuTimer, get_thread_cpu_time};
+pub use heap_limit::{HeapLimitState, install_heap_limit_callback};
 pub use timeout_guard::TimeoutGuard;

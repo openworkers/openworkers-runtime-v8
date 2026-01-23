@@ -15,6 +15,25 @@ static SNAPSHOT: OnceLock<Option<&'static [u8]>> = OnceLock::new();
 /// initialized once and the same reference is returned to all callers.
 pub fn get_platform() -> &'static v8::SharedRef<v8::Platform> {
     PLATFORM.get_or_init(|| {
+        // Initialize ICU data BEFORE V8 initialization
+        // This is required for Intl.DateTimeFormat, NumberFormat, etc.
+        // Without this, V8/ICU tries to load data at runtime causing OOM
+        v8::icu::set_common_data_77(crate::icudata::ICU_DATA)
+            .expect("Failed to initialize ICU data");
+
+        // Set V8 flags before initialization (following workerd's approach)
+        // Disable incremental marking - better for small heaps and avoids GC bugs
+        v8::V8::set_flags_from_string("--noincremental-marking");
+
+        // On macOS, use single-threaded GC to avoid code collection issues
+        // See: https://github.com/cloudflare/workers-sdk/issues/2386
+        #[cfg(target_os = "macos")]
+        v8::V8::set_flags_from_string("--single-threaded-gc");
+
+        // Increase old space size to give ICU more room for caching
+        // DateTimeFormat pattern generators use significant memory
+        v8::V8::set_flags_from_string("--max-old-space-size=512");
+
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform.clone());
         v8::V8::initialize();

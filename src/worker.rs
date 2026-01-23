@@ -1057,17 +1057,27 @@ pub(crate) fn setup_env(
             match b.binding_type {
                 openworkers_core::BindingType::Assets => {
                     // Assets binding has fetch() only
+                    // Supports both string URL and Request object (like standard fetch)
                     format!(
                         r#"{name}: {{
-                            fetch: function(path, options) {{
+                            fetch: function(input, options) {{
                                 options = options || {{}};
                                 return new Promise((resolve, reject) => {{
-                                    const fetchOptions = {{
-                                        url: path,
-                                        method: options.method || 'GET',
-                                        headers: options.headers || {{}},
-                                        body: options.body || null
-                                    }};
+                                    let url, method, headers, body;
+
+                                    if (input instanceof Request) {{
+                                        url = input.url;
+                                        method = options.method || input.method || 'GET';
+                                        headers = options.headers || Object.fromEntries(input.headers.entries());
+                                        body = options.body !== undefined ? options.body : null;
+                                    }} else {{
+                                        url = input;
+                                        method = options.method || 'GET';
+                                        headers = options.headers || {{}};
+                                        body = options.body || null;
+                                    }}
+
+                                    const fetchOptions = {{ url, method, headers, body }};
                                     __nativeBindingFetch({name}, fetchOptions, (meta) => {{
                                         const stream = __createNativeStream(meta.streamId);
                                         const response = new Response(stream, {{

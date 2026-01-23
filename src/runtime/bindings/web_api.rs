@@ -560,9 +560,17 @@ pub fn setup_url(scope: &mut v8::PinScope) {
     let code = r#"
         globalThis.URL = class URL {
             constructor(url, base) {
+                // Handle URL object input - convert to string
+                if (url instanceof URL) {
+                    url = url.href;
+                } else {
+                    url = String(url);
+                }
+
                 if (base) {
                     // Handle relative URLs
                     const baseUrl = typeof base === 'string' ? base : base.href;
+
                     if (url.startsWith('/')) {
                         const match = baseUrl.match(/^(https?:\/\/[^\/]+)/);
                         url = match ? match[1] + url : url;
