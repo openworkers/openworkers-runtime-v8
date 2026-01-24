@@ -1296,6 +1296,98 @@ pub fn setup_response(scope: &mut v8::PinScope) {
     script.run(scope).unwrap();
 }
 
+/// Setup fetch input normalization helper
+///
+/// Provides:
+/// - `__normalizeFetchInput(input, options)` - normalizes Request/URL/string to fetch options
+/// - `__bufferBody(body)` - buffers ReadableStream body to Uint8Array
+///
+/// __normalizeFetchInput handles:
+/// - Request objects (clones properties, respects options override)
+/// - URL objects (converts to string via href)
+/// - String URLs
+/// - Normalizes Headers instances to plain objects
+///
+/// Returns: { url, method, headers, body }
+pub fn setup_fetch_helpers(scope: &mut v8::PinScope) {
+    let code = r#"
+        // Buffer a ReadableStream body to Uint8Array
+        globalThis.__bufferBody = async function(body) {
+            if (!body || !(body instanceof ReadableStream)) {
+                return body;
+            }
+
+            const reader = body.getReader();
+            const chunks = [];
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                chunks.push(value);
+            }
+
+            // Concatenate all chunks
+            const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+            const result = new Uint8Array(totalLength);
+            let offset = 0;
+
+            for (const chunk of chunks) {
+                result.set(chunk, offset);
+                offset += chunk.length;
+            }
+
+            return result;
+        };
+
+        globalThis.__normalizeFetchInput = function(input, options) {
+            options = options || {};
+            let url, method, headers, body;
+
+            if (input instanceof Request) {
+                // Request object - clone properties, options can override
+                url = input.url;
+                method = options.method || input.method || 'GET';
+                headers = options.headers !== undefined ? options.headers : input.headers;
+                // Body: options.body overrides, otherwise use request body if not consumed
+                if (options.body !== undefined) {
+                    body = options.body;
+                } else if (input.body && !input.bodyUsed) {
+                    body = input.body;
+                } else {
+                    body = null;
+                }
+            } else if (input instanceof URL) {
+                // URL object - convert to string
+                url = input.href;
+                method = options.method || 'GET';
+                headers = options.headers || {};
+                body = options.body !== undefined ? options.body : null;
+            } else {
+                // String or other - convert to string
+                url = String(input);
+                method = options.method || 'GET';
+                headers = options.headers || {};
+                body = options.body !== undefined ? options.body : null;
+            }
+
+            // Normalize Headers instance to plain object
+            if (headers instanceof Headers) {
+                const obj = {};
+                for (const [key, value] of headers) {
+                    obj[key] = value;
+                }
+                headers = obj;
+            }
+
+            return { url, method, headers, body };
+        };
+    "#;
+
+    let code_str = v8::String::new(scope, code).unwrap();
+    let script = v8::Script::compile(scope, code_str, None).unwrap();
+    script.run(scope).unwrap();
+}
+
 /// Remove dangerous globals that could be used for timing attacks (Spectre)
 ///
 /// SharedArrayBuffer and Atomics can be used to create high-precision timers

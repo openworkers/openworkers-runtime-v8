@@ -416,26 +416,6 @@ pub fn setup_fetch(
 
     // JavaScript fetch implementation using Promises with streaming support
     let code = r#"
-        // Helper to read entire ReadableStream into a string
-        async function __bufferReadableStream(stream) {
-            const reader = stream.getReader();
-            const chunks = [];
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                chunks.push(value);
-            }
-            // Concatenate all chunks
-            const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-            const result = new Uint8Array(totalLength);
-            let offset = 0;
-            for (const chunk of chunks) {
-                result.set(chunk, offset);
-                offset += chunk.length;
-            }
-            return new TextDecoder().decode(result);
-        }
-
         // Serialize FormData to multipart/form-data
         async function __serializeFormData(formData) {
             const boundary = '----OpenWorkersBoundary' + Math.random().toString(36).slice(2);
@@ -479,53 +459,37 @@ pub fn setup_fetch(
             return { body: result, boundary: boundary };
         }
 
-        globalThis.fetch = async function(url, options) {
-            options = options || {};
-            let body = options.body || null;
+        globalThis.fetch = async function(input, options) {
+            // Normalize input (handles Request, URL, string)
+            const normalized = __normalizeFetchInput(input, options);
+            let { url, method, headers, body } = normalized;
             let contentType = null;
 
-            // If body is a ReadableStream, buffer it first
+            // Handle ReadableStream body - buffer it first (returns Uint8Array)
             if (body instanceof ReadableStream) {
                 console.warn('[fetch] ReadableStream body detected - buffering entire stream before sending');
-                body = await __bufferReadableStream(body);
+                body = await __bufferBody(body);
             }
 
-            // If body is FormData, serialize to multipart/form-data
+            // Handle FormData body - serialize to multipart/form-data
             if (body instanceof FormData) {
                 const serialized = await __serializeFormData(body);
                 body = serialized.body;
                 contentType = 'multipart/form-data; boundary=' + serialized.boundary;
             }
 
-            // If body is a string or primitive, convert to Uint8Array for native consumption
+            // Convert string/primitive body to Uint8Array for native consumption
             if (body !== null && typeof body !== 'object') {
                 body = new TextEncoder().encode(String(body));
             }
 
+            // Set Content-Type for FormData if not already set
+            if (contentType && !headers['Content-Type'] && !headers['content-type']) {
+                headers['Content-Type'] = contentType;
+            }
+
             return new Promise((resolve, reject) => {
-                // Convert Headers instance to plain object
-                let headersObj = {};
-                const h = options.headers;
-
-                if (h instanceof Headers) {
-                    for (const [key, value] of h) {
-                        headersObj[key] = value;
-                    }
-                } else if (h && typeof h === 'object') {
-                    headersObj = h;
-                }
-
-                // Set Content-Type for FormData if not already set
-                if (contentType && !headersObj['Content-Type'] && !headersObj['content-type']) {
-                    headersObj['Content-Type'] = contentType;
-                }
-
-                const fetchOptions = {
-                    url: url,
-                    method: options.method || 'GET',
-                    headers: headersObj,
-                    body: body
-                };
+                const fetchOptions = { url, method, headers, body };
 
                 // Use streaming fetch
                 __nativeFetchStreaming(fetchOptions, (meta) => {

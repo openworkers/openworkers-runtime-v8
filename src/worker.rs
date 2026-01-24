@@ -1057,26 +1057,12 @@ pub(crate) fn setup_env(
             match b.binding_type {
                 openworkers_core::BindingType::Assets => {
                     // Assets binding has fetch() only
-                    // Supports both string URL and Request object (like standard fetch)
+                    // Supports Request, URL, and string inputs (like standard fetch)
                     format!(
                         r#"{name}: {{
                             fetch: function(input, options) {{
-                                options = options || {{}};
                                 return new Promise((resolve, reject) => {{
-                                    let url, method, headers, body;
-
-                                    if (input instanceof Request) {{
-                                        url = input.url;
-                                        method = options.method || input.method || 'GET';
-                                        headers = options.headers || Object.fromEntries(input.headers.entries());
-                                        body = options.body !== undefined ? options.body : null;
-                                    }} else {{
-                                        url = input;
-                                        method = options.method || 'GET';
-                                        headers = options.headers || {{}};
-                                        body = options.body || null;
-                                    }}
-
+                                    const {{ url, method, headers, body }} = __normalizeFetchInput(input, options);
                                     const fetchOptions = {{ url, method, headers, body }};
                                     __nativeBindingFetch({name}, fetchOptions, (meta) => {{
                                         const stream = __createNativeStream(meta.streamId);
@@ -1251,31 +1237,18 @@ pub(crate) fn setup_env(
                 }
                 openworkers_core::BindingType::Worker => {
                     // Worker binding has fetch method for worker-to-worker calls
+                    // Supports Request, URL, and string inputs (like standard fetch)
                     format!(
                         r#"{name}: {{
-                            fetch: function(request) {{
+                            fetch: function(input, options) {{
                                 return new Promise((resolve, reject) => {{
-                                    // Convert Request to serializable format
                                     const processRequest = async () => {{
-                                        let url, method, headers, body;
-                                        if (typeof request === 'string') {{
-                                            url = request;
-                                            method = 'GET';
-                                            headers = {{}};
-                                            body = null;
-                                        }} else if (request instanceof Request) {{
-                                            url = request.url;
-                                            method = request.method;
-                                            headers = Object.fromEntries(request.headers.entries());
-                                            body = request.body ? await request.text() : null;
-                                        }} else {{
-                                            url = request.url || '/';
-                                            method = request.method || 'GET';
-                                            headers = request.headers || {{}};
-                                            body = request.body || null;
-                                        }}
-                                        return {{ url, method, headers, body }};
+                                        const normalized = __normalizeFetchInput(input, options);
+                                        // Buffer ReadableStream body for serialization
+                                        normalized.body = await __bufferBody(normalized.body);
+                                        return normalized;
                                     }};
+
                                     processRequest().then((fetchOptions) => {{
                                         __nativeBindingWorker({name}, fetchOptions, (meta) => {{
                                             const stream = __createNativeStream(meta.streamId);
