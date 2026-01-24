@@ -129,6 +129,7 @@ impl ExecutionContext {
             bindings::setup_console(scope, scheduler_tx.clone());
             bindings::setup_performance(scope);
             bindings::setup_timers(scope, scheduler_tx.clone());
+            bindings::setup_fetch_helpers(scope); // Must be before setup_fetch
             bindings::setup_fetch(
                 scope,
                 scheduler_tx.clone(),
@@ -261,6 +262,7 @@ impl ExecutionContext {
             bindings::setup_console(scope, scheduler_tx.clone());
             bindings::setup_performance(scope);
             bindings::setup_timers(scope, scheduler_tx.clone());
+            bindings::setup_fetch_helpers(scope); // Must be before setup_fetch
             bindings::setup_fetch(
                 scope,
                 scheduler_tx.clone(),

@@ -53,9 +53,30 @@ pub fn get_snapshot() -> Option<&'static [u8]> {
     *SNAPSHOT.get_or_init(|| {
         const RUNTIME_SNAPSHOT_PATH: &str = env!("RUNTIME_SNAPSHOT_PATH");
 
-        std::fs::read(RUNTIME_SNAPSHOT_PATH)
-            .ok()
-            .filter(|bytes| !bytes.is_empty()) // Empty file = no snapshot
-            .map(|bytes| Box::leak(bytes.into_boxed_slice()) as &'static [u8])
+        match std::fs::read(RUNTIME_SNAPSHOT_PATH) {
+            Ok(bytes) if bytes.is_empty() => {
+                log::warn!(
+                    "Runtime snapshot file is empty: {} - running without snapshot (slower startup)",
+                    RUNTIME_SNAPSHOT_PATH
+                );
+                None
+            }
+            Ok(bytes) => {
+                log::info!(
+                    "Loaded runtime snapshot ({} bytes) from {}",
+                    bytes.len(),
+                    RUNTIME_SNAPSHOT_PATH
+                );
+                Some(Box::leak(bytes.into_boxed_slice()) as &'static [u8])
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to load runtime snapshot from {}: {} - running without snapshot (slower startup)",
+                    RUNTIME_SNAPSHOT_PATH,
+                    e
+                );
+                None
+            }
+        }
     })
 }
