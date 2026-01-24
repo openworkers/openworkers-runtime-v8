@@ -76,6 +76,10 @@ pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
         // Note: Response depends on Headers, so Headers must be setup first
         crate::runtime::bindings::setup_response(scope);
 
+        // Setup fetch helpers (__normalizeFetchInput, __bufferBody)
+        // Note: depends on Request, Headers, URL for instanceof checks
+        crate::runtime::bindings::setup_fetch_helpers(scope);
+
         // Set this context as the default context for the snapshot
         scope.set_default_context(context);
     }
