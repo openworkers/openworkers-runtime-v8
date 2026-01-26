@@ -1091,65 +1091,17 @@ pub(crate) fn setup_env(
                     // Storage binding has get/put/head/list/delete
                     format!(
                         r#"{name}: {{
-                            get: function(key) {{
-                                return new Promise((resolve, reject) => {{
-                                    __nativeBindingStorage({name}, 'get', {{ key }}, (result) => {{
-                                        if (!result.success) {{
-                                            reject(new Error(result.error));
-                                        }} else if (result.body) {{
-                                            resolve(new TextDecoder().decode(result.body));
-                                        }} else {{
-                                            resolve(null);
-                                        }}
-                                    }});
-                                }});
+                            get: (key) => __bindingCall(__nativeBindingStorage, {name}, 'get', {{ key }})
+                                .then(r => r.body ? new TextDecoder().decode(r.body) : null),
+                            put: (key, value) => {{
+                                const body = typeof value === 'string' ? new TextEncoder().encode(value) : value;
+                                return __bindingCall(__nativeBindingStorage, {name}, 'put', {{ key, body }}).then(() => {{}});
                             }},
-                            put: function(key, value) {{
-                                return new Promise((resolve, reject) => {{
-                                    const body = typeof value === 'string' ? new TextEncoder().encode(value) : value;
-                                    __nativeBindingStorage({name}, 'put', {{ key, body }}, (result) => {{
-                                        if (!result.success) {{
-                                            reject(new Error(result.error));
-                                        }} else {{
-                                            resolve();
-                                        }}
-                                    }});
-                                }});
-                            }},
-                            head: function(key) {{
-                                return new Promise((resolve, reject) => {{
-                                    __nativeBindingStorage({name}, 'head', {{ key }}, (result) => {{
-                                        if (!result.success) {{
-                                            reject(new Error(result.error));
-                                        }} else {{
-                                            resolve({{ size: result.size, etag: result.etag }});
-                                        }}
-                                    }});
-                                }});
-                            }},
-                            list: function(options) {{
-                                options = options || {{}};
-                                return new Promise((resolve, reject) => {{
-                                    __nativeBindingStorage({name}, 'list', {{ prefix: options.prefix, limit: options.limit }}, (result) => {{
-                                        if (!result.success) {{
-                                            reject(new Error(result.error));
-                                        }} else {{
-                                            resolve({{ keys: result.keys, truncated: result.truncated }});
-                                        }}
-                                    }});
-                                }});
-                            }},
-                            delete: function(key) {{
-                                return new Promise((resolve, reject) => {{
-                                    __nativeBindingStorage({name}, 'delete', {{ key }}, (result) => {{
-                                        if (!result.success) {{
-                                            reject(new Error(result.error));
-                                        }} else {{
-                                            resolve();
-                                        }}
-                                    }});
-                                }});
-                            }}
+                            head: (key) => __bindingCall(__nativeBindingStorage, {name}, 'head', {{ key }})
+                                .then(r => ({{ size: r.size, etag: r.etag }})),
+                            list: (options) => __bindingCall(__nativeBindingStorage, {name}, 'list', {{ prefix: options?.prefix, limit: options?.limit }})
+                                .then(r => ({{ keys: r.keys, truncated: r.truncated }})),
+                            delete: (key) => __bindingCall(__nativeBindingStorage, {name}, 'delete', {{ key }}).then(() => {{}})
                         }}"#,
                     )
                 }
@@ -1158,60 +1110,20 @@ pub(crate) fn setup_env(
                     // Use IIFE to capture binding name as a string constant
                     format!(
                         r#"{name}: (function() {{
-                            const __bindingName = {name};
+                            const __n = {name};
                             return {{
-                                get: function(key) {{
-                                    return new Promise((resolve, reject) => {{
-                                        __nativeBindingKv(__bindingName, 'get', {{ key }}, (result) => {{
-                                            if (!result.success) {{
-                                                reject(new Error(result.error));
-                                            }} else {{
-                                                resolve(result.value);
-                                            }}
-                                        }});
-                                    }});
+                                get: (key) => __bindingCall(__nativeBindingKv, __n, 'get', {{ key }}).then(r => r.value),
+                                put: (key, value, options) => {{
+                                    const params = {{ key, value }};
+                                    if (options?.expiresIn) params.expiresIn = options.expiresIn;
+                                    return __bindingCall(__nativeBindingKv, __n, 'put', params).then(() => {{}});
                                 }},
-                                put: function(key, value, options) {{
-                                    return new Promise((resolve, reject) => {{
-                                        const params = {{ key, value }};
-                                        if (options && options.expiresIn) {{
-                                            params.expiresIn = options.expiresIn;
-                                        }}
-                                        __nativeBindingKv(__bindingName, 'put', params, (result) => {{
-                                            if (!result.success) {{
-                                                reject(new Error(result.error));
-                                            }} else {{
-                                                resolve();
-                                            }}
-                                        }});
-                                    }});
-                                }},
-                                delete: function(key) {{
-                                    return new Promise((resolve, reject) => {{
-                                        __nativeBindingKv(__bindingName, 'delete', {{ key }}, (result) => {{
-                                            if (!result.success) {{
-                                                reject(new Error(result.error));
-                                            }} else {{
-                                                resolve();
-                                            }}
-                                        }});
-                                    }});
-                                }},
-                                list: function(options) {{
-                                    return new Promise((resolve, reject) => {{
-                                        const params = {{}};
-                                        if (options) {{
-                                            if (options.prefix) params.prefix = options.prefix;
-                                            if (options.limit) params.limit = options.limit;
-                                        }}
-                                        __nativeBindingKv(__bindingName, 'list', params, (result) => {{
-                                            if (!result.success) {{
-                                                reject(new Error(result.error));
-                                            }} else {{
-                                                resolve(result.keys);
-                                            }}
-                                        }});
-                                    }});
+                                delete: (key) => __bindingCall(__nativeBindingKv, __n, 'delete', {{ key }}).then(() => {{}}),
+                                list: (options) => {{
+                                    const params = {{}};
+                                    if (options?.prefix) params.prefix = options.prefix;
+                                    if (options?.limit) params.limit = options.limit;
+                                    return __bindingCall(__nativeBindingKv, __n, 'list', params).then(r => r.keys);
                                 }}
                             }};
                         }})()"#,
@@ -1222,23 +1134,9 @@ pub(crate) fn setup_env(
                     // Use IIFE to capture binding name as a string constant
                     format!(
                         r#"{name}: (function() {{
-                            const __bindingName = {name};
+                            const __n = {name};
                             return {{
-                                query: function(sql, params) {{
-                                    return new Promise((resolve, reject) => {{
-                                        const queryParams = {{
-                                            sql,
-                                            params: params || []
-                                        }};
-                                        __nativeBindingDatabase(__bindingName, 'query', queryParams, (result) => {{
-                                            if (!result.success) {{
-                                                reject(new Error(result.error));
-                                            }} else {{
-                                                resolve(result.rows);
-                                            }}
-                                        }}, reject);
-                                    }});
-                                }}
+                                query: (sql, params) => __bindingCall(__nativeBindingDatabase, __n, 'query', {{ sql, params: params || [] }}).then(r => r.rows)
                             }};
                         }})()"#,
                     )
