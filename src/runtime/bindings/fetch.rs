@@ -276,14 +276,19 @@ pub fn setup_fetch(
                 _ => return,
             };
 
-            let success_cb = args.get(3);
-
-            if !success_cb.is_function() {
+            if args.length() < 5 {
                 return;
             }
 
-            let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
-            let callback_id = register_callback(&state, scope, success_fn);
+            let (resolve_cb, reject_cb) = (args.get(3), args.get(4));
+
+            if !resolve_cb.is_function() || !reject_cb.is_function() {
+                return;
+            }
+
+            let resolve_fn: v8::Local<v8::Function> = resolve_cb.try_into().unwrap();
+            let reject_fn: v8::Local<v8::Function> = reject_cb.try_into().unwrap();
+            let callback_id = register_callbacks_with_error(&state, scope, resolve_fn, reject_fn);
 
             let _ = state.scheduler_tx.send(SchedulerMessage::BindingStorage(
                 callback_id,
@@ -337,14 +342,19 @@ pub fn setup_fetch(
                 _ => return,
             };
 
-            let success_cb = args.get(3);
-
-            if !success_cb.is_function() {
+            if args.length() < 5 {
                 return;
             }
 
-            let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
-            let callback_id = register_callback(&state, scope, success_fn);
+            let (resolve_cb, reject_cb) = (args.get(3), args.get(4));
+
+            if !resolve_cb.is_function() || !reject_cb.is_function() {
+                return;
+            }
+
+            let resolve_fn: v8::Local<v8::Function> = resolve_cb.try_into().unwrap();
+            let reject_fn: v8::Local<v8::Function> = reject_cb.try_into().unwrap();
+            let callback_id = register_callbacks_with_error(&state, scope, resolve_fn, reject_fn);
 
             let _ = state.scheduler_tx.send(SchedulerMessage::BindingKv(
                 callback_id,

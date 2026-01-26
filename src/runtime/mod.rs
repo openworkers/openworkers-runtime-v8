@@ -17,12 +17,54 @@ use v8;
 
 use crate::security::{CustomAllocator, HeapLimitState, install_heap_limit_callback};
 use bindings::LogCallback;
-use openworkers_core::{RuntimeLimits, WorkerCode};
+use openworkers_core::{DatabaseResult, KvResult, RuntimeLimits, StorageResult, WorkerCode};
 
 // Re-export scheduler types
 pub use scheduler::{
     CallbackId, CallbackMessage, CallbackSender, SchedulerMessage, run_event_loop,
 };
+
+/// Helper to dispatch binding result callbacks (resolve/reject pattern)
+fn dispatch_binding_callbacks(
+    scope: &mut v8::PinScope,
+    callback_id: CallbackId,
+    resolve_callbacks: &Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    reject_callbacks: &Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    error_msg: Option<&str>,
+    result_value: Option<v8::Local<v8::Value>>,
+) {
+    if let Some(err_msg) = error_msg {
+        // Error - call reject
+        let reject_opt = {
+            let mut cbs = reject_callbacks.borrow_mut();
+            cbs.remove(&callback_id)
+        };
+        // Cleanup resolve
+        resolve_callbacks.borrow_mut().remove(&callback_id);
+
+        if let Some(callback_global) = reject_opt {
+            let error_msg_val = v8::String::new(scope, err_msg).unwrap();
+            let error = v8::Exception::error(scope, error_msg_val);
+            let callback = v8::Local::new(scope, &callback_global);
+            let recv = v8::undefined(scope);
+            callback.call(scope, recv.into(), &[error]);
+        }
+    } else if let Some(value) = result_value {
+        // Success - call resolve
+        let resolve_opt = {
+            let mut cbs = resolve_callbacks.borrow_mut();
+            cbs.remove(&callback_id)
+        };
+        // Cleanup reject
+        reject_callbacks.borrow_mut().remove(&callback_id);
+
+        if let Some(callback_global) = resolve_opt {
+            let callback = v8::Local::new(scope, &callback_global);
+            let recv = v8::undefined(scope);
+            callback.call(scope, recv.into(), &[value]);
+        }
+    }
+}
 
 pub struct Runtime {
     pub isolate: v8::OwnedIsolate,
@@ -270,54 +312,65 @@ impl Runtime {
                     }
                 }
                 CallbackMessage::StorageResult(callback_id, storage_result) => {
-                    let callback_opt = {
-                        let mut cbs = self.fetch_callbacks.borrow_mut();
-                        cbs.remove(&callback_id)
-                    };
-
-                    if let Some(callback_global) = callback_opt {
-                        let result_obj = v8::Object::new(scope);
-                        callback_handlers::populate_storage_result(
-                            scope,
-                            result_obj,
-                            storage_result,
-                        );
-                        let callback = v8::Local::new(scope, &callback_global);
-                        let recv = v8::undefined(scope);
-                        callback.call(scope, recv.into(), &[result_obj.into()]);
-                    }
+                    let (error_msg, result_value) =
+                        if let StorageResult::Error(err) = &storage_result {
+                            (Some(err.as_str()), None)
+                        } else {
+                            let result_obj = v8::Object::new(scope);
+                            callback_handlers::populate_storage_result(
+                                scope,
+                                result_obj,
+                                storage_result,
+                            );
+                            (None, Some(result_obj.into()))
+                        };
+                    dispatch_binding_callbacks(
+                        scope,
+                        callback_id,
+                        &self.fetch_callbacks,
+                        &self.fetch_error_callbacks,
+                        error_msg,
+                        result_value,
+                    );
                 }
                 CallbackMessage::KvResult(callback_id, kv_result) => {
-                    let callback_opt = {
-                        let mut cbs = self.fetch_callbacks.borrow_mut();
-                        cbs.remove(&callback_id)
-                    };
-
-                    if let Some(callback_global) = callback_opt {
+                    let (error_msg, result_value) = if let KvResult::Error(err) = &kv_result {
+                        (Some(err.as_str()), None)
+                    } else {
                         let result_obj = v8::Object::new(scope);
                         callback_handlers::populate_kv_result(scope, result_obj, kv_result);
-                        let callback = v8::Local::new(scope, &callback_global);
-                        let recv = v8::undefined(scope);
-                        callback.call(scope, recv.into(), &[result_obj.into()]);
-                    }
+                        (None, Some(result_obj.into()))
+                    };
+                    dispatch_binding_callbacks(
+                        scope,
+                        callback_id,
+                        &self.fetch_callbacks,
+                        &self.fetch_error_callbacks,
+                        error_msg,
+                        result_value,
+                    );
                 }
                 CallbackMessage::DatabaseResult(callback_id, database_result) => {
-                    let callback_opt = {
-                        let mut cbs = self.fetch_callbacks.borrow_mut();
-                        cbs.remove(&callback_id)
-                    };
-
-                    if let Some(callback_global) = callback_opt {
-                        let result_obj = v8::Object::new(scope);
-                        callback_handlers::populate_database_result(
-                            scope,
-                            result_obj,
-                            database_result,
-                        );
-                        let callback = v8::Local::new(scope, &callback_global);
-                        let recv = v8::undefined(scope);
-                        callback.call(scope, recv.into(), &[result_obj.into()]);
-                    }
+                    let (error_msg, result_value) =
+                        if let DatabaseResult::Error(err) = &database_result {
+                            (Some(err.as_str()), None)
+                        } else {
+                            let result_obj = v8::Object::new(scope);
+                            callback_handlers::populate_database_result(
+                                scope,
+                                result_obj,
+                                database_result,
+                            );
+                            (None, Some(result_obj.into()))
+                        };
+                    dispatch_binding_callbacks(
+                        scope,
+                        callback_id,
+                        &self.fetch_callbacks,
+                        &self.fetch_error_callbacks,
+                        error_msg,
+                        result_value,
+                    );
                 }
             }
         }
@@ -423,46 +476,56 @@ impl Runtime {
                 }
             }
             CallbackMessage::StorageResult(callback_id, storage_result) => {
-                let callback_opt = {
-                    let mut cbs = self.fetch_callbacks.borrow_mut();
-                    cbs.remove(&callback_id)
-                };
-
-                if let Some(callback_global) = callback_opt {
+                let (error_msg, result_value) = if let StorageResult::Error(err) = &storage_result {
+                    (Some(err.as_str()), None)
+                } else {
                     let result_obj = v8::Object::new(scope);
                     callback_handlers::populate_storage_result(scope, result_obj, storage_result);
-                    let callback = v8::Local::new(scope, &callback_global);
-                    let recv = v8::undefined(scope);
-                    callback.call(scope, recv.into(), &[result_obj.into()]);
-                }
+                    (None, Some(result_obj.into()))
+                };
+                dispatch_binding_callbacks(
+                    scope,
+                    callback_id,
+                    &self.fetch_callbacks,
+                    &self.fetch_error_callbacks,
+                    error_msg,
+                    result_value,
+                );
             }
             CallbackMessage::KvResult(callback_id, kv_result) => {
-                let callback_opt = {
-                    let mut cbs = self.fetch_callbacks.borrow_mut();
-                    cbs.remove(&callback_id)
-                };
-
-                if let Some(callback_global) = callback_opt {
+                let (error_msg, result_value) = if let KvResult::Error(err) = &kv_result {
+                    (Some(err.as_str()), None)
+                } else {
                     let result_obj = v8::Object::new(scope);
                     callback_handlers::populate_kv_result(scope, result_obj, kv_result);
-                    let callback = v8::Local::new(scope, &callback_global);
-                    let recv = v8::undefined(scope);
-                    callback.call(scope, recv.into(), &[result_obj.into()]);
-                }
+                    (None, Some(result_obj.into()))
+                };
+                dispatch_binding_callbacks(
+                    scope,
+                    callback_id,
+                    &self.fetch_callbacks,
+                    &self.fetch_error_callbacks,
+                    error_msg,
+                    result_value,
+                );
             }
             CallbackMessage::DatabaseResult(callback_id, database_result) => {
-                let callback_opt = {
-                    let mut cbs = self.fetch_callbacks.borrow_mut();
-                    cbs.remove(&callback_id)
-                };
-
-                if let Some(callback_global) = callback_opt {
+                let (error_msg, result_value) = if let DatabaseResult::Error(err) = &database_result
+                {
+                    (Some(err.as_str()), None)
+                } else {
                     let result_obj = v8::Object::new(scope);
                     callback_handlers::populate_database_result(scope, result_obj, database_result);
-                    let callback = v8::Local::new(scope, &callback_global);
-                    let recv = v8::undefined(scope);
-                    callback.call(scope, recv.into(), &[result_obj.into()]);
-                }
+                    (None, Some(result_obj.into()))
+                };
+                dispatch_binding_callbacks(
+                    scope,
+                    callback_id,
+                    &self.fetch_callbacks,
+                    &self.fetch_error_callbacks,
+                    error_msg,
+                    result_value,
+                );
             }
         }
     }

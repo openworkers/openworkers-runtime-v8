@@ -1340,20 +1340,11 @@ pub fn setup_fetch_helpers(scope: &mut v8::PinScope) {
         };
 
         // Generic helper for binding calls with Promise wrapper
-        // nativeFn: the native binding function to call
-        // bindingName: name of the binding
-        // method: operation method (get, put, query, etc.)
-        // params: parameters object
-        // Returns: Promise that resolves with result or rejects with error
+        // nativeFn: the native binding function to call (bindingName, method, params, resolve, reject)
+        // Returns: Promise that resolves with data or rejects with error
         globalThis.__bindingCall = function(nativeFn, bindingName, method, params) {
             return new Promise((resolve, reject) => {
-                nativeFn(bindingName, method, params, (result) => {
-                    if (!result.success) {
-                        reject(new Error(result.error));
-                    } else {
-                        resolve(result);
-                    }
-                });
+                nativeFn(bindingName, method, params, resolve, reject);
             });
         };
 
