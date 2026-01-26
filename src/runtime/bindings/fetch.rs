@@ -1,6 +1,8 @@
 use super::super::{CallbackId, SchedulerMessage};
 use super::state::FetchState;
-use openworkers_core::{DatabaseOp, HttpMethod, HttpRequest, KvOp, RequestBody, StorageOp};
+use openworkers_core::{
+    DatabaseOp, HttpMethod, HttpRequest, KvOp, RequestBody, SqlParam, StorageOp,
+};
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -58,7 +60,7 @@ struct DatabaseParams {
     #[serde(default)]
     sql: String,
     #[serde(default)]
-    params: Vec<String>,
+    params: Vec<SqlParam>,
 }
 
 /// Parse JS options object into HttpRequest using serde_v8
