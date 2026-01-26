@@ -1,4 +1,5 @@
 use super::super::{CallbackId, SchedulerMessage, stream_manager};
+use openworkers_core::LogLevel;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -6,16 +7,19 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use v8;
 
+/// Callback for sending log messages directly (bypasses scheduler)
+pub type LogCallback = Arc<dyn Fn(LogLevel, String) + Send + Sync>;
+
 /// Shared state for timer callbacks
 #[derive(Clone)]
 pub struct TimerState {
     pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
 }
 
-/// State for console logging (uses scheduler to send to ops)
+/// State for console logging (bypasses scheduler, uses direct callback)
 #[derive(Clone)]
 pub struct ConsoleState {
-    pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+    pub log_callback: LogCallback,
 }
 
 /// Shared state for fetch callbacks

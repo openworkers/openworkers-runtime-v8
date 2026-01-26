@@ -356,29 +356,72 @@ pub fn setup_fetch(
     register_fn!(scope, "__nativeBindingKv", native_binding_kv_fn);
 
     // Create __nativeBindingDatabase for database operations (query)
+    // Args: (binding_name, operation, params, success_cb, error_cb)
     let native_binding_database_fn = v8::Function::new(
         scope,
         |scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut _retval: v8::ReturnValue| {
+            // Helper to call error callback
+            let call_error =
+                |scope: &mut v8::PinScope, error_fn: v8::Local<v8::Function>, msg: &str| {
+                    let error_msg = v8::String::new(scope, msg).unwrap();
+                    let error = v8::Exception::error(scope, error_msg);
+                    let recv = v8::undefined(scope);
+                    error_fn.call(scope, recv.into(), &[error]);
+                };
+
             let Some(state) = get_state!(scope, FetchState) else {
+                log::warn!("[v8-db] __nativeBindingDatabase: no state");
                 return;
             };
 
-            if args.length() < 4 {
+            if args.length() < 5 {
+                log::warn!(
+                    "[v8-db] __nativeBindingDatabase: not enough args ({})",
+                    args.length()
+                );
                 return;
             }
 
-            let Ok(binding_name) = serde_v8::from_v8_any::<String>(scope, args.get(0)) else {
+            // Get error callback first so we can use it for error reporting
+            let error_cb = args.get(4);
+
+            if !error_cb.is_function() {
+                log::warn!("[v8-db] __nativeBindingDatabase: error_cb is not a function");
                 return;
+            }
+
+            let error_fn: v8::Local<v8::Function> = error_cb.try_into().unwrap();
+
+            let binding_name = match serde_v8::from_v8_any::<String>(scope, args.get(0)) {
+                Ok(name) => name,
+                Err(e) => {
+                    let msg = format!("Failed to parse binding_name: {}", e);
+                    log::warn!("[v8-db] {}", msg);
+                    call_error(scope, error_fn, &msg);
+                    return;
+                }
             };
 
-            let Ok(operation) = serde_v8::from_v8_any::<String>(scope, args.get(1)) else {
-                return;
+            let operation = match serde_v8::from_v8_any::<String>(scope, args.get(1)) {
+                Ok(op) => op,
+                Err(e) => {
+                    let msg = format!("Failed to parse operation: {}", e);
+                    log::warn!("[v8-db] {}", msg);
+                    call_error(scope, error_fn, &msg);
+                    return;
+                }
             };
 
-            let Ok(params) = serde_v8::from_v8_any::<DatabaseParams>(scope, args.get(2)) else {
-                return;
+            let params = match serde_v8::from_v8_any::<DatabaseParams>(scope, args.get(2)) {
+                Ok(p) => p,
+                Err(e) => {
+                    let msg = format!("Failed to parse params: {}", e);
+                    log::warn!("[v8-db] {}", msg);
+                    call_error(scope, error_fn, &msg);
+                    return;
+                }
             };
 
             let database_op = match operation.as_str() {
@@ -386,23 +429,35 @@ pub fn setup_fetch(
                     sql: params.sql,
                     params: params.params,
                 },
-                _ => return,
+                _ => {
+                    let msg = format!("Unknown database operation: {}", operation);
+                    log::warn!("[v8-db] {}", msg);
+                    call_error(scope, error_fn, &msg);
+                    return;
+                }
             };
 
             let success_cb = args.get(3);
 
             if !success_cb.is_function() {
+                let msg = "success_cb is not a function";
+                log::warn!("[v8-db] {}", msg);
+                call_error(scope, error_fn, msg);
                 return;
             }
 
             let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
-            let callback_id = register_callback(&state, scope, success_fn);
+            let callback_id = register_callbacks_with_error(&state, scope, success_fn, error_fn);
 
-            let _ = state.scheduler_tx.send(SchedulerMessage::BindingDatabase(
+            if let Err(e) = state.scheduler_tx.send(SchedulerMessage::BindingDatabase(
                 callback_id,
                 binding_name,
                 database_op,
-            ));
+            )) {
+                let msg = format!("Failed to send to scheduler: {}", e);
+                log::error!("[v8-db] {}", msg);
+                call_error(scope, error_fn, &msg);
+            }
         },
     )
     .unwrap();

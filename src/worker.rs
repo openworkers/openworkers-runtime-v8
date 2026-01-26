@@ -146,6 +146,9 @@ impl WorkerBuilder {
         let next_callback_id = Rc::new(RefCell::new(1u64));
         let stream_manager = Arc::new(StreamManager::new());
 
+        // Create log callback that bypasses scheduler (calls ops.handle_log directly)
+        let log_callback = bindings::log_callback_from_ops(&ops);
+
         // Check if snapshot is available
         use std::sync::OnceLock;
         static USE_SNAPSHOT: OnceLock<bool> = OnceLock::new();
@@ -166,7 +169,7 @@ impl WorkerBuilder {
             bindings::setup_global_aliases(scope);
 
             // Native bindings (always needed)
-            bindings::setup_console(scope, scheduler_tx.clone());
+            bindings::setup_console(scope, log_callback.clone());
             bindings::setup_performance(scope);
             bindings::setup_timers(scope, scheduler_tx.clone());
             bindings::setup_fetch_helpers(scope); // Must be before setup_fetch
@@ -488,7 +491,11 @@ impl Worker {
         limits: Option<RuntimeLimits>,
         ops: OperationsHandle,
     ) -> Result<Self, TerminationReason> {
-        let (mut runtime, scheduler_rx, callback_tx, callback_notify) = Runtime::new(limits);
+        // Create log callback that bypasses scheduler (calls ops.handle_log directly)
+        let log_callback = crate::runtime::bindings::log_callback_from_ops(&ops);
+
+        let (mut runtime, scheduler_rx, callback_tx, callback_notify) =
+            Runtime::new(limits, log_callback);
 
         // Setup addEventListener
         setup_event_listener(&mut runtime.isolate, &runtime.context).map_err(|e| {
@@ -1229,7 +1236,7 @@ pub(crate) fn setup_env(
                                             }} else {{
                                                 resolve(result.rows);
                                             }}
-                                        }});
+                                        }}, reject);
                                     }});
                                 }}
                             }};

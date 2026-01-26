@@ -16,6 +16,7 @@ use tokio::sync::{Notify, mpsc};
 use v8;
 
 use crate::security::{CustomAllocator, HeapLimitState, install_heap_limit_callback};
+use bindings::LogCallback;
 use openworkers_core::{RuntimeLimits, WorkerCode};
 
 // Re-export scheduler types
@@ -56,6 +57,7 @@ pub struct Runtime {
 impl Runtime {
     pub fn new(
         limits: Option<RuntimeLimits>,
+        log_callback: LogCallback,
     ) -> (
         Self,
         mpsc::UnboundedReceiver<SchedulerMessage>,
@@ -121,7 +123,7 @@ impl Runtime {
             bindings::setup_global_aliases(scope);
 
             // Always setup native bindings (not in snapshot)
-            bindings::setup_console(scope, scheduler_tx.clone());
+            bindings::setup_console(scope, log_callback.clone());
             bindings::setup_performance(scope);
             bindings::setup_timers(scope, scheduler_tx.clone());
             bindings::setup_fetch_helpers(scope); // Must be before setup_fetch

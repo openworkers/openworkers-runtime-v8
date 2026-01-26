@@ -112,6 +112,9 @@ impl ExecutionContext {
         let fetch_response_tx = Rc::new(RefCell::new(None));
         let stream_manager = Arc::new(stream_manager::StreamManager::new());
 
+        // Create log callback that bypasses scheduler (calls ops.handle_log directly)
+        let log_callback = bindings::log_callback_from_ops(&ops);
+
         // Create NEW context in the pooled isolate
         let context = {
             use std::pin::pin;
@@ -126,7 +129,7 @@ impl ExecutionContext {
             bindings::setup_global_aliases(scope);
 
             // Always setup native bindings (not in snapshot)
-            bindings::setup_console(scope, scheduler_tx.clone());
+            bindings::setup_console(scope, log_callback.clone());
             bindings::setup_performance(scope);
             bindings::setup_timers(scope, scheduler_tx.clone());
             bindings::setup_fetch_helpers(scope); // Must be before setup_fetch
@@ -247,6 +250,9 @@ impl ExecutionContext {
         let fetch_response_tx = Rc::new(RefCell::new(None));
         let stream_manager = Arc::new(stream_manager::StreamManager::new());
 
+        // Create log callback that bypasses scheduler (calls ops.handle_log directly)
+        let log_callback = bindings::log_callback_from_ops(&ops);
+
         // Create NEW context in the shared isolate
         let context = {
             use std::pin::pin;
@@ -259,7 +265,7 @@ impl ExecutionContext {
             bindings::setup_global_aliases(scope);
 
             // Always setup native bindings (not in snapshot)
-            bindings::setup_console(scope, scheduler_tx.clone());
+            bindings::setup_console(scope, log_callback.clone());
             bindings::setup_performance(scope);
             bindings::setup_timers(scope, scheduler_tx.clone());
             bindings::setup_fetch_helpers(scope); // Must be before setup_fetch

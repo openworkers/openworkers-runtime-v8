@@ -1,12 +1,29 @@
-use super::super::SchedulerMessage;
-use super::state::ConsoleState;
-use openworkers_core::LogLevel;
+use super::state::{ConsoleState, LogCallback};
+use openworkers_core::{LogLevel, OperationsHandle};
 use std::rc::Rc;
-use tokio::sync::mpsc;
+use std::sync::Arc;
 use v8;
+
+/// Create a LogCallback from an OperationsHandle.
+///
+/// This creates a callback that calls ops.handle_log() directly,
+/// bypassing the scheduler for guaranteed log delivery.
+pub fn log_callback_from_ops(ops: &OperationsHandle) -> LogCallback {
+    let ops = ops.clone();
+    Arc::new(move |level, message| {
+        ops.handle_log(level, message);
+    })
+}
 
 /// Native console log function
 /// Args: level (i32), message (String)
+///
+/// Bypasses the scheduler and calls the log callback directly.
+/// This is necessary because the scheduler runs via spawn_local on the same
+/// thread as JS execution. When JS runs synchronously without yielding,
+/// the scheduler never gets a chance to process Log messages before the
+/// worker terminates. By calling the callback directly, logs are guaranteed
+/// to be sent before the worker completes.
 #[glue_v8::method(state = Rc<ConsoleState>)]
 fn console_log(_scope: &mut v8::PinScope, state: &Rc<ConsoleState>, level: i32, message: String) {
     let log_level = match level {
@@ -18,17 +35,13 @@ fn console_log(_scope: &mut v8::PinScope, state: &Rc<ConsoleState>, level: i32, 
         _ => LogLevel::Info,
     };
 
-    let _ = state
-        .scheduler_tx
-        .send(SchedulerMessage::Log(log_level, message));
+    // Call log callback directly - bypasses scheduler for guaranteed delivery
+    (state.log_callback)(log_level, message);
 }
 
-pub fn setup_console(
-    scope: &mut v8::PinScope,
-    scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-) {
+pub fn setup_console(scope: &mut v8::PinScope, log_callback: LogCallback) {
     // Create state (passed via FunctionTemplate data)
-    let state = Rc::new(ConsoleState { scheduler_tx });
+    let state = Rc::new(ConsoleState { log_callback });
 
     // Store in context slot to keep Rc alive for the context's lifetime
     scope.get_current_context().set_slot(state.clone());

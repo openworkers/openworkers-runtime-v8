@@ -58,7 +58,6 @@ pub enum SchedulerMessage {
     BindingWorker(CallbackId, String, HttpRequest),
     StreamRead(CallbackId, stream_manager::StreamId),
     StreamCancel(stream_manager::StreamId),
-    Log(openworkers_core::LogLevel, String),
     Shutdown,
 }
 
@@ -376,14 +375,6 @@ pub async fn run_event_loop(
 
                     SchedulerMessage::StreamCancel(stream_id) => {
                         stream_manager.close_stream(stream_id);
-                    }
-
-                    SchedulerMessage::Log(level, message) => {
-                        let ops = ops.clone();
-
-                        tokio::spawn(async move {
-                            let _ = ops.handle(Operation::Log { level, message }).await;
-                        });
                     }
 
                     SchedulerMessage::Shutdown => {
