@@ -27,12 +27,14 @@
 //! let _cpu = CpuEnforcer::new(isolate_handle.clone(), 50); // 50ms
 //! ```
 
+#[cfg(not(feature = "sandbox"))]
 mod array_buffer_allocator;
 mod cpu_enforcer;
 mod cpu_timer;
 mod heap_limit;
 mod timeout_guard;
 
+#[cfg(not(feature = "sandbox"))]
 pub use array_buffer_allocator::CustomAllocator;
 pub use cpu_enforcer::CpuEnforcer;
 pub use cpu_timer::{CpuTimer, get_thread_cpu_time};

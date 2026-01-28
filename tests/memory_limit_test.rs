@@ -7,6 +7,9 @@ use openworkers_core::{
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
+// Memory limit tests require CustomAllocator which is not available in sandbox mode
+// (V8 manages its own memory allocation in sandbox mode)
+#[cfg(not(feature = "sandbox"))]
 #[tokio::test(flavor = "current_thread")]
 async fn test_memory_limit_arraybuffer_allocation() {
     run_in_local(|| async {
@@ -57,6 +60,7 @@ async fn test_memory_limit_arraybuffer_allocation() {
     .await;
 }
 
+#[cfg(not(feature = "sandbox"))]
 #[tokio::test(flavor = "current_thread")]
 async fn test_memory_limit_uint8array_allocation() {
     run_in_local(|| async {
@@ -106,6 +110,7 @@ async fn test_memory_limit_uint8array_allocation() {
     .await;
 }
 
+#[cfg(not(feature = "sandbox"))]
 #[tokio::test(flavor = "current_thread")]
 async fn test_memory_limit_incremental_allocation() {
     run_in_local(|| async {

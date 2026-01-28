@@ -959,7 +959,7 @@ dependencies = [
 
 [[package]]
 name = "openworkers-runtime-v8"
-version = "0.11.1"
+version = "0.11.2"
 dependencies = [
  "bytes",
  "criterion",
@@ -996,9 +996,9 @@ dependencies = [
 
 [[package]]
 name = "openworkers-serde-v8"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "120efebdf36512f96697707b1e54f9e418a45f759a6adf2071f6914254c86b98"
+checksum = "22410d28fed0d24ffaa9748e2333ad2eb0d2efacae74241516b9a2b9785f52d0"
 dependencies = [
  "bytes",
  "num-bigint",
@@ -1010,9 +1010,9 @@ dependencies = [
 
 [[package]]
 name = "openworkers-v8"
-version = "142.2.3"
+version = "142.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b4e569a4a370e4512c04b7436b1e68b522218d604387e02242e72e10fb407fd"
+checksum = "3cba171ab340939ac5cbaf62d1acd08f446b6e9033a2062c88f713a332110fcc"
 dependencies = [
  "bindgen",
  "bitflags",
@@ -1309,7 +1309,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1802,15 +1802,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets 0.52.6",
 ]

@@ -15,7 +15,9 @@ use std::sync::atomic::AtomicBool;
 use tokio::sync::{Notify, mpsc};
 use v8;
 
-use crate::security::{CustomAllocator, HeapLimitState, install_heap_limit_callback};
+#[cfg(not(feature = "sandbox"))]
+use crate::security::CustomAllocator;
+use crate::security::{HeapLimitState, install_heap_limit_callback};
 use bindings::LogCallback;
 use openworkers_core::{DatabaseResult, KvResult, RuntimeLimits, StorageResult, WorkerCode};
 
@@ -129,18 +131,30 @@ impl Runtime {
         let heap_initial = limits.heap_initial_mb * 1024 * 1024;
         let heap_max = limits.heap_max_mb * 1024 * 1024;
 
-        // Create custom ArrayBuffer allocator to enforce memory limits on external memory
-        // This is critical: V8 heap limits don't cover ArrayBuffers, Uint8Array, etc.
-        let array_buffer_allocator = CustomAllocator::new(heap_max, Arc::clone(&memory_limit_hit));
-
         // Load snapshot (centralized, handles empty file case)
         let snapshot_ref = crate::platform::get_snapshot();
 
-        // Create isolate with custom allocator and heap limits
-        let mut params = v8::CreateParams::default()
+        // Create isolate params
+        // In sandbox mode, V8 manages memory allocation, so we use the default allocator.
+        // In non-sandbox mode, we use a custom allocator to enforce memory limits.
+        #[cfg(not(feature = "sandbox"))]
+        let params = {
+            // Create custom ArrayBuffer allocator to enforce memory limits on external memory
+            // This is critical: V8 heap limits don't cover ArrayBuffers, Uint8Array, etc.
+            let array_buffer_allocator =
+                CustomAllocator::new(heap_max, Arc::clone(&memory_limit_hit));
+            v8::CreateParams::default()
+                .heap_limits(heap_initial, heap_max)
+                .array_buffer_allocator(array_buffer_allocator.into_v8_allocator())
+                .allow_atomics_wait(false)
+        };
+
+        #[cfg(feature = "sandbox")]
+        let params = v8::CreateParams::default()
             .heap_limits(heap_initial, heap_max)
-            .array_buffer_allocator(array_buffer_allocator.into_v8_allocator())
-            .allow_atomics_wait(false); // Security: prevent Atomics.wait() from blocking
+            .allow_atomics_wait(false);
+
+        let mut params = params;
 
         if let Some(snapshot_data) = snapshot_ref {
             params = params.snapshot_blob((*snapshot_data).into());

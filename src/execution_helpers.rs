@@ -281,8 +281,7 @@ pub fn trigger_fetch_handler(
             // Buffered body - pass as Uint8Array for binary support
             let len = body_bytes.len();
             let vec: Vec<u8> = body_bytes.into(); // zero-copy if uniquely owned
-            let backing_store = v8::ArrayBuffer::new_backing_store_from_vec(vec).make_shared();
-            let array_buffer = v8::ArrayBuffer::with_backing_store(scope, &backing_store);
+            let array_buffer = crate::v8_helpers::create_array_buffer_from_vec(scope, vec);
             let uint8_array = v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
 
             let body_key = v8::String::new(scope, "body").unwrap();

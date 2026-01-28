@@ -141,9 +141,8 @@ fn setup_digest(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Object>) {
             let result_bytes = result.as_ref();
 
             // Create ArrayBuffer with result
-            let backing_store = v8::ArrayBuffer::new_backing_store_from_vec(result_bytes.to_vec());
             let array_buffer =
-                v8::ArrayBuffer::with_backing_store(scope, &backing_store.make_shared());
+                crate::v8_helpers::create_array_buffer_from_vec(scope, result_bytes.to_vec());
 
             retval.set(array_buffer.into());
         },
@@ -241,9 +240,8 @@ fn setup_hmac(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Object>) {
             let tag = hmac::sign(&key, &data);
             let result_bytes = tag.as_ref();
 
-            let backing_store = v8::ArrayBuffer::new_backing_store_from_vec(result_bytes.to_vec());
             let array_buffer =
-                v8::ArrayBuffer::with_backing_store(scope, &backing_store.make_shared());
+                crate::v8_helpers::create_array_buffer_from_vec(scope, result_bytes.to_vec());
 
             retval.set(array_buffer.into());
         },
@@ -506,18 +504,16 @@ fn setup_ecdsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Object>) {
             let result = v8::Object::new(scope);
 
             // Private key (PKCS#8 format)
-            let private_backing =
-                v8::ArrayBuffer::new_backing_store_from_vec(pkcs8_bytes.as_ref().to_vec());
-            let private_buffer =
-                v8::ArrayBuffer::with_backing_store(scope, &private_backing.make_shared());
+            let private_buffer = crate::v8_helpers::create_array_buffer_from_vec(
+                scope,
+                pkcs8_bytes.as_ref().to_vec(),
+            );
             let private_key_str = v8::String::new(scope, "privateKey").unwrap();
             result.set(scope, private_key_str.into(), private_buffer.into());
 
             // Public key (uncompressed point format)
-            let public_backing =
-                v8::ArrayBuffer::new_backing_store_from_vec(public_key_bytes.to_vec());
             let public_buffer =
-                v8::ArrayBuffer::with_backing_store(scope, &public_backing.make_shared());
+                crate::v8_helpers::create_array_buffer_from_vec(scope, public_key_bytes.to_vec());
             let public_key_str = v8::String::new(scope, "publicKey").unwrap();
             result.set(scope, public_key_str.into(), public_buffer.into());
 
@@ -585,9 +581,8 @@ fn setup_ecdsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Object>) {
                 }
             };
 
-            let backing_store = v8::ArrayBuffer::new_backing_store_from_vec(sig.as_ref().to_vec());
             let array_buffer =
-                v8::ArrayBuffer::with_backing_store(scope, &backing_store.make_shared());
+                crate::v8_helpers::create_array_buffer_from_vec(scope, sig.as_ref().to_vec());
 
             retval.set(array_buffer.into());
         },
@@ -929,9 +924,7 @@ fn setup_rsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Object>) {
 
             match key_pair.sign(padding, &rng, &data, &mut sig) {
                 Ok(_) => {
-                    let backing_store = v8::ArrayBuffer::new_backing_store_from_vec(sig);
-                    let array_buffer =
-                        v8::ArrayBuffer::with_backing_store(scope, &backing_store.make_shared());
+                    let array_buffer = crate::v8_helpers::create_array_buffer_from_vec(scope, sig);
                     retval.set(array_buffer.into());
                 }
                 Err(_) => {

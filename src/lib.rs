@@ -47,6 +47,7 @@ pub mod security;
 pub mod shared_isolate;
 pub mod snapshot;
 pub mod thread_pinned_pool;
+pub mod v8_helpers;
 pub mod worker;
 pub mod worker_future;
 

@@ -61,13 +61,11 @@ pub fn populate_stream_chunk_result(
             let done_val = v8::Boolean::new(scope, false);
             result_obj.set(scope, done_key.into(), done_val.into());
 
-            // Create Uint8Array from bytes using backing store transfer
+            // Create Uint8Array from bytes
             // Use Vec::from(bytes) instead of to_vec() - avoids copy if Bytes is uniquely owned
             let vec: Vec<u8> = bytes.into();
             let len = vec.len();
-            let backing_store = v8::ArrayBuffer::new_backing_store_from_vec(vec);
-            let array_buffer =
-                v8::ArrayBuffer::with_backing_store(scope, &backing_store.make_shared());
+            let array_buffer = crate::v8_helpers::create_array_buffer_from_vec(scope, vec);
             let uint8_array = v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
 
             let value_key = v8::String::new(scope, "value").unwrap();
@@ -107,9 +105,7 @@ pub fn populate_storage_result(
 
             if let Some(body) = maybe_body {
                 let len = body.len();
-                let backing_store = v8::ArrayBuffer::new_backing_store_from_vec(body);
-                let array_buffer =
-                    v8::ArrayBuffer::with_backing_store(scope, &backing_store.make_shared());
+                let array_buffer = crate::v8_helpers::create_array_buffer_from_vec(scope, body);
                 let uint8_array = v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
                 let body_key = v8::String::new(scope, "body").unwrap();
                 result_obj.set(scope, body_key.into(), uint8_array.into());
