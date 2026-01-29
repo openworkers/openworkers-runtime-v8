@@ -27,11 +27,11 @@ struct IsolateEntry {
 
 impl IsolateEntry {
     fn new(limits: RuntimeLimits) -> Self {
-        log::debug!("Creating new LockerManagedIsolate");
+        tracing::debug!("Creating new LockerManagedIsolate");
         let start = Instant::now();
         let isolate = LockerManagedIsolate::new(limits);
         let duration = start.elapsed();
-        log::info!(
+        tracing::info!(
             "LockerManagedIsolate created in {:?} (snapshot: {})",
             duration,
             isolate.use_snapshot
@@ -65,7 +65,7 @@ impl IsolatePool {
     /// * `max_size` - Maximum number of isolates to cache (e.g., 1000)
     /// * `limits` - Runtime limits for isolates (heap size, etc.)
     pub fn new(max_size: usize, limits: RuntimeLimits) -> Self {
-        log::info!(
+        tracing::info!(
             "Initializing IsolatePool with max_size={}, heap_max={}MB",
             max_size,
             limits.heap_max_mb
@@ -95,10 +95,10 @@ impl IsolatePool {
 
         // Try to get from cache
         let entry = if let Some(entry) = cache.get(worker_id) {
-            log::debug!("Isolate cache HIT for worker {}", worker_id);
+            tracing::debug!("Isolate cache HIT for worker {}", worker_id);
             Arc::clone(entry)
         } else {
-            log::debug!("Isolate cache MISS for worker {}, creating new", worker_id);
+            tracing::debug!("Isolate cache MISS for worker {}, creating new", worker_id);
 
             // Create new isolate entry
             let entry = Arc::new(Mutex::new(IsolateEntry::new(self.limits.clone())));
@@ -108,7 +108,7 @@ impl IsolatePool {
             if let Some((evicted_worker_id, _)) =
                 cache.push(worker_id.to_string(), Arc::clone(&entry))
             {
-                log::info!(
+                tracing::info!(
                     "Isolate LRU eviction: worker {} evicted (cache full at {})",
                     evicted_worker_id,
                     self.max_size
@@ -203,7 +203,7 @@ impl PooledIsolate {
         // Register JsLock for GC tracking (applies any pending memory adjustments)
         let _js_lock = JsLock::new(&mut locker);
 
-        log::trace!(
+        tracing::trace!(
             "Isolate locked for worker {} (total_requests: {})",
             self.worker_id,
             total_requests
@@ -212,7 +212,7 @@ impl PooledIsolate {
         // Execute async user closure with mutable reference via DerefMut
         let result = f(&mut locker).await;
 
-        log::trace!("Isolate unlocked for worker {}", self.worker_id);
+        tracing::trace!("Isolate unlocked for worker {}", self.worker_id);
 
         // JsLock drops here, unregistering from thread-local
 
@@ -257,7 +257,7 @@ impl Drop for PooledIsolate {
         if let Ok(mut cache) = self.pool.try_lock() {
             // get() touches the entry in LRU (marks as recently used)
             cache.get(&self.worker_id);
-            log::trace!("Isolate marked as recently used: {}", self.worker_id);
+            tracing::trace!("Isolate marked as recently used: {}", self.worker_id);
         }
         // If lock fails, isolate will still be in cache but not marked as used
         // This is acceptable - better than blocking on drop
@@ -302,9 +302,9 @@ pub fn init_pool(max_size: usize, limits: RuntimeLimits) {
         .set(IsolatePool::new(max_size, limits))
         .is_err()
     {
-        log::warn!("Isolate pool already initialized");
+        tracing::warn!("Isolate pool already initialized");
     } else {
-        log::info!("Isolate pool initialized: max_size={}", max_size);
+        tracing::info!("Isolate pool initialized: max_size={}", max_size);
     }
 }
 

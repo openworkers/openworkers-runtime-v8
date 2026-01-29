@@ -125,9 +125,9 @@ pub fn init_pinned_pool_full(
     };
 
     if PINNED_POOL_CONFIG.set(config).is_err() {
-        log::warn!("Thread-pinned pool already initialized");
+        tracing::warn!("Thread-pinned pool already initialized");
     } else {
-        log::info!(
+        tracing::info!(
             "Thread-pinned pool initialized: max_per_thread={}, max_per_owner={:?}, queue_size={}, queue_timeout_ms={}",
             max_per_thread,
             max_per_owner,
@@ -172,11 +172,11 @@ struct TaggedIsolate {
 
 impl TaggedIsolate {
     fn new(owner_id: String, limits: RuntimeLimits) -> Self {
-        log::debug!("Creating new TaggedIsolate for owner: {}", owner_id);
+        tracing::debug!("Creating new TaggedIsolate for owner: {}", owner_id);
         let start = Instant::now();
         let isolate = LockerManagedIsolate::new(limits);
         let duration = start.elapsed();
-        log::info!(
+        tracing::info!(
             "TaggedIsolate created for owner {} in {:?} (snapshot: {})",
             owner_id,
             duration,
@@ -271,14 +271,14 @@ impl ThreadLocalPool {
     fn try_enter_queue(&mut self) -> bool {
         if self.current_waiters < self.queue_size {
             self.current_waiters += 1;
-            log::debug!(
+            tracing::debug!(
                 "Entered wait queue (waiters: {}/{})",
                 self.current_waiters,
                 self.queue_size
             );
             true
         } else {
-            log::warn!(
+            tracing::warn!(
                 "Wait queue full ({}/{}), rejecting request",
                 self.current_waiters,
                 self.queue_size
@@ -291,7 +291,7 @@ impl ThreadLocalPool {
     fn leave_queue(&mut self) {
         if self.current_waiters > 0 {
             self.current_waiters -= 1;
-            log::debug!(
+            tracing::debug!(
                 "Left wait queue (waiters: {}/{})",
                 self.current_waiters,
                 self.queue_size
@@ -307,7 +307,7 @@ impl ThreadLocalPool {
     /// Signal that an isolate was released (wake one waiter in FIFO order)
     fn signal_release(&self) {
         if self.current_waiters > 0 {
-            log::debug!("Adding permit to wake next waiter (FIFO)");
+            tracing::debug!("Adding permit to wake next waiter (FIFO)");
             self.release_semaphore.add_permits(1);
         }
     }
@@ -340,7 +340,7 @@ impl ThreadLocalPool {
         // 1. Try to find a FREE isolate with matching owner_id
         for arc in &self.isolates {
             if arc.owner_id == owner_id && arc.try_acquire() {
-                log::debug!(
+                tracing::debug!(
                     "Cache HIT: acquired existing isolate for owner {}",
                     owner_id
                 );
@@ -354,7 +354,7 @@ impl ThreadLocalPool {
 
         // Check if owner has reached their limit
         if self.owner_at_limit(owner_id) {
-            log::debug!(
+            tracing::debug!(
                 "Owner {} at limit ({:?} isolates), cannot create more on this thread",
                 owner_id,
                 self.max_per_owner
@@ -364,7 +364,7 @@ impl ThreadLocalPool {
 
         // 2. No free matching isolate - create new if under pool limit
         if self.isolates.len() < self.max_isolates {
-            log::debug!(
+            tracing::debug!(
                 "Cache MISS: creating new isolate for owner {} (pool: {}/{}, owner: {}/{:?})",
                 owner_id,
                 self.isolates.len() + 1,
@@ -407,7 +407,7 @@ impl ThreadLocalPool {
         if let Some(idx) = lru_idx {
             let old = self.isolates.remove(idx);
             let evicted_owner = old.owner_id.clone();
-            log::info!(
+            tracing::info!(
                 "LRU eviction: evicting isolate for owner {}, replacing with {}",
                 evicted_owner,
                 owner_id
@@ -430,7 +430,7 @@ impl ThreadLocalPool {
 
         // 4. All isolates busy - create anyway (temporary over-limit)
         // This prevents deadlock but should be monitored
-        log::warn!(
+        tracing::warn!(
             "Pool overcommit: all {} isolates busy, creating extra for owner {}",
             self.isolates.len(),
             owner_id
@@ -463,7 +463,7 @@ impl ThreadLocalPool {
         while i < self.isolates.len() && self.isolates.len() > self.max_isolates {
             if self.isolates[i].is_free() {
                 let removed = self.isolates.remove(i);
-                log::info!(
+                tracing::info!(
                     "Cleanup: removed over-limit isolate for owner {}",
                     removed.owner_id
                 );
@@ -503,7 +503,7 @@ fn ensure_pool_initialized() {
                 config.queue_size,
                 config.limits.clone(),
             ));
-            log::debug!(
+            tracing::debug!(
                 "Thread-local pool initialized on thread {:?} (max_per_owner={:?}, queue_size={})",
                 std::thread::current().id(),
                 config.max_per_owner,
@@ -703,7 +703,7 @@ pub async fn execute_pinned(
         // Owner at limit - try to enter queue
         if !try_enter_queue() {
             // Queue is full - return 503 immediately
-            log::warn!("Owner {} at limit and queue full, returning 503", owner_id);
+            tracing::warn!("Owner {} at limit and queue full, returning 503", owner_id);
             return Err(TerminationReason::Other(QUEUE_FULL_ERROR.to_string()));
         }
 
@@ -713,7 +713,7 @@ pub async fn execute_pinned(
 
         if remaining.is_zero() {
             leave_queue();
-            log::warn!(
+            tracing::warn!(
                 "Owner {} queue wait timeout after {}ms",
                 owner_id,
                 timeout_ms
@@ -721,7 +721,7 @@ pub async fn execute_pinned(
             return Err(TerminationReason::Other(QUEUE_TIMEOUT_ERROR.to_string()));
         }
 
-        log::debug!(
+        tracing::debug!(
             "Owner {} waiting in queue FIFO (remaining: {:?})",
             owner_id,
             remaining
@@ -734,7 +734,7 @@ pub async fn execute_pinned(
                 permit.forget();
                 // Leave queue and retry
                 leave_queue();
-                log::debug!(
+                tracing::debug!(
                     "Owner {} woken from queue (FIFO), retrying acquire",
                     owner_id
                 );
@@ -743,13 +743,13 @@ pub async fn execute_pinned(
             Ok(Err(_)) => {
                 // Semaphore closed (shouldn't happen)
                 leave_queue();
-                log::error!("Semaphore closed unexpectedly");
+                tracing::error!("Semaphore closed unexpectedly");
                 return Err(TerminationReason::Other("Internal error".to_string()));
             }
             Err(_) => {
                 // Timeout
                 leave_queue();
-                log::warn!(
+                tracing::warn!(
                     "Owner {} queue wait timeout after {}ms",
                     owner_id,
                     timeout_ms
@@ -770,7 +770,7 @@ pub async fn execute_pinned(
     inner.total_requests += 1;
     inner.last_used = Instant::now();
 
-    log::trace!(
+    tracing::trace!(
         "Acquired thread-local isolate for owner: {} (requests: {})",
         owner_id,
         inner.total_requests

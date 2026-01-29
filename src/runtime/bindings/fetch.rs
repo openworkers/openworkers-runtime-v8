@@ -384,12 +384,12 @@ pub fn setup_fetch(
                 };
 
             let Some(state) = get_state!(scope, FetchState) else {
-                log::warn!("[v8-db] __nativeBindingDatabase: no state");
+                tracing::warn!("[v8-db] __nativeBindingDatabase: no state");
                 return;
             };
 
             if args.length() < 5 {
-                log::warn!(
+                tracing::warn!(
                     "[v8-db] __nativeBindingDatabase: not enough args ({})",
                     args.length()
                 );
@@ -400,7 +400,7 @@ pub fn setup_fetch(
             let error_cb = args.get(4);
 
             if !error_cb.is_function() {
-                log::warn!("[v8-db] __nativeBindingDatabase: error_cb is not a function");
+                tracing::warn!("[v8-db] __nativeBindingDatabase: error_cb is not a function");
                 return;
             }
 
@@ -410,7 +410,7 @@ pub fn setup_fetch(
                 Ok(name) => name,
                 Err(e) => {
                     let msg = format!("Failed to parse binding_name: {}", e);
-                    log::warn!("[v8-db] {}", msg);
+                    tracing::warn!("[v8-db] {}", msg);
                     call_error(scope, error_fn, &msg);
                     return;
                 }
@@ -420,7 +420,7 @@ pub fn setup_fetch(
                 Ok(op) => op,
                 Err(e) => {
                     let msg = format!("Failed to parse operation: {}", e);
-                    log::warn!("[v8-db] {}", msg);
+                    tracing::warn!("[v8-db] {}", msg);
                     call_error(scope, error_fn, &msg);
                     return;
                 }
@@ -430,7 +430,7 @@ pub fn setup_fetch(
                 Ok(p) => p,
                 Err(e) => {
                     let msg = format!("Failed to parse params: {}", e);
-                    log::warn!("[v8-db] {}", msg);
+                    tracing::warn!("[v8-db] {}", msg);
                     call_error(scope, error_fn, &msg);
                     return;
                 }
@@ -443,7 +443,7 @@ pub fn setup_fetch(
                 },
                 _ => {
                     let msg = format!("Unknown database operation: {}", operation);
-                    log::warn!("[v8-db] {}", msg);
+                    tracing::warn!("[v8-db] {}", msg);
                     call_error(scope, error_fn, &msg);
                     return;
                 }
@@ -453,7 +453,7 @@ pub fn setup_fetch(
 
             if !success_cb.is_function() {
                 let msg = "success_cb is not a function";
-                log::warn!("[v8-db] {}", msg);
+                tracing::warn!("[v8-db] {}", msg);
                 call_error(scope, error_fn, msg);
                 return;
             }
@@ -467,7 +467,7 @@ pub fn setup_fetch(
                 database_op,
             )) {
                 let msg = format!("Failed to send to scheduler: {}", e);
-                log::error!("[v8-db] {}", msg);
+                tracing::error!("[v8-db] {}", msg);
                 call_error(scope, error_fn, &msg);
             }
         },

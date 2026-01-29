@@ -38,6 +38,11 @@ use openworkers_core::{Event, OperationsHandle, Script, TerminationReason};
 ///     task,
 /// ).await?;
 /// ```
+#[tracing::instrument(
+    name = "execute_worker",
+    skip(script, ops, task),
+    fields(event_type = %task.event_type())
+)]
 pub async fn execute_pooled(
     worker_id: &str,
     script: Script,
@@ -48,16 +53,13 @@ pub async fn execute_pooled(
     let pool = get_pool();
     let pooled = pool.acquire(worker_id).await;
 
-    log::trace!("Acquired pooled isolate for worker_id: {}", worker_id);
+    tracing::trace!("acquired pooled isolate");
 
     // Get metadata from pooled isolate (needed for ExecutionContext)
     let use_snapshot = pooled.use_snapshot().await;
     let platform = pooled.platform().await;
     let limits = pooled.limits().await;
     let memory_limit_hit = pooled.memory_limit_hit().await;
-
-    // Capture worker_id for logging (avoid lifetime issues)
-    let worker_id_str = worker_id.to_string();
 
     // Execute with locked isolate
     pooled
@@ -74,11 +76,7 @@ pub async fn execute_pooled(
             );
 
             async move {
-                log::trace!(
-                    "Executing task for worker_id: {} (with snapshot: {})",
-                    worker_id_str,
-                    use_snapshot
-                );
+                tracing::trace!(use_snapshot, "executing task");
 
                 // Unwrap the context result
                 let mut ctx = ctx_result?;

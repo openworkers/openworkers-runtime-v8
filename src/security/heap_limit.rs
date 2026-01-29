@@ -75,7 +75,7 @@ pub unsafe extern "C" fn near_heap_limit_callback(
 
     let count = state.invocation_count.fetch_add(1, Ordering::SeqCst);
 
-    log::warn!(
+    tracing::warn!(
         "Near heap limit callback invoked (count: {}, current: {} MB, initial: {} MB, max: {} MB)",
         count + 1,
         current_heap_limit / (1024 * 1024),
@@ -90,7 +90,7 @@ pub unsafe extern "C" fn near_heap_limit_callback(
         let new_limit = (current_heap_limit + extra).min(state.max_heap_bytes);
 
         if new_limit > current_heap_limit {
-            log::warn!(
+            tracing::warn!(
                 "Increasing heap limit to {} MB to allow GC",
                 new_limit / (1024 * 1024)
             );
@@ -99,7 +99,7 @@ pub unsafe extern "C" fn near_heap_limit_callback(
     }
 
     // We've already given extra room or can't give more - terminate execution
-    log::error!(
+    tracing::error!(
         "Heap limit exhausted after {} callbacks, terminating execution",
         count + 1
     );
@@ -147,7 +147,7 @@ unsafe extern "C" fn oom_error_handler(location: *const c_char, details: &v8::Oo
         "process/external memory"
     };
 
-    log::error!(
+    tracing::error!(
         "V8 OOM at {}: {} out of memory{}{}",
         location_str,
         oom_type,

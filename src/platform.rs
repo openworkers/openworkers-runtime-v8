@@ -55,14 +55,14 @@ pub fn get_snapshot() -> Option<&'static [u8]> {
 
         match std::fs::read(RUNTIME_SNAPSHOT_PATH) {
             Ok(bytes) if bytes.is_empty() => {
-                log::warn!(
+                tracing::warn!(
                     "Runtime snapshot file is empty: {} - running without snapshot (slower startup)",
                     RUNTIME_SNAPSHOT_PATH
                 );
                 None
             }
             Ok(bytes) => {
-                log::info!(
+                tracing::info!(
                     "Loaded runtime snapshot ({} bytes) from {}",
                     bytes.len(),
                     RUNTIME_SNAPSHOT_PATH
@@ -70,7 +70,7 @@ pub fn get_snapshot() -> Option<&'static [u8]> {
                 Some(Box::leak(bytes.into_boxed_slice()) as &'static [u8])
             }
             Err(e) => {
-                log::warn!(
+                tracing::warn!(
                     "Failed to load runtime snapshot from {}: {} - running without snapshot (slower startup)",
                     RUNTIME_SNAPSHOT_PATH,
                     e

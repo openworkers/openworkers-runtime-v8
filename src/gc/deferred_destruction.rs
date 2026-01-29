@@ -117,7 +117,7 @@ impl DeferredDestructionQueue {
             .push_back(deferred);
         self.pending_count.fetch_add(1, Ordering::Release);
 
-        log::trace!("Deferred V8 handle destruction (pending: {})", self.len());
+        tracing::trace!("Deferred V8 handle destruction (pending: {})", self.len());
     }
 
     /// Check if there are pending destructions.
@@ -178,7 +178,7 @@ impl DeferredDestructionQueue {
         self.pending_count
             .fetch_sub(count as u64, Ordering::Release);
 
-        log::trace!("Processed {} deferred handle destructions", count);
+        tracing::trace!("Processed {} deferred handle destructions", count);
     }
 }
 

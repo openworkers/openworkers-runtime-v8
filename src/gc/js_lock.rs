@@ -68,7 +68,7 @@ impl JsLock {
 
         if pending != 0 {
             isolate.adjust_amount_of_external_allocated_memory(pending);
-            log::trace!(
+            tracing::trace!(
                 "Applied deferred external memory adjustment: {} bytes",
                 pending
             );
@@ -103,7 +103,7 @@ impl JsLock {
             unsafe {
                 (*self.isolate).adjust_amount_of_external_allocated_memory(delta);
             }
-            log::trace!("Adjusted external memory: {} bytes", delta);
+            tracing::trace!("Adjusted external memory: {} bytes", delta);
         }
     }
 
@@ -135,7 +135,7 @@ impl JsLockRef {
             unsafe {
                 (*self.isolate).adjust_amount_of_external_allocated_memory(delta);
             }
-            log::trace!("Adjusted external memory (via ref): {} bytes", delta);
+            tracing::trace!("Adjusted external memory (via ref): {} bytes", delta);
         }
     }
 }
@@ -146,7 +146,7 @@ impl JsLockRef {
 pub(crate) fn defer_memory_adjustment(delta: i64) {
     if delta != 0 {
         PENDING_MEMORY_DELTA.fetch_add(delta, Ordering::SeqCst);
-        log::trace!("Deferred external memory adjustment: {} bytes", delta);
+        tracing::trace!("Deferred external memory adjustment: {} bytes", delta);
     }
 }
 
