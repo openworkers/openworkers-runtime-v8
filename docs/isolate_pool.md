@@ -183,3 +183,12 @@ Rust compiler prevents:
 - Sending Locker to another thread
 - Using isolate without Locker
 - Locker outliving its scope
+
+## Code Pointers
+
+| Component            | File                        | Key functions                     |
+| -------------------- | --------------------------- | --------------------------------- |
+| Pool singleton       | `isolate_pool.rs`           | `init_pool()`, `get_pool()`       |
+| Pool entry point     | `pooled_execution.rs`       | `execute_pooled()`                |
+| Isolate wrapper      | `locker_managed_isolate.rs` | `LockerManagedIsolate::new()`     |
+| Execution context    | `execution_context.rs`      | `new_with_pooled_isolate()`       |

@@ -30,11 +30,16 @@ platform.rs                 ← V8 Platform (singleton, once per process)
 
 ## Execution Modes
 
-| Mode              | API                | Performance    | Use Case             |
-| ----------------- | ------------------ | -------------- | -------------------- |
-| **Legacy**        | `Worker::new()`    | Slow (~ms/req) | Max isolation, tests |
-| **Shared Pool**   | `execute_pooled()` | Fast (~µs/req) | Multi-thread         |
-| **Thread-Pinned** | `execute_pinned()` | Fastest        | **Production**       |
+| Mode              | API                | Performance    | Use Case                 |
+| ----------------- | ------------------ | -------------- | ------------------------ |
+| **Legacy**        | `Worker::new()`    | Slow (~ms/req) | Max isolation, tests     |
+| **Shared Pool**   | `execute_pooled()` | Fast (~µs/req) | Multi-thread, production |
+| **Thread-Pinned** | `execute_pinned()` | Fastest        | Multi-tenant, no lock    |
+
+**Code pointers:**
+- `execute_pooled()` → `pooled_execution.rs` (uses `isolate_pool.rs`)
+- `execute_pinned()` → `thread_pinned_pool.rs`
+- `Worker` → `worker.rs`
 
 See [execution_modes.md](./execution_modes.md) for details.
 

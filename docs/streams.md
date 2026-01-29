@@ -149,3 +149,11 @@ while (true) {
 - `Bytes` uses reference counting (zero-copy)
 - Receivers removed during `read_chunk()` to prevent deadlock
 - Auto-cleanup on `Done` or `Error`
+
+## Code Pointers
+
+| Component      | File                        | Key functions                          |
+| -------------- | --------------------------- | -------------------------------------- |
+| StreamManager  | `runtime/stream_manager.rs` | `create_stream()`, `write_chunk()`, `read_chunk()` |
+| JS bindings    | `runtime/bindings/streams.rs` | `__nativeStreamRead()`               |
+| Scheduler      | `runtime/scheduler.rs`      | `SchedulerMessage::StreamRead`         |

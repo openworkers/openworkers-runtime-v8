@@ -131,3 +131,12 @@ Legacy code using SharedIsolate? → Keep it (but migrate)
 | Thread-Pinned | `Mutex` (local)        | Zero cross-thread     |
 
 V8 isolates are **not thread-safe**. `v8::Locker` provides mutual exclusion at the V8 level—required for any cross-thread sharing.
+
+## Code Pointers
+
+| Mode          | Entry point          | Implementation               |
+| ------------- | -------------------- | ---------------------------- |
+| Worker        | `Worker::new()`      | `worker.rs`                  |
+| IsolatePool   | `execute_pooled()`   | `pooled_execution.rs` → `isolate_pool.rs` |
+| Thread-Pinned | `execute_pinned()`   | `thread_pinned_pool.rs`      |
+| SharedIsolate | `ExecutionContext::new()` | `execution_context.rs` + `shared_isolate.rs` |
