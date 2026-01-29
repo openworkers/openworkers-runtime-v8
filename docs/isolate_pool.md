@@ -135,9 +135,9 @@ pub async fn with_lock_async<F, Fut, R>(&self, f: F) -> R {
 
 | Operation                  | Time           |
 | -------------------------- | -------------- |
-| Cache hit + lock           | Fastest (~µs)  |
-| Cache miss (with snapshot) | Fast (~µs)     |
-| Cache miss (no snapshot)   | Slower (~ms)   |
+| Cache hit + lock           | Sub-µs         |
+| Cache miss (with snapshot) | Tens of µs     |
+| Cache miss (no snapshot)   | Few ms         |
 
 ### Contention Scenarios
 

@@ -24,17 +24,17 @@ platform.rs                 ← V8 Platform (singleton, once per process)
 | **Runtime**              | `runtime/mod.rs`            | V8 isolate + context + channels | New isolate       |
 | **Worker**               | `worker.rs`                 | High-level API around Runtime   | New isolate/req   |
 | **SharedIsolate**        | `shared_isolate.rs`         | Thread-local reusable isolate   | Once/thread       |
-| **ExecutionContext**     | `execution_context.rs`      | Disposable context              | Fast (~µs)        |
+| **ExecutionContext**     | `execution_context.rs`      | Disposable context              | Tens of µs        |
 | **LockerManagedIsolate** | `locker_managed_isolate.rs` | Pool-compatible isolate         | Once/worker       |
 | **IsolatePool**          | `isolate_pool.rs`           | Global LRU cache                | Manages lifecycle |
 
 ## Execution Modes
 
-| Mode              | API                | Performance    | Use Case                 |
-| ----------------- | ------------------ | -------------- | ------------------------ |
-| **Legacy**        | `Worker::new()`    | Slow (~ms/req) | Max isolation, tests     |
-| **Shared Pool**   | `execute_pooled()` | Fast (~µs/req) | Multi-thread, production |
-| **Thread-Pinned** | `execute_pinned()` | Fastest        | Multi-tenant, no lock    |
+| Mode              | API                | Performance      | Use Case               |
+| ----------------- | ------------------ | ---------------- | ---------------------- |
+| **Legacy**        | `Worker::new()`    | Few ms/req       | Max isolation, tests   |
+| **Shared Pool**   | `execute_pooled()` | Tens of µs/req   | Multi-thread           |
+| **Thread-Pinned** | `execute_pinned()` | Sub-µs (warm)    | Multi-tenant, no lock  |
 
 **Code pointers:**
 - `execute_pooled()` → `pooled_execution.rs` (uses `isolate_pool.rs`)

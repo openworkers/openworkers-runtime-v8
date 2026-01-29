@@ -4,11 +4,11 @@ Three ways to run JavaScript in the V8 runtime.
 
 ## Comparison
 
-| Mode              | Cold Start    | Warm Start | Thread Model             | Use Case         |
-| ----------------- | ------------- | ---------- | ------------------------ | ---------------- |
-| **IsolatePool**   | ~µs           | Fastest    | Multi-thread, v8::Locker | High throughput  |
-| **Worker**        | ~ms           | ~ms        | Single, per-request      | Max isolation    |
-| **SharedIsolate** | ~µs           | ~µs        | Thread-local             | Legacy           |
+| Mode              | Cold Start  | Warm Start | Thread Model             | Use Case         |
+| ----------------- | ----------- | ---------- | ------------------------ | ---------------- |
+| **IsolatePool**   | Tens of µs  | Sub-µs     | Multi-thread, v8::Locker | High throughput  |
+| **Worker**        | Few ms      | Few ms     | Single, per-request      | Max isolation    |
+| **SharedIsolate** | Tens of µs  | Tens of µs | Thread-local             | Legacy           |
 
 ## IsolatePool
 
@@ -33,8 +33,8 @@ execute_pooled("worker-id", script, ops, event).await?;
 
 **Cache behavior:**
 
-- Hit → reuse existing isolate (fastest)
-- Miss → create new (~µs with snapshot, ~ms without)
+- Hit → reuse existing isolate (sub-µs)
+- Miss → create new (tens of µs with snapshot, few ms without)
 - Full → evict LRU, create new
 
 See [isolate_pool.md](./isolate_pool.md) for implementation details.

@@ -23,8 +23,8 @@ use openworkers_core::{Event, OperationsHandle, Script, TerminationReason};
 /// * `task` - Task to execute (HTTP request, scheduled event, etc.)
 ///
 /// # Performance
-/// - Cache hit: Fastest (~µs, isolate reused from pool)
-/// - Cache miss: Fast with snapshot (~µs), slower without (~ms)
+/// - Cache hit: Sub-µs (isolate reused from pool)
+/// - Cache miss: Tens of µs with snapshot, few ms without
 /// - Same worker_id always reuses the same isolate (warm cache)
 ///
 /// # Example

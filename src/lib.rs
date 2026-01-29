@@ -18,7 +18,7 @@
 //! execute_pooled("worker-id", script, ops, event).await?;
 //! ```
 //!
-//! Performance: Fast warm start (~µs), cold start with snapshot (~µs)
+//! Performance: Sub-µs warm start, tens of µs cold start (with snapshot)
 //!
 //! ### Worker (Maximum Isolation)
 //!
@@ -31,7 +31,7 @@
 //! worker.exec(event).await?;
 //! ```
 //!
-//! Performance: Slower (~ms per request, creates new isolate)
+//! Performance: Few ms per request (creates new isolate)
 
 pub mod event_loop;
 pub mod execution_context;

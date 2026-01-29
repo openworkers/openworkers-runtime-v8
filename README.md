@@ -22,17 +22,17 @@ execute_pooled("worker-id", script, ops, event).await?;
 
 ## Features
 
-- **Isolate pooling** — Fast warm start (~µs), cold start with snapshot (~µs)
+- **Isolate pooling** — Sub-µs warm start, tens of µs cold start (with snapshot)
 - **Streaming** — ReadableStream with backpressure
 - **Web APIs** — fetch, setTimeout, Response, Request, URL, console
 - **Async/await** — Full Promise support
 
 ## Performance
 
-| Mode        | Cold Start | Warm Start |
-| ----------- | ---------- | ---------- |
-| IsolatePool | ~µs        | Fastest    |
-| Worker      | ~ms        | ~ms        |
+| Mode        | Cold Start  | Warm Start |
+| ----------- | ----------- | ---------- |
+| IsolatePool | Tens of µs  | Sub-µs     |
+| Worker      | Few ms      | Few ms     |
 
 ## Documentation
 
