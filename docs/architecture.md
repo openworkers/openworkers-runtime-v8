@@ -33,7 +33,7 @@ platform.rs                 ← V8 Platform (singleton, once per process)
 | Mode              | API                | Performance    | Use Case             |
 | ----------------- | ------------------ | -------------- | -------------------- |
 | **Legacy**        | `Worker::new()`    | Slow (~ms/req) | Max isolation, tests |
-| **Shared Pool**   | `execute_pooled()` | Fast (~µs/req) | Single-thread        |
+| **Shared Pool**   | `execute_pooled()` | Fast (~µs/req) | Multi-thread         |
 | **Thread-Pinned** | `execute_pinned()` | Fastest        | **Production**       |
 
 See [execution_modes.md](./execution_modes.md) for details.
