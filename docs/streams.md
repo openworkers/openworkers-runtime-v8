@@ -9,21 +9,24 @@ Rust ↔ JavaScript streaming bridge for efficient data transfer without full bu
 │                         RUST                                     │
 │                                                                  │
 │  Data Source          StreamManager           Scheduler          │
-│  (reqwest)  ─────────► senders[id] ◄────────► read_chunk()       │
+│  (HTTP, body)  ──────► senders[id] ◄─────────► read_chunk()      │
 │      │                 receivers[id]               │             │
-│      │ write_chunk()                               │             │
-│      ▼                                             ▼             │
-│  mpsc::channel ───── StreamChunk::Data|Done|Error ──────────────►│
+│      │ write_chunk()   high_water_mark             │             │
+│      ▼                 (backpressure)              ▼             │
+│  mpsc::channel ────── StreamChunk::Data|Done|Error ─────────────►│
 │                                                                  │
 ├──────────────────────────────────────────────────────────────────┤
 │                       JAVASCRIPT                                 │
 │                                                                  │
+│  // Reading (fetch response body, request body)                  │
 │  const stream = __createNativeStream(streamId);                  │
 │  const reader = stream.getReader();                              │
-│  while (true) {                                                  │
-│      const { done, value } = await reader.read();  ◄── pull()    │
-│      if (done) break;                                            │
-│  }                                                               │
+│  const { done, value } = await reader.read();  ◄── pull()        │
+│                                                                  │
+│  // Writing (streaming response)                                 │
+│  const streamId = __responseStreamCreate();                      │
+│  __responseStreamWrite(streamId, chunk);                         │
+│  __responseStreamEnd(streamId);                                  │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -47,31 +50,40 @@ pub enum StreamChunk {
 }
 ```
 
-| Method                   | Called by | Purpose                         |
-| ------------------------ | --------- | ------------------------------- |
-| `create_stream()`        | Rust      | Create channel, return StreamId |
-| `write_chunk(id, chunk)` | Rust      | Send data to JS                 |
-| `read_chunk(id).await`   | Scheduler | Receive data for JS callback    |
-| `close_stream(id)`       | Both      | Cleanup                         |
+| Method                     | Called by | Purpose                            |
+| -------------------------- | --------- | ---------------------------------- |
+| `create_stream(url)`       | Rust      | Create bounded channel, return ID  |
+| `write_chunk(id, chunk)`   | Rust      | Send data (async, backpressure)    |
+| `try_write_chunk(id, chunk)` | Rust    | Send data (sync, fails if full)    |
+| `read_chunk(id).await`     | Scheduler | Receive data for JS callback       |
+| `take_receiver(id)`        | Rust      | Take receiver for HttpBody::Stream |
+| `pump_request_body(rx)`    | Rust      | Bridge mpsc::Receiver to stream    |
+| `close_stream(id)`         | Both      | Cleanup                            |
 
 ### Messages
 
 ```rust
-// JS → Scheduler (request chunk)
+// JS → Scheduler
 SchedulerMessage::StreamRead(callback_id, stream_id)
+SchedulerMessage::StreamCancel(stream_id)
 
-// Scheduler → V8 (chunk ready)
+// Scheduler → V8
 CallbackMessage::StreamChunk(callback_id, StreamChunk)
 ```
 
 ### JavaScript API
 
 ```javascript
-// Native function: request next chunk
+// Reading streams (fetch response, request body)
 __nativeStreamRead(streamId, callback);
+__nativeStreamCancel(streamId);
+const stream = __createNativeStream(streamId);  // → ReadableStream
 
-// Creates WHATWG ReadableStream with pull()
-const stream = __createNativeStream(streamId);
+// Writing streams (streaming response)
+const id = __responseStreamCreate();
+__responseStreamWrite(id, uint8Array);  // → bool (false if full)
+__responseStreamEnd(id);
+__responseStreamIsClosed(id);           // → bool
 ```
 
 ## Data Flow
