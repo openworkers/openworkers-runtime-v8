@@ -5,7 +5,7 @@ V8-based JavaScript runtime for serverless workers, built on [rusty_v8](https://
 ## Quick Start
 
 ```rust
-use openworkers_runtime_v8::{init_pool, execute_pooled, RuntimeLimits, Script, Task};
+use openworkers_runtime_v8::{init_pool, execute_pooled, RuntimeLimits, Script, Event};
 
 // Initialize pool once at startup
 init_pool(1000, RuntimeLimits::default());
@@ -17,12 +17,12 @@ let script = Script::new(r#"
     });
 "#);
 
-execute_pooled("worker-id", script, ops, task).await?;
+execute_pooled("worker-id", script, ops, event).await?;
 ```
 
 ## Features
 
-- **Isolate pooling** — <10µs warm start, ~100µs cold start
+- **Isolate pooling** — Fast warm start (~µs), cold start with snapshot (~µs)
 - **Streaming** — ReadableStream with backpressure
 - **Web APIs** — fetch, setTimeout, Response, Request, URL, console
 - **Async/await** — Full Promise support
@@ -31,8 +31,8 @@ execute_pooled("worker-id", script, ops, task).await?;
 
 | Mode        | Cold Start | Warm Start |
 | ----------- | ---------- | ---------- |
-| IsolatePool | ~100µs     | <10µs      |
-| Worker      | ~2-3ms     | ~2-3ms     |
+| IsolatePool | ~µs        | Fastest    |
+| Worker      | ~ms        | ~ms        |
 
 ## Documentation
 

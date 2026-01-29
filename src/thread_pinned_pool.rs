@@ -659,8 +659,8 @@ pub const QUEUE_TIMEOUT_ERROR: &str = "Queue wait timeout";
 ///
 /// # Performance
 /// - No mutex contention (thread-local access)
-/// - Cache hit: <10µs (isolate reused)
-/// - Cache miss: ~100µs (with snapshot) or ~3-5ms (without)
+/// - Cache hit: Fastest (~µs, isolate reused)
+/// - Cache miss: Fast with snapshot (~µs), slower without (~ms)
 ///
 /// # Example
 /// ```ignore

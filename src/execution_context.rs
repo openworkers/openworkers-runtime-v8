@@ -4,7 +4,7 @@
 //! a fresh V8 Context within an existing SharedIsolate, providing complete
 //! isolation from other executions.
 //!
-//! The context is cheap to create (~100µs) compared to an isolate (~3-5ms).
+//! The context is cheap to create (~µs) compared to an isolate (~ms without snapshot).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -228,7 +228,7 @@ impl ExecutionContext {
 
     /// Create a new execution context within a shared isolate
     ///
-    /// This is relatively cheap (~100µs) compared to creating an isolate.
+    /// This is relatively cheap (~µs) compared to creating an isolate.
     ///
     /// # Safety
     /// The SharedIsolate must remain valid for the lifetime of this ExecutionContext.

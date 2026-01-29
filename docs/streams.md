@@ -33,9 +33,11 @@ Rust ↔ JavaScript streaming bridge for efficient data transfer without full bu
 
 ```rust
 pub struct StreamManager {
-    senders: Arc<Mutex<HashMap<StreamId, UnboundedSender<StreamChunk>>>>,
-    receivers: Arc<Mutex<HashMap<StreamId, UnboundedReceiver<StreamChunk>>>>,
+    senders: Arc<Mutex<HashMap<StreamId, Sender<StreamChunk>>>>,
+    receivers: Arc<Mutex<HashMap<StreamId, Receiver<StreamChunk>>>>,
+    metadata: Arc<Mutex<HashMap<StreamId, String>>>,
     next_id: Arc<Mutex<StreamId>>,
+    high_water_mark: usize,  // Channel capacity for backpressure
 }
 
 pub enum StreamChunk {
@@ -139,7 +141,7 @@ while (true) {
 ## Thread Safety
 
 - `StreamManager` is `Clone` + `Send` via `Arc<Mutex<...>>`
-- Channels are thread-safe (`mpsc::unbounded`)
+- Channels are thread-safe (`mpsc::channel` with bounded capacity)
 - One reader per stream (WHATWG spec)
 
 ## Memory

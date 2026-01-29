@@ -24,17 +24,17 @@ platform.rs                 ← V8 Platform (singleton, once per process)
 | **Runtime**              | `runtime/mod.rs`            | V8 isolate + context + channels | New isolate       |
 | **Worker**               | `worker.rs`                 | High-level API around Runtime   | New isolate/req   |
 | **SharedIsolate**        | `shared_isolate.rs`         | Thread-local reusable isolate   | Once/thread       |
-| **ExecutionContext**     | `execution_context.rs`      | Disposable context              | ~100µs            |
+| **ExecutionContext**     | `execution_context.rs`      | Disposable context              | Fast (~µs)        |
 | **LockerManagedIsolate** | `locker_managed_isolate.rs` | Pool-compatible isolate         | Once/worker       |
 | **IsolatePool**          | `isolate_pool.rs`           | Global LRU cache                | Manages lifecycle |
 
 ## Execution Modes
 
-| Mode              | API                | Performance | Use Case             |
-| ----------------- | ------------------ | ----------- | -------------------- |
-| **Legacy**        | `Worker::new()`    | ~700µs/req  | Max isolation, tests |
-| **Shared Pool**   | `execute_pooled()` | ~200µs/req  | Single-thread        |
-| **Thread-Pinned** | `execute_pinned()` | ~170µs/req  | **Production**       |
+| Mode              | API                | Performance    | Use Case             |
+| ----------------- | ------------------ | -------------- | -------------------- |
+| **Legacy**        | `Worker::new()`    | Slow (~ms/req) | Max isolation, tests |
+| **Shared Pool**   | `execute_pooled()` | Fast (~µs/req) | Single-thread        |
+| **Thread-Pinned** | `execute_pinned()` | Fastest        | **Production**       |
 
 See [execution_modes.md](./execution_modes.md) for details.
 
@@ -75,6 +75,7 @@ pub trait EventLoopRuntime {
     fn pump_and_checkpoint(&mut self);
 }
 
+// Implemented by Runtime and ExecutionContext
 // Used by Worker, ExecutionContext, WorkerFuture
 drain_and_process(cx, runtime, buffer) -> Result<()>
 ```
@@ -132,15 +133,15 @@ Used by: Runtime          Used by: IsolatePool
 
 ## Key Files
 
-| File                   | Lines | Purpose                       |
-| ---------------------- | ----- | ----------------------------- |
-| `runtime/mod.rs`       | ~800  | V8 setup, callback processing |
-| `runtime/bindings.rs`  | ~600  | JS native functions           |
-| `worker.rs`            | ~700  | Worker API, event loop        |
-| `execution_context.rs` | ~500  | Pooled execution context      |
-| `isolate_pool.rs`      | ~300  | LRU cache, v8::Locker         |
-| `event_loop.rs`        | ~80   | Shared polling logic          |
-| `platform.rs`          | ~20   | V8 platform singleton         |
+| File                    | Lines  | Purpose                       |
+| ----------------------- | ------ | ----------------------------- |
+| `runtime/mod.rs`        | ~700   | V8 setup, callback processing |
+| `runtime/bindings/`     | ~2500  | JS native functions (folder)  |
+| `worker.rs`             | ~1700  | Worker API, event loop        |
+| `execution_context.rs`  | ~1300  | Pooled execution context      |
+| `isolate_pool.rs`       | ~450   | LRU cache, v8::Locker         |
+| `event_loop.rs`         | ~80    | Shared polling logic          |
+| `platform.rs`           | ~80    | V8 platform singleton         |
 
 ## See Also
 

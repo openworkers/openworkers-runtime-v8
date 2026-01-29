@@ -15,10 +15,10 @@
 //! init_pool(1000, limits);
 //!
 //! // Execute worker (handles everything internally)
-//! execute_pooled("worker-id", script, ops, task).await?;
+//! execute_pooled("worker-id", script, ops, event).await?;
 //! ```
 //!
-//! Performance: <10µs warm start, ~100µs cold start (with snapshot)
+//! Performance: Fast warm start (~µs), cold start with snapshot (~µs)
 //!
 //! ### Worker (Maximum Isolation)
 //!
@@ -28,10 +28,10 @@
 //! use openworkers_runtime_v8::Worker;
 //!
 //! let mut worker = Worker::new_with_ops(script, limits, ops).await?;
-//! worker.exec(task).await?;
+//! worker.exec(event).await?;
 //! ```
 //!
-//! Performance: ~2-3ms per request (creates new isolate)
+//! Performance: Slower (~ms per request, creates new isolate)
 
 pub mod event_loop;
 pub mod execution_context;

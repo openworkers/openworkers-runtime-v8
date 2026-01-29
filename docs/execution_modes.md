@@ -4,11 +4,11 @@ Three ways to run JavaScript in the V8 runtime.
 
 ## Comparison
 
-| Mode              | Cold Start | Warm Start | Thread Model             | Use Case       |
-| ----------------- | ---------- | ---------- | ------------------------ | -------------- |
-| **IsolatePool**   | ~100µs     | <10µs      | Multi-thread, v8::Locker | **Production** |
-| **Worker**        | ~2-3ms     | ~2-3ms     | Single, per-request      | Max isolation  |
-| **SharedIsolate** | ~100µs     | ~100µs     | Thread-local             | Legacy         |
+| Mode              | Cold Start    | Warm Start | Thread Model             | Use Case       |
+| ----------------- | ------------- | ---------- | ------------------------ | -------------- |
+| **IsolatePool**   | ~µs           | Fastest    | Multi-thread, v8::Locker | **Production** |
+| **Worker**        | ~ms           | ~ms        | Single, per-request      | Max isolation  |
+| **SharedIsolate** | ~µs           | ~µs        | Thread-local             | Legacy         |
 
 ## IsolatePool (Recommended)
 
@@ -21,7 +21,7 @@ use openworkers_runtime_v8::{init_pool, execute_pooled};
 init_pool(1000, RuntimeLimits::default());
 
 // Per request
-execute_pooled("worker-id", script, ops, task).await?;
+execute_pooled("worker-id", script, ops, event).await?;
 ```
 
 **How it works:**
@@ -33,8 +33,8 @@ execute_pooled("worker-id", script, ops, task).await?;
 
 **Cache behavior:**
 
-- Hit → reuse existing isolate (<10µs)
-- Miss → create new (~100µs with snapshot)
+- Hit → reuse existing isolate (fastest)
+- Miss → create new (~µs with snapshot, ~ms without)
 - Full → evict LRU, create new
 
 See [isolate_pool.md](./isolate_pool.md) for implementation details.
@@ -102,11 +102,11 @@ execute_pinned("owner-id", script, ops, task).await?;
 
 ### Benchmark Comparison
 
-| Scenario       | Shared Pool | Thread-Pinned     |
-| -------------- | ----------- | ----------------- |
-| Warm cache     | 0.64ms      | **0.48ms** (+34%) |
-| CPU-bound      | 1.73ms      | 1.80ms            |
-| With I/O (5ms) | 7.95ms      | 7.92ms            |
+| Scenario       | Shared Pool | Thread-Pinned |
+| -------------- | ----------- | ------------- |
+| Warm cache     | Fast        | **Faster**    |
+| CPU-bound      | Similar     | Similar       |
+| With I/O       | Similar     | Similar       |
 
 Under high contention (many threads, few isolates), shared pool can degrade to **worse than no pooling**. Thread-pinned avoids this.
 

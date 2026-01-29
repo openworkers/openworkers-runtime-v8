@@ -59,6 +59,9 @@ pub struct LockerManagedIsolate {
     pub platform: &'static v8::SharedRef<v8::Platform>,
     pub limits: RuntimeLimits,
     pub memory_limit_hit: Arc<AtomicBool>,
+    pub use_snapshot: bool,
+    pub deferred_destruction_queue: Arc<DeferredDestructionQueue>,
+    // ... heap limit state
 }
 ```
 
@@ -130,11 +133,11 @@ pub async fn with_lock_async<F, Fut, R>(&self, f: F) -> R {
 
 ## Performance
 
-| Operation                  | Time   |
-| -------------------------- | ------ |
-| Cache hit + lock           | <10µs  |
-| Cache miss (with snapshot) | ~100µs |
-| Cache miss (no snapshot)   | ~2-3ms |
+| Operation                  | Time           |
+| -------------------------- | -------------- |
+| Cache hit + lock           | Fastest (~µs)  |
+| Cache miss (with snapshot) | Fast (~µs)     |
+| Cache miss (no snapshot)   | Slower (~ms)   |
 
 ### Contention Scenarios
 
