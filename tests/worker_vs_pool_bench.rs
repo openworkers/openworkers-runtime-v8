@@ -189,9 +189,9 @@ async fn bench_comparison_summary() {
     println!("  - Pool Warm Start:   Cached isolate (by worker_id), new context");
     println!();
     println!("Expected results:");
-    println!("  - Worker Cold Start:  ~3-5ms (creates new V8 isolate)");
-    println!("  - Worker Warm Start:  ~100µs (reuses isolate and context)");
-    println!("  - Pool Cold Start:    ~100µs (isolate ready, creates context)");
-    println!("  - Pool Warm Start:    ~100µs (cached isolate, creates context)");
+    println!("  - Worker Cold Start:  Slowest (few ms, creates new V8 isolate)");
+    println!("  - Worker Warm Start:  Tens of µs (reuses isolate and context)");
+    println!("  - Pool Cold Start:    Tens of µs (isolate ready, creates context)");
+    println!("  - Pool Warm Start:    Sub-µs to few µs (cached isolate, creates context)");
     println!();
 }

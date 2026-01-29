@@ -428,10 +428,10 @@ async fn bench_summary() {
     println!("  ┌─────────────────────┬───────────────┬────────────────────────────────────────┐");
     println!("  │ Architecture        │ Throughput    │ Notes                                  │");
     println!("  ├─────────────────────┼───────────────┼────────────────────────────────────────┤");
-    println!("  │ Legacy (Worker)     │ ~400-500 req/s│ Creates new isolate each time (~2ms)  │");
-    println!("  │ Shared Pool         │ ~500-800 req/s│ Reuses isolates, has mutex overhead   │");
-    println!("  │ Thread-Pinned Pool  │ ~800-1000 req/s│ Reuses isolates, no mutex contention  │");
-    println!("  │ Any (warm cache)    │ ~1500+ req/s  │ Same worker_id = cache hit            │");
+    println!("  │ Legacy (Worker)     │ Slowest       │ Creates new isolate each time (~ms)   │");
+    println!("  │ Shared Pool         │ Faster        │ Reuses isolates, has mutex overhead   │");
+    println!("  │ Thread-Pinned Pool  │ Fastest       │ Reuses isolates, no mutex contention  │");
+    println!("  │ Any (warm cache)    │ Very fast     │ Same worker_id = cache hit            │");
     println!("  └─────────────────────┴───────────────┴────────────────────────────────────────┘");
     println!();
     println!("  Key insights:");

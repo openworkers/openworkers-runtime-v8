@@ -4,13 +4,13 @@ Three ways to run JavaScript in the V8 runtime.
 
 ## Comparison
 
-| Mode              | Cold Start | Warm Start | Thread Model             | Use Case       |
-| ----------------- | ---------- | ---------- | ------------------------ | -------------- |
-| **IsolatePool**   | ~100µs     | <10µs      | Multi-thread, v8::Locker | **Production** |
-| **Worker**        | ~2-3ms     | ~2-3ms     | Single, per-request      | Max isolation  |
-| **SharedIsolate** | ~100µs     | ~100µs     | Thread-local             | Legacy         |
+| Mode              | Cold Start  | Warm Start | Thread Model             | Use Case         |
+| ----------------- | ----------- | ---------- | ------------------------ | ---------------- |
+| **IsolatePool**   | Tens of µs  | Sub-µs     | Multi-thread, v8::Locker | High throughput  |
+| **Worker**        | Few ms      | Few ms     | Single, per-request      | Max isolation    |
+| **SharedIsolate** | Tens of µs  | Tens of µs | Thread-local             | Legacy           |
 
-## IsolatePool (Recommended)
+## IsolatePool
 
 Global LRU cache of isolates, accessible from any thread via `v8::Locker`.
 
@@ -21,7 +21,7 @@ use openworkers_runtime_v8::{init_pool, execute_pooled};
 init_pool(1000, RuntimeLimits::default());
 
 // Per request
-execute_pooled("worker-id", script, ops, task).await?;
+execute_pooled("worker-id", script, ops, event).await?;
 ```
 
 **How it works:**
@@ -33,8 +33,8 @@ execute_pooled("worker-id", script, ops, task).await?;
 
 **Cache behavior:**
 
-- Hit → reuse existing isolate (<10µs)
-- Miss → create new (~100µs with snapshot)
+- Hit → reuse existing isolate (sub-µs)
+- Miss → create new (tens of µs with snapshot, few ms without)
 - Full → evict LRU, create new
 
 See [isolate_pool.md](./isolate_pool.md) for implementation details.
@@ -75,9 +75,9 @@ ctx.exec(task).await?;
 
 ---
 
-## Thread-Pinned Pool (Recommended for Multi-Tenant)
+## Thread-Pinned Pool
 
-For multi-tenant security, each thread owns its local pool with per-owner isolation.
+For multi-tenant scenarios, each thread owns its local pool with per-owner isolation.
 
 ```rust
 use openworkers_runtime_v8::{init_pinned_pool_full, execute_pinned};
@@ -102,11 +102,11 @@ execute_pinned("owner-id", script, ops, task).await?;
 
 ### Benchmark Comparison
 
-| Scenario       | Shared Pool | Thread-Pinned     |
-| -------------- | ----------- | ----------------- |
-| Warm cache     | 0.64ms      | **0.48ms** (+34%) |
-| CPU-bound      | 1.73ms      | 1.80ms            |
-| With I/O (5ms) | 7.95ms      | 7.92ms            |
+| Scenario       | Shared Pool | Thread-Pinned |
+| -------------- | ----------- | ------------- |
+| Warm cache     | Fast        | **Faster**    |
+| CPU-bound      | Similar     | Similar       |
+| With I/O       | Similar     | Similar       |
 
 Under high contention (many threads, few isolates), shared pool can degrade to **worse than no pooling**. Thread-pinned avoids this.
 
@@ -131,3 +131,12 @@ Legacy code using SharedIsolate? → Keep it (but migrate)
 | Thread-Pinned | `Mutex` (local)        | Zero cross-thread     |
 
 V8 isolates are **not thread-safe**. `v8::Locker` provides mutual exclusion at the V8 level—required for any cross-thread sharing.
+
+## Code Pointers
+
+| Mode          | Entry point          | Implementation               |
+| ------------- | -------------------- | ---------------------------- |
+| Worker        | `Worker::new()`      | `worker.rs`                  |
+| IsolatePool   | `execute_pooled()`   | `pooled_execution.rs` → `isolate_pool.rs` |
+| Thread-Pinned | `execute_pinned()`   | `thread_pinned_pool.rs`      |
+| SharedIsolate | `ExecutionContext::new()` | `execution_context.rs` + `shared_isolate.rs` |

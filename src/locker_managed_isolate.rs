@@ -41,7 +41,7 @@ pub struct LockerManagedIsolate {
 impl LockerManagedIsolate {
     /// Create a new locker-managed isolate
     ///
-    /// This is expensive (~3-5ms without snapshot, ~100µs with snapshot)
+    /// This is expensive (few ms without snapshot, tens of µs with snapshot)
     /// and should be done lazily by the pool, not per-request.
     pub fn new(limits: RuntimeLimits) -> Self {
         // Get global V8 platform (initialized once, shared across all modules)

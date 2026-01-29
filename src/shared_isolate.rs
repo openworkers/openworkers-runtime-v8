@@ -25,8 +25,8 @@ pub struct SharedIsolate {
 impl SharedIsolate {
     /// Create a new shared isolate
     ///
-    /// This is expensive (~3-5ms) and should be done once at startup,
-    /// not per-request.
+    /// This is expensive (few ms without snapshot, tens of µs with snapshot)
+    /// and should be done once at startup, not per-request.
     pub fn new(limits: RuntimeLimits) -> Self {
         // Get global V8 platform (initialized once, shared across all modules)
         let platform = crate::platform::get_platform();

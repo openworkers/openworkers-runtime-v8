@@ -59,6 +59,9 @@ pub struct LockerManagedIsolate {
     pub platform: &'static v8::SharedRef<v8::Platform>,
     pub limits: RuntimeLimits,
     pub memory_limit_hit: Arc<AtomicBool>,
+    pub use_snapshot: bool,
+    pub deferred_destruction_queue: Arc<DeferredDestructionQueue>,
+    // ... heap limit state
 }
 ```
 
@@ -130,11 +133,11 @@ pub async fn with_lock_async<F, Fut, R>(&self, f: F) -> R {
 
 ## Performance
 
-| Operation                  | Time   |
-| -------------------------- | ------ |
-| Cache hit + lock           | <10µs  |
-| Cache miss (with snapshot) | ~100µs |
-| Cache miss (no snapshot)   | ~2-3ms |
+| Operation                  | Time           |
+| -------------------------- | -------------- |
+| Cache hit + lock           | Sub-µs         |
+| Cache miss (with snapshot) | Tens of µs     |
+| Cache miss (no snapshot)   | Few ms         |
 
 ### Contention Scenarios
 
@@ -180,3 +183,12 @@ Rust compiler prevents:
 - Sending Locker to another thread
 - Using isolate without Locker
 - Locker outliving its scope
+
+## Code Pointers
+
+| Component            | File                        | Key functions                     |
+| -------------------- | --------------------------- | --------------------------------- |
+| Pool singleton       | `isolate_pool.rs`           | `init_pool()`, `get_pool()`       |
+| Pool entry point     | `pooled_execution.rs`       | `execute_pooled()`                |
+| Isolate wrapper      | `locker_managed_isolate.rs` | `LockerManagedIsolate::new()`     |
+| Execution context    | `execution_context.rs`      | `new_with_pooled_isolate()`       |
