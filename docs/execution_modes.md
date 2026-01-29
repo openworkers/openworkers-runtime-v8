@@ -4,13 +4,13 @@ Three ways to run JavaScript in the V8 runtime.
 
 ## Comparison
 
-| Mode              | Cold Start    | Warm Start | Thread Model             | Use Case       |
-| ----------------- | ------------- | ---------- | ------------------------ | -------------- |
-| **IsolatePool**   | ~µs           | Fastest    | Multi-thread, v8::Locker | **Production** |
-| **Worker**        | ~ms           | ~ms        | Single, per-request      | Max isolation  |
-| **SharedIsolate** | ~µs           | ~µs        | Thread-local             | Legacy         |
+| Mode              | Cold Start    | Warm Start | Thread Model             | Use Case         |
+| ----------------- | ------------- | ---------- | ------------------------ | ---------------- |
+| **IsolatePool**   | ~µs           | Fastest    | Multi-thread, v8::Locker | High throughput  |
+| **Worker**        | ~ms           | ~ms        | Single, per-request      | Max isolation    |
+| **SharedIsolate** | ~µs           | ~µs        | Thread-local             | Legacy           |
 
-## IsolatePool (Recommended)
+## IsolatePool
 
 Global LRU cache of isolates, accessible from any thread via `v8::Locker`.
 
@@ -75,9 +75,9 @@ ctx.exec(task).await?;
 
 ---
 
-## Thread-Pinned Pool (Recommended for Multi-Tenant)
+## Thread-Pinned Pool
 
-For multi-tenant security, each thread owns its local pool with per-owner isolation.
+For multi-tenant scenarios, each thread owns its local pool with per-owner isolation.
 
 ```rust
 use openworkers_runtime_v8::{init_pinned_pool_full, execute_pinned};
