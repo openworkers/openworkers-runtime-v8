@@ -27,6 +27,10 @@ pub static ICU_DATA: &[u8] = &ICU_DATA_RAW.0;
 mod tests {
     use std::pin::pin;
 
+    use openworkers_core::RuntimeLimits;
+
+    use crate::LockerManagedIsolate;
+
     #[test]
     fn test_icu_data_is_loaded() {
         assert!(
@@ -43,12 +47,13 @@ mod tests {
 
     #[test]
     fn test_intl_datetimeformat_works() {
-        // Initialize V8 platform (this also initializes ICU data)
-        crate::platform::get_platform();
+        // Use LockerManagedIsolate to be consistent with other tests
+        // Mixing v8::Isolate::new() with Locker-based isolates causes race conditions
+        let limits = RuntimeLimits::default();
+        let mut isolate_wrapper = LockerManagedIsolate::new(limits);
 
-        let mut isolate = v8::Isolate::new(Default::default());
-
-        let scope = pin!(v8::HandleScope::new(&mut isolate));
+        let mut locker = v8::Locker::new(&mut isolate_wrapper.isolate);
+        let scope = pin!(v8::HandleScope::new(&mut *locker));
         let mut scope = scope.init();
         let context = v8::Context::new(&scope, Default::default());
         let scope = &mut v8::ContextScope::new(&mut scope, context);
@@ -98,11 +103,11 @@ mod tests {
 
     #[test]
     fn test_intl_numberformat_works() {
-        crate::platform::get_platform();
+        let limits = RuntimeLimits::default();
+        let mut isolate_wrapper = LockerManagedIsolate::new(limits);
 
-        let mut isolate = v8::Isolate::new(Default::default());
-
-        let scope = pin!(v8::HandleScope::new(&mut isolate));
+        let mut locker = v8::Locker::new(&mut isolate_wrapper.isolate);
+        let scope = pin!(v8::HandleScope::new(&mut *locker));
         let mut scope = scope.init();
         let context = v8::Context::new(&scope, Default::default());
         let scope = &mut v8::ContextScope::new(&mut scope, context);
