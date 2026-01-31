@@ -1088,7 +1088,7 @@ pub(crate) fn setup_env(
                     )
                 }
                 openworkers_core::BindingType::Storage => {
-                    // Storage binding has get/put/head/list/delete
+                    // Storage binding has get/put/head/list/delete/fetch
                     format!(
                         r#"{name}: {{
                             get: (key) => __bindingCall(__nativeBindingStorage, {name}, 'get', {{ key }})
@@ -1101,7 +1101,13 @@ pub(crate) fn setup_env(
                                 .then(r => ({{ size: r.size, etag: r.etag }})),
                             list: (options) => __bindingCall(__nativeBindingStorage, {name}, 'list', {{ prefix: options?.prefix, limit: options?.limit }})
                                 .then(r => ({{ keys: r.keys, truncated: r.truncated }})),
-                            delete: (key) => __bindingCall(__nativeBindingStorage, {name}, 'delete', {{ key }}).then(() => {{}})
+                            delete: (key) => __bindingCall(__nativeBindingStorage, {name}, 'delete', {{ key }}).then(() => {{}}),
+                            fetch: function(input, options) {{
+                                const {{ url }} = __normalizeFetchInput(input, options);
+                                const key = new URL(url, 'http://localhost').pathname;
+                                return __bindingCall(__nativeBindingStorage, {name}, 'fetch', {{ key }})
+                                    .then(r => new Response(r.body, {{ status: r.status, headers: r.headers }}));
+                            }}
                         }}"#,
                     )
                 }

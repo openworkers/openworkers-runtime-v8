@@ -27,7 +27,7 @@ pub use scheduler::{
 };
 
 /// Helper to dispatch binding result callbacks (resolve/reject pattern)
-fn dispatch_binding_callbacks(
+pub(crate) fn dispatch_binding_callbacks(
     scope: &mut v8::PinScope,
     callback_id: CallbackId,
     resolve_callbacks: &Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,

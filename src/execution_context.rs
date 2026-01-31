@@ -602,60 +602,77 @@ impl ExecutionContext {
                     }
                 }
                 CallbackMessage::StorageResult(callback_id, storage_result) => {
-                    use crate::runtime::callback_handlers;
+                    use crate::runtime::{callback_handlers, dispatch_binding_callbacks};
+                    use openworkers_core::StorageResult;
 
-                    let callback_opt = {
-                        let mut cbs = self.fetch_callbacks.borrow_mut();
-                        cbs.remove(&callback_id)
-                    };
+                    let (error_msg, result_value) =
+                        if let StorageResult::Error(err) = &storage_result {
+                            (Some(err.as_str()), None)
+                        } else {
+                            let result_obj = v8::Object::new(scope);
+                            callback_handlers::populate_storage_result(
+                                scope,
+                                result_obj,
+                                storage_result,
+                            );
+                            (None, Some(result_obj.into()))
+                        };
 
-                    if let Some(callback_global) = callback_opt {
-                        let result_obj = v8::Object::new(scope);
-                        callback_handlers::populate_storage_result(
-                            scope,
-                            result_obj,
-                            storage_result,
-                        );
-                        let callback = v8::Local::new(scope, &callback_global);
-                        let recv = v8::undefined(scope);
-                        callback.call(scope, recv.into(), &[result_obj.into()]);
-                    }
+                    dispatch_binding_callbacks(
+                        scope,
+                        callback_id,
+                        &self.fetch_callbacks,
+                        &self.fetch_error_callbacks,
+                        error_msg,
+                        result_value,
+                    );
                 }
                 CallbackMessage::KvResult(callback_id, kv_result) => {
-                    use crate::runtime::callback_handlers;
+                    use crate::runtime::{callback_handlers, dispatch_binding_callbacks};
+                    use openworkers_core::KvResult;
 
-                    let callback_opt = {
-                        let mut cbs = self.fetch_callbacks.borrow_mut();
-                        cbs.remove(&callback_id)
-                    };
-
-                    if let Some(callback_global) = callback_opt {
+                    let (error_msg, result_value) = if let KvResult::Error(err) = &kv_result {
+                        (Some(err.as_str()), None)
+                    } else {
                         let result_obj = v8::Object::new(scope);
                         callback_handlers::populate_kv_result(scope, result_obj, kv_result);
-                        let callback = v8::Local::new(scope, &callback_global);
-                        let recv = v8::undefined(scope);
-                        callback.call(scope, recv.into(), &[result_obj.into()]);
-                    }
-                }
-                CallbackMessage::DatabaseResult(callback_id, database_result) => {
-                    use crate::runtime::callback_handlers;
-
-                    let callback_opt = {
-                        let mut cbs = self.fetch_callbacks.borrow_mut();
-                        cbs.remove(&callback_id)
+                        (None, Some(result_obj.into()))
                     };
 
-                    if let Some(callback_global) = callback_opt {
-                        let result_obj = v8::Object::new(scope);
-                        callback_handlers::populate_database_result(
-                            scope,
-                            result_obj,
-                            database_result,
-                        );
-                        let callback = v8::Local::new(scope, &callback_global);
-                        let recv = v8::undefined(scope);
-                        callback.call(scope, recv.into(), &[result_obj.into()]);
-                    }
+                    dispatch_binding_callbacks(
+                        scope,
+                        callback_id,
+                        &self.fetch_callbacks,
+                        &self.fetch_error_callbacks,
+                        error_msg,
+                        result_value,
+                    );
+                }
+                CallbackMessage::DatabaseResult(callback_id, database_result) => {
+                    use crate::runtime::{callback_handlers, dispatch_binding_callbacks};
+                    use openworkers_core::DatabaseResult;
+
+                    let (error_msg, result_value) =
+                        if let DatabaseResult::Error(err) = &database_result {
+                            (Some(err.as_str()), None)
+                        } else {
+                            let result_obj = v8::Object::new(scope);
+                            callback_handlers::populate_database_result(
+                                scope,
+                                result_obj,
+                                database_result,
+                            );
+                            (None, Some(result_obj.into()))
+                        };
+
+                    dispatch_binding_callbacks(
+                        scope,
+                        callback_id,
+                        &self.fetch_callbacks,
+                        &self.fetch_error_callbacks,
+                        error_msg,
+                        result_value,
+                    );
                 }
             }
         }

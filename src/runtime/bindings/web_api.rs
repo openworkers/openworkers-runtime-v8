@@ -572,10 +572,17 @@ pub fn setup_url(scope: &mut v8::PinScope) {
                     const baseUrl = typeof base === 'string' ? base : base.href;
 
                     if (url.startsWith('/')) {
+                        // Absolute path - use origin from base
                         const match = baseUrl.match(/^(https?:\/\/[^\/]+)/);
                         url = match ? match[1] + url : url;
                     } else if (!url.match(/^https?:\/\//)) {
-                        url = baseUrl.replace(/\/[^\/]*$/, '/') + url;
+                        // Relative path - append to base directory
+                        const hasPath = baseUrl.match(/^https?:\/\/[^\/]+\//);
+                        if (hasPath) {
+                            url = baseUrl.replace(/\/[^\/]*$/, '/') + url;
+                        } else {
+                            url = baseUrl + '/' + url;
+                        }
                     }
                 }
 

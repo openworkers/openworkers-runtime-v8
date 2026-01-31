@@ -342,7 +342,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -828,8 +828,8 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "openworkers-core"
-version = "0.11.1"
-source = "git+https://github.com/openworkers/openworkers-core?tag=v0.11.1#e9721bc9cd8ccc7119ef9b8e425374224b8f4892"
+version = "0.12.0"
+source = "git+https://github.com/openworkers/openworkers-core?tag=v0.12.0#51a3d17e3fe11e4f5316c16fdf46df16be2bf1d9"
 dependencies = [
  "bytes",
  "serde",
@@ -850,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "openworkers-runtime-v8"
-version = "0.11.5"
+version = "0.12.0"
 dependencies = [
  "bytes",
  "criterion",
@@ -1683,7 +1683,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

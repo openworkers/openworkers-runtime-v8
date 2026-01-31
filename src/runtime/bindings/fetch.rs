@@ -263,6 +263,7 @@ pub fn setup_fetch(
 
             let storage_op = match operation.as_str() {
                 "get" => StorageOp::Get { key: params.key },
+                "fetch" => StorageOp::Fetch { key: params.key },
                 "put" => StorageOp::Put {
                     key: params.key,
                     body: params.body.map(|b| b.to_vec()).unwrap_or_default(),

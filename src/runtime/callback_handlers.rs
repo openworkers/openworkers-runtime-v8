@@ -166,6 +166,45 @@ pub fn populate_storage_result(
             let error_val = v8::String::new(scope, &err_msg).unwrap();
             result_obj.set(scope, error_key.into(), error_val.into());
         }
+
+        StorageResult::Response(response) => {
+            // success
+            let success_key = v8::String::new(scope, "success").unwrap();
+            result_obj.set(
+                scope,
+                success_key.into(),
+                v8::Boolean::new(scope, true).into(),
+            );
+
+            // status
+            let status_key = v8::String::new(scope, "status").unwrap();
+            result_obj.set(
+                scope,
+                status_key.into(),
+                v8::Number::new(scope, response.status as f64).into(),
+            );
+
+            // headers
+            let headers_obj = v8::Object::new(scope);
+            for (key, value) in &response.headers {
+                let k = v8::String::new(scope, key).unwrap();
+                let v = v8::String::new(scope, value).unwrap();
+                headers_obj.set(scope, k.into(), v.into());
+            }
+            let headers_key = v8::String::new(scope, "headers").unwrap();
+            result_obj.set(scope, headers_key.into(), headers_obj.into());
+
+            // body
+            if let openworkers_core::ResponseBody::Bytes(bytes) = response.body {
+                let body_bytes: Vec<u8> = bytes.into();
+                let len = body_bytes.len();
+                let array_buffer =
+                    crate::v8_helpers::create_array_buffer_from_vec(scope, body_bytes);
+                let uint8_array = v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
+                let body_key = v8::String::new(scope, "body").unwrap();
+                result_obj.set(scope, body_key.into(), uint8_array.into());
+            }
+        }
     }
 }
 
