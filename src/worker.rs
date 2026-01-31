@@ -1106,7 +1106,12 @@ pub(crate) fn setup_env(
                                 const {{ url }} = __normalizeFetchInput(input, options);
                                 const key = new URL(url, 'http://localhost').pathname;
                                 return __bindingCall(__nativeBindingStorage, {name}, 'fetch', {{ key }})
-                                    .then(r => new Response(r.body, {{ status: r.status, headers: r.headers }}));
+                                    .then(r => {{
+                                        const body = r.streamId !== undefined
+                                            ? __createNativeStream(r.streamId)
+                                            : r.body;
+                                        return new Response(body, {{ status: r.status, headers: r.headers }});
+                                    }});
                             }}
                         }}"#,
                     )

@@ -88,11 +88,12 @@ pub fn populate_stream_chunk_result(
 
 /// Populate result object for StorageResult callback.
 ///
-/// Sets: { success, body?, size?, etag?, keys?, truncated?, error? }
+/// Sets: { success, body?, streamId?, size?, etag?, keys?, truncated?, error?, status?, headers? }
 pub fn populate_storage_result(
     scope: &mut v8::PinScope,
     result_obj: v8::Local<v8::Object>,
     result: StorageResult,
+    stream_manager: &std::sync::Arc<super::stream_manager::StreamManager>,
 ) {
     match result {
         StorageResult::Body(maybe_body) => {
@@ -194,15 +195,60 @@ pub fn populate_storage_result(
             let headers_key = v8::String::new(scope, "headers").unwrap();
             result_obj.set(scope, headers_key.into(), headers_obj.into());
 
-            // body
-            if let openworkers_core::ResponseBody::Bytes(bytes) = response.body {
-                let body_bytes: Vec<u8> = bytes.into();
-                let len = body_bytes.len();
-                let array_buffer =
-                    crate::v8_helpers::create_array_buffer_from_vec(scope, body_bytes);
-                let uint8_array = v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
-                let body_key = v8::String::new(scope, "body").unwrap();
-                result_obj.set(scope, body_key.into(), uint8_array.into());
+            // body - either bytes or stream
+            match response.body {
+                openworkers_core::ResponseBody::Bytes(bytes) => {
+                    let body_bytes: Vec<u8> = bytes.into();
+                    let len = body_bytes.len();
+                    let array_buffer =
+                        crate::v8_helpers::create_array_buffer_from_vec(scope, body_bytes);
+                    let uint8_array = v8::Uint8Array::new(scope, array_buffer, 0, len).unwrap();
+                    let body_key = v8::String::new(scope, "body").unwrap();
+                    result_obj.set(scope, body_key.into(), uint8_array.into());
+                }
+
+                openworkers_core::ResponseBody::Stream(rx) => {
+                    // Create a native stream and pump chunks into it
+                    let stream_id = stream_manager.create_stream("storage_fetch".to_string());
+                    let manager = stream_manager.clone();
+
+                    tokio::spawn(async move {
+                        use super::stream_manager::StreamChunk;
+                        let mut rx = rx;
+
+                        while let Some(result) = rx.recv().await {
+                            match result {
+                                Ok(bytes) => {
+                                    if manager
+                                        .write_chunk(stream_id, StreamChunk::Data(bytes))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ =
+                                        manager.write_chunk(stream_id, StreamChunk::Error(e)).await;
+                                    return;
+                                }
+                            }
+                        }
+
+                        let _ = manager.write_chunk(stream_id, StreamChunk::Done).await;
+                    });
+
+                    let stream_id_key = v8::String::new(scope, "streamId").unwrap();
+                    result_obj.set(
+                        scope,
+                        stream_id_key.into(),
+                        v8::Number::new(scope, stream_id as f64).into(),
+                    );
+                }
+
+                openworkers_core::ResponseBody::None => {
+                    // No body
+                }
             }
         }
     }

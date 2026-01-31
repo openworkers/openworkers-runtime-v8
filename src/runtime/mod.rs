@@ -335,6 +335,7 @@ impl Runtime {
                                 scope,
                                 result_obj,
                                 storage_result,
+                                &self.stream_manager,
                             );
                             (None, Some(result_obj.into()))
                         };
@@ -494,7 +495,12 @@ impl Runtime {
                     (Some(err.as_str()), None)
                 } else {
                     let result_obj = v8::Object::new(scope);
-                    callback_handlers::populate_storage_result(scope, result_obj, storage_result);
+                    callback_handlers::populate_storage_result(
+                        scope,
+                        result_obj,
+                        storage_result,
+                        &self.stream_manager,
+                    );
                     (None, Some(result_obj.into()))
                 };
                 dispatch_binding_callbacks(

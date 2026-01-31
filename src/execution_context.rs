@@ -614,6 +614,7 @@ impl ExecutionContext {
                                 scope,
                                 result_obj,
                                 storage_result,
+                                &self.stream_manager,
                             );
                             (None, Some(result_obj.into()))
                         };
