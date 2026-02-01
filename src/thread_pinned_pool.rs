@@ -783,8 +783,18 @@ pub async fn execute_pinned(
     let memory_limit_hit = Arc::clone(&inner.isolate.memory_limit_hit);
     let destruction_queue = Arc::clone(&inner.isolate.deferred_destruction_queue);
 
+    tracing::trace!(
+        "Creating v8::Locker for owner {} (before v8::Locker::new)",
+        owner_id
+    );
+
     // Create v8::Locker for thread-safety
     let mut locker = v8::Locker::new(&mut inner.isolate.isolate);
+
+    tracing::trace!(
+        "v8::Locker created for owner {}, processing deferred destructions",
+        owner_id
+    );
 
     // Process any pending deferred handle destructions (while lock is held)
     destruction_queue.process_all();

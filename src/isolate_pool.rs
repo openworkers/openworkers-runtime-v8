@@ -161,16 +161,34 @@ impl PooledIsolate {
     where
         F: FnOnce(&mut v8::Isolate) -> R,
     {
+        tracing::trace!("Acquiring entry lock for worker {}", self.worker_id);
         let mut entry = self.entry.blocking_lock();
 
         // Update stats before creating Locker (to avoid double borrow)
         entry.total_requests += 1;
 
+        tracing::trace!(
+            "Creating v8::Locker for worker {} (before v8::Locker::new)",
+            self.worker_id
+        );
+
         // Create v8::Locker - handles enter/exit automatically via RAII
         let mut locker = v8::Locker::new(&mut entry.isolate.isolate);
 
+        tracing::trace!(
+            "v8::Locker created for worker {}, executing closure",
+            self.worker_id
+        );
+
         // Execute user closure with mutable reference via DerefMut
-        f(&mut locker)
+        let result = f(&mut locker);
+
+        tracing::trace!(
+            "Closure executed, v8::Locker will be dropped for worker {}",
+            self.worker_id
+        );
+
+        result
     }
 
     /// Execute async closure with locked isolate
@@ -185,6 +203,7 @@ impl PooledIsolate {
         F: FnOnce(&mut v8::Isolate) -> Fut,
         Fut: std::future::Future<Output = R>,
     {
+        tracing::trace!("Acquiring entry lock for worker {}", self.worker_id);
         let mut entry = self.entry.lock().await;
 
         // Update stats before creating Locker (to avoid double borrow)
@@ -194,8 +213,19 @@ impl PooledIsolate {
         // Clone Arc to the destruction queue so we can access it after borrowing isolate
         let destruction_queue = Arc::clone(&entry.isolate.deferred_destruction_queue);
 
+        tracing::trace!(
+            "Creating v8::Locker for worker {} (before v8::Locker::new, total_requests: {})",
+            self.worker_id,
+            total_requests
+        );
+
         // Create v8::Locker - handles enter/exit automatically via RAII
         let mut locker = v8::Locker::new(&mut entry.isolate.isolate);
+
+        tracing::trace!(
+            "v8::Locker created for worker {}, processing deferred destructions",
+            self.worker_id
+        );
 
         // Process any pending deferred handle destructions (while lock is held)
         destruction_queue.process_all();

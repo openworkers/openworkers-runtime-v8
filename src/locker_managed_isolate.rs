@@ -83,13 +83,20 @@ impl LockerManagedIsolate {
             params = params.snapshot_blob((*snapshot_data).into());
         }
 
+        tracing::trace!("Creating v8::UnenteredIsolate (before v8::Isolate::new_unentered)");
         let mut isolate = v8::Isolate::new_unentered(params);
+        tracing::trace!("v8::UnenteredIsolate created successfully");
 
         // Install heap limit callback to prevent V8 OOM from crashing the process
         // We need to lock the isolate temporarily to add the callback
         let heap_limit_state = {
+            tracing::trace!("Creating v8::Locker for heap limit callback (before v8::Locker::new)");
             let mut locker = v8::Locker::new(&mut isolate);
-            install_heap_limit_callback(&mut locker, Arc::clone(&memory_limit_hit), heap_max)
+            tracing::trace!("v8::Locker created successfully, installing heap limit callback");
+            let state =
+                install_heap_limit_callback(&mut locker, Arc::clone(&memory_limit_hit), heap_max);
+            tracing::trace!("Heap limit callback installed, v8::Locker will be dropped");
+            state
         };
 
         let use_snapshot = snapshot_ref.is_some();
