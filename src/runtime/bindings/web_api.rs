@@ -630,9 +630,9 @@ pub fn setup_headers(scope: &mut v8::PinScope) {
 
                 if (init) {
                     if (init instanceof Headers) {
-                        // Copy from another Headers object
-                        for (const [key, value] of init) {
-                            this._map.set(key, value);
+                        // Copy from another Headers object - use entries() to get all values
+                        for (const [key, value] of init.entries()) {
+                            this.append(key, value);
                         }
                     } else if (Array.isArray(init)) {
                         // Array of [key, value] pairs
@@ -656,9 +656,26 @@ pub fn setup_headers(scope: &mut v8::PinScope) {
             append(name, value) {
                 const key = this._normalizeKey(name);
                 const strValue = String(value);
+
+                // Special headers that must not be combined with comma separation
+                const specialHeaders = ['set-cookie', 'www-authenticate', 'proxy-authenticate'];
+                const isSpecial = specialHeaders.includes(key);
+
                 if (this._map.has(key)) {
-                    this._map.set(key, this._map.get(key) + ', ' + strValue);
+                    const existing = this._map.get(key);
+                    if (isSpecial) {
+                        // Store as array
+                        if (Array.isArray(existing)) {
+                            existing.push(strValue);
+                        } else {
+                            this._map.set(key, [existing, strValue]);
+                        }
+                    } else {
+                        // Combine with comma separator for regular headers
+                        this._map.set(key, existing + ', ' + strValue);
+                    }
                 } else {
+                    // First value - store as-is (string)
                     this._map.set(key, strValue);
                 }
             }
@@ -669,7 +686,9 @@ pub fn setup_headers(scope: &mut v8::PinScope) {
 
             get(name) {
                 const value = this._map.get(this._normalizeKey(name));
-                return value !== undefined ? value : null;
+                if (value === undefined) return null;
+                // If it's an array (special headers), return the first value
+                return Array.isArray(value) ? value[0] : value;
             }
 
             has(name) {
@@ -682,20 +701,50 @@ pub fn setup_headers(scope: &mut v8::PinScope) {
 
             // Iteration methods
             *entries() {
-                yield* this._map.entries();
+                for (const [key, value] of this._map) {
+                    if (Array.isArray(value)) {
+                        // Yield each array value as a separate entry
+                        for (const v of value) {
+                            yield [key, v];
+                        }
+                    } else {
+                        yield [key, value];
+                    }
+                }
             }
 
             *keys() {
-                yield* this._map.keys();
+                for (const [key, value] of this._map) {
+                    if (Array.isArray(value)) {
+                        // Yield the key multiple times for array values
+                        for (let i = 0; i < value.length; i++) {
+                            yield key;
+                        }
+                    } else {
+                        yield key;
+                    }
+                }
             }
 
             *values() {
-                yield* this._map.values();
+                for (const value of this._map.values()) {
+                    if (Array.isArray(value)) {
+                        yield* value;
+                    } else {
+                        yield value;
+                    }
+                }
             }
 
             forEach(callback, thisArg) {
                 for (const [key, value] of this._map) {
-                    callback.call(thisArg, value, key, this);
+                    if (Array.isArray(value)) {
+                        for (const v of value) {
+                            callback.call(thisArg, v, key, this);
+                        }
+                    } else {
+                        callback.call(thisArg, value, key, this);
+                    }
                 }
             }
 
@@ -706,13 +755,11 @@ pub fn setup_headers(scope: &mut v8::PinScope) {
 
             // getSetCookie returns all Set-Cookie headers as array
             getSetCookie() {
-                const cookies = [];
                 const value = this._map.get('set-cookie');
-                if (value) {
-                    // Split by ', ' but be careful with cookie values
-                    cookies.push(value);
-                }
-                return cookies;
+                if (!value) return [];
+                // If it's already an array (multiple set-cookie headers), return it
+                // Otherwise wrap single value in array
+                return Array.isArray(value) ? value : [value];
             }
         };
     "#;
