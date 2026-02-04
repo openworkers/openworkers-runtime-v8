@@ -28,17 +28,20 @@ pub fn populate_fetch_meta(
     let status_text_val = v8::String::new(scope, &meta.status_text).unwrap();
     meta_obj.set(scope, status_text_key.into(), status_text_val.into());
 
-    // headers as object
-    let headers_obj = v8::Object::new(scope);
+    // headers as array of [key, value] pairs (preserves duplicates like set-cookie)
+    let headers_arr = v8::Array::new(scope, meta.headers.len() as i32);
 
-    for (key, value) in &meta.headers {
+    for (i, (key, value)) in meta.headers.iter().enumerate() {
+        let pair = v8::Array::new(scope, 2);
         let k = v8::String::new(scope, key).unwrap();
         let v = v8::String::new(scope, value).unwrap();
-        headers_obj.set(scope, k.into(), v.into());
+        pair.set_index(scope, 0, k.into());
+        pair.set_index(scope, 1, v.into());
+        headers_arr.set_index(scope, i as u32, pair.into());
     }
 
     let headers_key = v8::String::new(scope, "headers").unwrap();
-    meta_obj.set(scope, headers_key.into(), headers_obj.into());
+    meta_obj.set(scope, headers_key.into(), headers_arr.into());
 
     // streamId
     let stream_id_key = v8::String::new(scope, "streamId").unwrap();
@@ -185,15 +188,18 @@ pub fn populate_storage_result(
                 v8::Number::new(scope, response.status as f64).into(),
             );
 
-            // headers
-            let headers_obj = v8::Object::new(scope);
-            for (key, value) in &response.headers {
+            // headers as array of [key, value] pairs (preserves duplicates like set-cookie)
+            let headers_arr = v8::Array::new(scope, response.headers.len() as i32);
+            for (i, (key, value)) in response.headers.iter().enumerate() {
+                let pair = v8::Array::new(scope, 2);
                 let k = v8::String::new(scope, key).unwrap();
                 let v = v8::String::new(scope, value).unwrap();
-                headers_obj.set(scope, k.into(), v.into());
+                pair.set_index(scope, 0, k.into());
+                pair.set_index(scope, 1, v.into());
+                headers_arr.set_index(scope, i as u32, pair.into());
             }
             let headers_key = v8::String::new(scope, "headers").unwrap();
-            result_obj.set(scope, headers_key.into(), headers_obj.into());
+            result_obj.set(scope, headers_key.into(), headers_arr.into());
 
             // body - either bytes or stream
             match response.body {

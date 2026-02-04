@@ -828,8 +828,8 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "openworkers-core"
-version = "0.12.0"
-source = "git+https://github.com/openworkers/openworkers-core?tag=v0.12.0#51a3d17e3fe11e4f5316c16fdf46df16be2bf1d9"
+version = "0.13.0"
+source = "git+https://github.com/openworkers/openworkers-core?tag=v0.13.0#5686ecd7f573f50309d13100e908a143fa3b837c"
 dependencies = [
  "bytes",
  "serde",
@@ -850,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "openworkers-runtime-v8"
-version = "0.12.3"
+version = "0.13.0"
 dependencies = [
  "bytes",
  "criterion",

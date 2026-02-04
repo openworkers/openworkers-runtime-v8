@@ -3,7 +3,7 @@ members = ["gc-derive"]
 
 [package]
 name = "openworkers-runtime-v8"
-version = "0.12.3"
+version = "0.13.0"
 edition = "2024"
 license = "MIT"
 
@@ -18,7 +18,7 @@ sandbox = ["v8/v8_enable_sandbox", "serde_v8/v8_enable_sandbox"]
 gc-derive = { package = "openworkers-runtime-v8-gc-derive", path = "gc-derive" }
 
 # Common types
-openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.12.0" }
+openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.13.0" }
 
 # V8 JavaScript engine (fork with UnenteredIsolate + Locker support for pooling)
 v8 = { package = "openworkers-v8", version = "145" }

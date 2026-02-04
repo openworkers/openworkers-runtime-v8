@@ -175,12 +175,23 @@ pub fn extract_headers_from_response(
             if let Some(key_val) = entries.get_index(scope, i)
                 && let Some(val_val) = entries.get_index(scope, i + 1)
                 && let Some(key_str) = key_val.to_string(scope)
-                && let Some(val_str) = val_val.to_string(scope)
             {
-                headers.push((
-                    key_str.to_rust_string_lossy(scope),
-                    val_str.to_rust_string_lossy(scope),
-                ));
+                let key = key_str.to_rust_string_lossy(scope);
+
+                // Check if value is an array (for special headers like set-cookie)
+                if let Ok(arr) = v8::Local::<v8::Array>::try_from(val_val) {
+                    // Value is an array - push each element as a separate header
+                    for j in 0..arr.length() {
+                        if let Some(elem) = arr.get_index(scope, j)
+                            && let Some(elem_str) = elem.to_string(scope)
+                        {
+                            headers.push((key.clone(), elem_str.to_rust_string_lossy(scope)));
+                        }
+                    }
+                } else if let Some(val_str) = val_val.to_string(scope) {
+                    // Value is a string - push as-is
+                    headers.push((key, val_str.to_rust_string_lossy(scope)));
+                }
             }
 
             i += 2; // Map.as_array returns [key, value, key, value, ...]
