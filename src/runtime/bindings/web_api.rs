@@ -377,61 +377,66 @@ pub fn setup_base64(scope: &mut v8::PinScope) {
         // Base64 encoding/decoding (atob/btoa)
         const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
-        globalThis.btoa = function(str) {
-            const bytes = typeof str === 'string'
-                ? new TextEncoder().encode(str)
-                : new Uint8Array(str);
+        // Lookup table for decoding: charCode → 6-bit value (supports base64url too)
+        const B64_CODES = new Uint8Array(256);
+        for (let i = 0; i < BASE64_CHARS.length; i++) {
+            B64_CODES[BASE64_CHARS.charCodeAt(i)] = i;
+        }
+        B64_CODES[0x2d] = 62; // '-' (base64url)
+        B64_CODES[0x5f] = 63; // '_' (base64url)
 
+        // btoa: binary string → base64
+        // Each char is treated as a single byte (charCodeAt), NOT UTF-8.
+        globalThis.btoa = function(str) {
+            const len = str.length;
             let result = '';
-            const len = bytes.length;
 
             for (let i = 0; i < len; i += 3) {
-                const b1 = bytes[i];
-                const b2 = i + 1 < len ? bytes[i + 1] : 0;
-                const b3 = i + 2 < len ? bytes[i + 2] : 0;
+                const b1 = str.charCodeAt(i);
+                const b2 = i + 1 < len ? str.charCodeAt(i + 1) : 0;
+                const b3 = i + 2 < len ? str.charCodeAt(i + 2) : 0;
 
-                result += BASE64_CHARS[b1 >> 2];
-                result += BASE64_CHARS[((b1 & 3) << 4) | (b2 >> 4)];
-                result += i + 1 < len ? BASE64_CHARS[((b2 & 15) << 2) | (b3 >> 6)] : '=';
-                result += i + 2 < len ? BASE64_CHARS[b3 & 63] : '=';
+                if (b1 > 255 || b2 > 255 || b3 > 255) {
+                    throw new DOMException('Invalid character', 'InvalidCharacterError');
+                }
+
+                result +=
+                    BASE64_CHARS[b1 >> 2] +
+                    BASE64_CHARS[((b1 & 3) << 4) | (b2 >> 4)] +
+                    BASE64_CHARS[((b2 & 15) << 2) | (b3 >> 6)] +
+                    BASE64_CHARS[b3 & 63];
+            }
+
+            if (len % 3 === 2) {
+                result = result.substring(0, result.length - 1) + '=';
+            } else if (len % 3 === 1) {
+                result = result.substring(0, result.length - 2) + '==';
             }
 
             return result;
         };
 
+        // atob: base64 → binary string
+        // Returns a string where each char is one byte (latin-1), NOT UTF-8.
         globalThis.atob = function(base64) {
-            // Remove whitespace and validate
-            base64 = base64.replace(/\s/g, '');
-
+            base64 = base64.replace(/[\s=]/g, '');
             const len = base64.length;
-            if (len % 4 !== 0) {
-                throw new DOMException('Invalid base64 string', 'InvalidCharacterError');
+            const outLen = (len * 3) >>> 2;
+            let result = '';
+
+            for (let i = 0, j = 0; j < outLen; i += 4) {
+                const a = B64_CODES[base64.charCodeAt(i)];
+                const b = B64_CODES[base64.charCodeAt(i + 1)];
+                const c = B64_CODES[base64.charCodeAt(i + 2)];
+                const d = B64_CODES[base64.charCodeAt(i + 3)];
+
+                result += String.fromCharCode((a << 2) | (b >> 4));
+                if (++j < outLen) result += String.fromCharCode(((b & 15) << 4) | (c >> 2));
+                if (++j < outLen) result += String.fromCharCode(((c & 3) << 6) | (d & 63));
+                j++;
             }
 
-            // Calculate output length
-            let outputLen = (len / 4) * 3;
-            if (base64[len - 1] === '=') outputLen--;
-            if (base64[len - 2] === '=') outputLen--;
-
-            const bytes = new Uint8Array(outputLen);
-            let p = 0;
-
-            for (let i = 0; i < len; i += 4) {
-                const c1 = BASE64_CHARS.indexOf(base64[i]);
-                const c2 = BASE64_CHARS.indexOf(base64[i + 1]);
-                const c3 = base64[i + 2] === '=' ? 0 : BASE64_CHARS.indexOf(base64[i + 2]);
-                const c4 = base64[i + 3] === '=' ? 0 : BASE64_CHARS.indexOf(base64[i + 3]);
-
-                if (c1 === -1 || c2 === -1 || (base64[i + 2] !== '=' && c3 === -1) || (base64[i + 3] !== '=' && c4 === -1)) {
-                    throw new DOMException('Invalid base64 character', 'InvalidCharacterError');
-                }
-
-                bytes[p++] = (c1 << 2) | (c2 >> 4);
-                if (base64[i + 2] !== '=') bytes[p++] = ((c2 & 15) << 4) | (c3 >> 2);
-                if (base64[i + 3] !== '=') bytes[p++] = ((c3 & 3) << 6) | c4;
-            }
-
-            return new TextDecoder().decode(bytes);
+            return result;
         };
     "#;
 
@@ -445,6 +450,7 @@ pub fn setup_url_search_params(scope: &mut v8::PinScope) {
         globalThis.URLSearchParams = class URLSearchParams {
             constructor(init) {
                 this._entries = [];
+                this._url = null;
 
                 if (!init) return;
 
@@ -470,12 +476,22 @@ pub fn setup_url_search_params(scope: &mut v8::PinScope) {
                 }
             }
 
+            _update() {
+                if (this._url) {
+                    const qs = this.toString();
+                    this._url.search = qs ? '?' + qs : '';
+                    this._url.href = this._url.origin + this._url.pathname + this._url.search + this._url.hash;
+                }
+            }
+
             append(name, value) {
                 this._entries.push([String(name), String(value)]);
+                this._update();
             }
 
             delete(name) {
                 this._entries = this._entries.filter(([k]) => k !== name);
+                this._update();
             }
 
             get(name) {
@@ -495,6 +511,7 @@ pub fn setup_url_search_params(scope: &mut v8::PinScope) {
                 const strName = String(name);
                 const strValue = String(value);
                 let found = false;
+
                 this._entries = this._entries.filter(([k]) => {
                     if (k === strName) {
                         if (!found) {
@@ -505,16 +522,20 @@ pub fn setup_url_search_params(scope: &mut v8::PinScope) {
                     }
                     return true;
                 });
+
                 if (found) {
                     const idx = this._entries.findIndex(([k]) => k === strName);
                     this._entries[idx][1] = strValue;
                 } else {
                     this._entries.push([strName, strValue]);
                 }
+
+                this._update();
             }
 
             sort() {
                 this._entries.sort((a, b) => a[0].localeCompare(b[0]));
+                this._update();
             }
 
             toString() {
@@ -588,6 +609,7 @@ pub fn setup_url(scope: &mut v8::PinScope) {
 
                 this.href = url;
                 const match = url.match(/^(https?):\/\/([^\/\?#]+)(\/[^\?#]*)?(\?[^#]*)?(#.*)?$/);
+
                 if (match) {
                     this.protocol = match[1] + ':';
                     this.host = match[2];
@@ -609,6 +631,9 @@ pub fn setup_url(scope: &mut v8::PinScope) {
                     this.origin = '';
                     this.searchParams = new URLSearchParams();
                 }
+
+                // Link searchParams back to this URL so mutations update href
+                this.searchParams._url = this;
             }
 
             toString() {
