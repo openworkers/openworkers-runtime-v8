@@ -63,16 +63,16 @@ pub fn setup_timers(
         globalThis.__nextTimerId = 1;
         globalThis.__intervalIds = new Set();
 
-        globalThis.setTimeout = function(callback, delay) {
+        globalThis.setTimeout = function(callback, delay, ...args) {
             const id = globalThis.__nextTimerId++;
-            globalThis.__timerCallbacks.set(id, callback);
+            globalThis.__timerCallbacks.set(id, args.length > 0 ? () => callback(...args) : callback);
             __nativeScheduleTimeout(id, delay || 0);
             return id;
         };
 
-        globalThis.setInterval = function(callback, interval) {
+        globalThis.setInterval = function(callback, interval, ...args) {
             const id = globalThis.__nextTimerId++;
-            globalThis.__timerCallbacks.set(id, callback);
+            globalThis.__timerCallbacks.set(id, args.length > 0 ? () => callback(...args) : callback);
             globalThis.__intervalIds.add(id);
             __nativeScheduleInterval(id, interval || 0);
             return id;
