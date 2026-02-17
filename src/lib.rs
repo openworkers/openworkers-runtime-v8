@@ -74,6 +74,9 @@ pub use thread_pinned_pool::{
 pub use worker::Worker;
 pub use worker_future::WorkerFuture;
 
+// Snapshot API
+pub use snapshot::{SnapshotOutput, create_runtime_snapshot, create_worker_snapshot};
+
 // Re-export common types from openworkers-core
 pub use openworkers_core::{
     Event, EventType, FetchInit, HttpMethod, HttpRequest, HttpResponse, HttpResponseMeta, LogEvent,

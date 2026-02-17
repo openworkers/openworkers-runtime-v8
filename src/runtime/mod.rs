@@ -99,9 +99,15 @@ pub struct Runtime {
 }
 
 impl Runtime {
+    /// Create a new Runtime.
+    ///
+    /// If `worker_snapshot` is provided, the isolate is created from that snapshot
+    /// (which already includes runtime APIs + evaluated worker code). Otherwise,
+    /// the runtime snapshot from disk is used (if available).
     pub fn new(
         limits: Option<RuntimeLimits>,
         log_callback: LogCallback,
+        worker_snapshot: Option<Vec<u8>>,
     ) -> (
         Self,
         mpsc::UnboundedReceiver<SchedulerMessage>,
@@ -131,8 +137,9 @@ impl Runtime {
         let heap_initial = limits.heap_initial_mb * 1024 * 1024;
         let heap_max = limits.heap_max_mb * 1024 * 1024;
 
-        // Load snapshot (centralized, handles empty file case)
+        // Load snapshot: worker snapshot takes priority over runtime snapshot
         let snapshot_ref = crate::platform::get_snapshot();
+        let has_snapshot = worker_snapshot.is_some() || snapshot_ref.is_some();
 
         // Create isolate params
         // In sandbox mode, V8 manages memory allocation, so we use the default allocator.
@@ -156,7 +163,11 @@ impl Runtime {
 
         let mut params = params;
 
-        if let Some(snapshot_data) = snapshot_ref {
+        if let Some(ws) = worker_snapshot {
+            // Worker snapshot: includes runtime APIs + evaluated worker code
+            params = params.snapshot_blob(ws.into());
+        } else if let Some(snapshot_data) = snapshot_ref {
+            // Runtime snapshot: includes only runtime APIs
             params = params.snapshot_blob((*snapshot_data).into());
         }
 
@@ -166,7 +177,7 @@ impl Runtime {
         let heap_limit_state =
             install_heap_limit_callback(&mut isolate, Arc::clone(&memory_limit_hit), heap_max);
 
-        let use_snapshot = snapshot_ref.is_some();
+        let use_snapshot = has_snapshot;
 
         let context = {
             use std::pin::pin;
@@ -597,7 +608,8 @@ impl Runtime {
         let script = match worker_code {
             WorkerCode::JavaScript(code) => code,
             WorkerCode::Snapshot(_) => {
-                return Err("Snapshot worker code evaluation not supported yet".to_string());
+                // Worker code is already evaluated in the snapshot — nothing to do
+                return Ok(());
             }
             _ => {
                 return Err("V8 runtime only supports JavaScript code".to_string());

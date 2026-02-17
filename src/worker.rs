@@ -494,8 +494,14 @@ impl Worker {
         // Create log callback that bypasses scheduler (calls ops.handle_log directly)
         let log_callback = crate::runtime::bindings::log_callback_from_ops(&ops);
 
+        // Extract worker snapshot if present (isolate will be created from it)
+        let worker_snapshot = match &script.code {
+            WorkerCode::Snapshot(data) => Some(data.clone()),
+            _ => None,
+        };
+
         let (mut runtime, scheduler_rx, callback_tx, callback_notify) =
-            Runtime::new(limits, log_callback);
+            Runtime::new(limits, log_callback, worker_snapshot);
 
         // Setup addEventListener
         setup_event_listener(&mut runtime.isolate, &runtime.context).map_err(|e| {
