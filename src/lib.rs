@@ -77,6 +77,9 @@ pub use worker_future::WorkerFuture;
 // Snapshot API
 pub use snapshot::{SnapshotOutput, create_runtime_snapshot, create_worker_snapshot};
 
+// Code Cache API
+pub use snapshot::{create_code_cache, is_code_cache, pack_code_cache, unpack_code_cache};
+
 // Re-export common types from openworkers-core
 pub use openworkers_core::{
     Event, EventType, FetchInit, HttpMethod, HttpRequest, HttpResponse, HttpResponseMeta, LogEvent,

@@ -139,7 +139,8 @@ impl Runtime {
 
         // Load snapshot: worker snapshot takes priority over runtime snapshot
         let snapshot_ref = crate::platform::get_snapshot();
-        let has_snapshot = worker_snapshot.is_some() || snapshot_ref.is_some();
+        let has_worker_snapshot = worker_snapshot.is_some();
+        let has_snapshot = has_worker_snapshot || snapshot_ref.is_some();
 
         // Create isolate params
         // In sandbox mode, V8 manages memory allocation, so we use the default allocator.
@@ -171,62 +172,78 @@ impl Runtime {
             params = params.snapshot_blob((*snapshot_data).into());
         }
 
-        let mut isolate = v8::Isolate::new(params);
+        // Serialize isolate creation when loading worker snapshots (old path).
+        // V8's SharedHeapDeserializer::DeserializeStringTable is not thread-safe
+        // across different snapshots. Code cache doesn't use worker snapshots,
+        // so this lock only applies to the legacy backward-compat path.
+        use std::sync::Mutex;
+        static ISOLATE_INIT_MUTEX: Mutex<()> = Mutex::new(());
+        let _lock = if has_worker_snapshot {
+            Some(ISOLATE_INIT_MUTEX.lock().unwrap())
+        } else {
+            None
+        };
 
-        // Install heap limit callback to prevent V8 OOM from crashing the process
-        let heap_limit_state =
-            install_heap_limit_callback(&mut isolate, Arc::clone(&memory_limit_hit), heap_max);
+        let (isolate, heap_limit_state, context) = {
+            let mut isolate = v8::Isolate::new(params);
 
-        let use_snapshot = has_snapshot;
+            // Install heap limit callback to prevent V8 OOM from crashing the process
+            let heap_limit_state =
+                install_heap_limit_callback(&mut isolate, Arc::clone(&memory_limit_hit), heap_max);
 
-        let context = {
-            use std::pin::pin;
-            let scope = pin!(v8::HandleScope::new(&mut isolate));
-            let mut scope = scope.init();
-            let context = v8::Context::new(&scope, Default::default());
-            let scope = &mut v8::ContextScope::new(&mut scope, context);
+            let use_snapshot = has_snapshot;
 
-            // Setup global aliases (self, global) for compatibility
-            bindings::setup_global_aliases(scope);
+            let context = {
+                use std::pin::pin;
+                let scope = pin!(v8::HandleScope::new(&mut isolate));
+                let mut scope = scope.init();
+                let context = v8::Context::new(&scope, Default::default());
+                let scope = &mut v8::ContextScope::new(&mut scope, context);
 
-            // Always setup native bindings (not in snapshot)
-            bindings::setup_console(scope, log_callback.clone());
-            bindings::setup_performance(scope);
-            bindings::setup_timers(scope, scheduler_tx.clone());
-            bindings::setup_fetch_helpers(scope); // Must be before setup_fetch
-            bindings::setup_fetch(
-                scope,
-                scheduler_tx.clone(),
-                fetch_callbacks.clone(),
-                fetch_error_callbacks.clone(),
-                next_callback_id.clone(),
-            );
-            bindings::setup_stream_ops(
-                scope,
-                scheduler_tx.clone(),
-                stream_callbacks.clone(),
-                next_callback_id.clone(),
-            );
-            bindings::setup_response_stream_ops(scope, stream_manager.clone());
-            crypto::setup_crypto(scope);
+                // Setup global aliases (self, global) for compatibility
+                bindings::setup_global_aliases(scope);
 
-            // Only setup pure JS APIs if no snapshot (they're in the snapshot)
-            if !use_snapshot {
-                text_encoding::setup_text_encoding(scope);
-                streams::setup_readable_stream(scope);
-                bindings::setup_blob(scope);
-                bindings::setup_form_data(scope);
-                bindings::setup_abort_controller(scope);
-                bindings::setup_structured_clone(scope);
-                bindings::setup_base64(scope);
-                bindings::setup_url_search_params(scope);
-                bindings::setup_url(scope);
-                bindings::setup_headers(scope);
-                bindings::setup_request(scope);
-                bindings::setup_response(scope);
-            }
+                // Always setup native bindings (not in snapshot)
+                bindings::setup_console(scope, log_callback.clone());
+                bindings::setup_performance(scope);
+                bindings::setup_timers(scope, scheduler_tx.clone());
+                bindings::setup_fetch_helpers(scope); // Must be before setup_fetch
+                bindings::setup_fetch(
+                    scope,
+                    scheduler_tx.clone(),
+                    fetch_callbacks.clone(),
+                    fetch_error_callbacks.clone(),
+                    next_callback_id.clone(),
+                );
+                bindings::setup_stream_ops(
+                    scope,
+                    scheduler_tx.clone(),
+                    stream_callbacks.clone(),
+                    next_callback_id.clone(),
+                );
+                bindings::setup_response_stream_ops(scope, stream_manager.clone());
+                crypto::setup_crypto(scope);
 
-            v8::Global::new(scope.as_ref(), context)
+                // Only setup pure JS APIs if no snapshot (they're in the snapshot)
+                if !use_snapshot {
+                    text_encoding::setup_text_encoding(scope);
+                    streams::setup_readable_stream(scope);
+                    bindings::setup_blob(scope);
+                    bindings::setup_form_data(scope);
+                    bindings::setup_abort_controller(scope);
+                    bindings::setup_structured_clone(scope);
+                    bindings::setup_base64(scope);
+                    bindings::setup_url_search_params(scope);
+                    bindings::setup_url(scope);
+                    bindings::setup_headers(scope);
+                    bindings::setup_request(scope);
+                    bindings::setup_response(scope);
+                }
+
+                v8::Global::new(scope.as_ref(), context)
+            };
+
+            (isolate, heap_limit_state, context)
         };
 
         let runtime = Self {
@@ -605,80 +622,122 @@ impl Runtime {
 
         // Catch-all handles WebAssembly (behind wasm feature flag) and future variants
         #[allow(unreachable_patterns)]
-        let script = match worker_code {
-            WorkerCode::JavaScript(code) => code,
-            WorkerCode::Snapshot(_) => {
-                // Worker code is already evaluated in the snapshot — nothing to do
-                return Ok(());
-            }
-            _ => {
-                return Err("V8 runtime only supports JavaScript code".to_string());
-            }
-        };
+        match worker_code {
+            WorkerCode::JavaScript(code) => {
+                let code = v8::String::new(scope, code).ok_or("Failed to create script string")?;
 
-        let code = v8::String::new(scope, script).ok_or("Failed to create script string")?;
+                // Use TryCatch to capture JavaScript exceptions
+                let tc_scope = pin!(v8::TryCatch::new(scope));
+                let tc_scope = tc_scope.init();
 
-        // Use TryCatch to capture JavaScript exceptions
-        let tc_scope = pin!(v8::TryCatch::new(scope));
-        let tc_scope = tc_scope.init();
+                let script_obj = match v8::Script::compile(&tc_scope, code, None) {
+                    Some(s) => s,
+                    None => {
+                        if let Some(exception) = tc_scope.exception() {
+                            let msg = exception
+                                .to_string(&tc_scope)
+                                .map(|s| s.to_rust_string_lossy(&tc_scope))
+                                .unwrap_or_else(|| "Unknown error".to_string());
 
-        let script_obj = match v8::Script::compile(&tc_scope, code, None) {
-            Some(s) => s,
-            None => {
-                if let Some(exception) = tc_scope.exception() {
-                    let msg = exception
-                        .to_string(&tc_scope)
-                        .map(|s| s.to_rust_string_lossy(&tc_scope))
-                        .unwrap_or_else(|| "Unknown error".to_string());
+                            // Try to get more detail from message
+                            if let Some(message) = tc_scope.message() {
+                                let line = message.get_line_number(&tc_scope).unwrap_or(0);
+                                let col = message.get_start_column();
+                                let source_line = message
+                                    .get_source_line(&tc_scope)
+                                    .map(|s| s.to_rust_string_lossy(&tc_scope))
+                                    .unwrap_or_default();
 
-                    // Try to get more detail from message
-                    if let Some(message) = tc_scope.message() {
-                        let line = message.get_line_number(&tc_scope).unwrap_or(0);
-                        let col = message.get_start_column();
-                        let source_line = message
-                            .get_source_line(&tc_scope)
-                            .map(|s| s.to_rust_string_lossy(&tc_scope))
-                            .unwrap_or_default();
+                                return Err(format!(
+                                    "SyntaxError at line {}, column {}: {}\n  > {}",
+                                    line, col, msg, source_line
+                                ));
+                            }
 
-                        return Err(format!(
-                            "SyntaxError at line {}, column {}: {}\n  > {}",
-                            line, col, msg, source_line
-                        ));
-                    }
-
-                    return Err(format!("SyntaxError: {}", msg));
-                }
-
-                return Err("Failed to compile script".to_string());
-            }
-        };
-
-        match script_obj.run(&tc_scope) {
-            Some(_) => Ok(()),
-            None => {
-                if let Some(exception) = tc_scope.exception() {
-                    let msg = exception
-                        .to_string(&tc_scope)
-                        .map(|s| s.to_rust_string_lossy(&tc_scope))
-                        .unwrap_or_else(|| "Unknown error".to_string());
-
-                    // Try to get stack trace
-                    if let Some(stack) = tc_scope.stack_trace() {
-                        let stack_str = stack
-                            .to_string(&tc_scope)
-                            .map(|s| s.to_rust_string_lossy(&tc_scope))
-                            .unwrap_or_default();
-
-                        if !stack_str.is_empty() {
-                            return Err(format!("{}\n{}", msg, stack_str));
+                            return Err(format!("SyntaxError: {}", msg));
                         }
-                    }
 
-                    return Err(msg);
+                        return Err("Failed to compile script".to_string());
+                    }
+                };
+
+                match script_obj.run(&tc_scope) {
+                    Some(_) => Ok(()),
+                    None => {
+                        if let Some(exception) = tc_scope.exception() {
+                            let msg = exception
+                                .to_string(&tc_scope)
+                                .map(|s| s.to_rust_string_lossy(&tc_scope))
+                                .unwrap_or_else(|| "Unknown error".to_string());
+
+                            // Try to get stack trace
+                            if let Some(stack) = tc_scope.stack_trace() {
+                                let stack_str = stack
+                                    .to_string(&tc_scope)
+                                    .map(|s| s.to_rust_string_lossy(&tc_scope))
+                                    .unwrap_or_default();
+
+                                if !stack_str.is_empty() {
+                                    return Err(format!("{}\n{}", msg, stack_str));
+                                }
+                            }
+
+                            return Err(msg);
+                        }
+
+                        Err("Failed to execute script".to_string())
+                    }
+                }
+            }
+            WorkerCode::Snapshot(data) if crate::snapshot::is_code_cache(data) => {
+                // Code cache: unpack source + bytecode, compile with ConsumeCodeCache, then run
+                let (source, cache_bytes) = crate::snapshot::unpack_code_cache(data)
+                    .ok_or("Failed to unpack code cache bundle")?;
+
+                let code_str =
+                    v8::String::new(scope, source).ok_or("Failed to create V8 string")?;
+                let cached_data = v8::script_compiler::CachedData::new(cache_bytes);
+                let mut src =
+                    v8::script_compiler::Source::new_with_cached_data(code_str, None, cached_data);
+
+                let tc_scope = pin!(v8::TryCatch::new(scope));
+                let tc_scope = tc_scope.init();
+
+                let script_obj = v8::script_compiler::compile(
+                    &tc_scope,
+                    &mut src,
+                    v8::script_compiler::CompileOptions::ConsumeCodeCache,
+                    v8::script_compiler::NoCacheReason::NoReason,
+                )
+                .ok_or_else(|| {
+                    tc_scope
+                        .exception()
+                        .and_then(|e| e.to_string(&tc_scope))
+                        .map(|s| s.to_rust_string_lossy(&tc_scope))
+                        .unwrap_or_else(|| "Failed to compile with code cache".to_string())
+                })?;
+
+                // Check if cache was rejected (V8 version mismatch, etc.)
+                // Script still compiles fine, just without the cache speedup.
+                if src.get_cached_data().map_or(false, |c| c.rejected()) {
+                    tracing::warn!("Code cache rejected (V8 version mismatch?)");
                 }
 
-                Err("Failed to execute script".to_string())
+                script_obj.run(&tc_scope).ok_or_else(|| {
+                    tc_scope
+                        .exception()
+                        .and_then(|e| e.to_string(&tc_scope))
+                        .map(|s| s.to_rust_string_lossy(&tc_scope))
+                        .unwrap_or_else(|| "Failed to execute script".to_string())
+                })?;
+
+                Ok(())
             }
+            WorkerCode::Snapshot(_) => {
+                // Old-style heap snapshot: code is already evaluated in the snapshot
+                Ok(())
+            }
+            _ => Err("V8 runtime only supports JavaScript code".to_string()),
         }
     }
 }

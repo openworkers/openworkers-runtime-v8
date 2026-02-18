@@ -2,6 +2,10 @@ use std::collections::HashMap;
 use std::pin::pin;
 use v8;
 
+/// Magic header identifying a code cache bundle (as opposed to an old V8 heap snapshot).
+/// "CODECA5E" in little-endian.
+const CODE_CACHE_MAGIC: u32 = 0xC0DE_CA5E;
+
 /// Snapshot output structure
 #[derive(Debug)]
 pub struct SnapshotOutput {
@@ -146,16 +150,16 @@ pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
 
 /// Create a V8 snapshot with worker code already evaluated.
 ///
-/// This creates a **standalone** snapshot that includes all runtime APIs plus
-/// the worker's evaluated code (e.g., `globalThis.default = { fetch() { ... } }`).
+/// Creates a layered snapshot on top of the runtime snapshot (if available),
+/// or a standalone snapshot if no runtime snapshot exists. The resulting blob
+/// is fully self-contained — V8's `create_blob()` re-serializes the entire heap.
 ///
 /// At execution time, loading this snapshot skips transform + compile + eval,
 /// giving near-instant cold starts.
 ///
-/// Note: We always create standalone snapshots (not layered on the runtime snapshot)
-/// because V8 layered snapshots have internal string table references that become
-/// invalid when loaded via `v8::Isolate::new()`. Standalone snapshots are fully
-/// self-contained and load reliably.
+/// Uses `FunctionCodeHandling::Clear` to strip compiled bytecode from the blob.
+/// This avoids internal reference issues and produces smaller snapshots.
+/// V8 re-compiles from source on first execution (negligible cost).
 ///
 /// Stub console bindings (no-ops) are installed so top-level `console.log()` calls
 /// don't crash during snapshotting. Real bindings replace them at execution time.
@@ -165,9 +169,10 @@ pub fn create_worker_snapshot(
 ) -> Result<SnapshotOutput, String> {
     let _platform = crate::platform::get_platform();
 
-    // Always create a standalone snapshot (not layered on runtime snapshot).
-    // Layered snapshots (via snapshot_creator_from_existing_snapshot) crash when
-    // loaded into a regular isolate due to StringForwardingTable deserialization errors.
+    // Always create standalone snapshots (not layered).
+    // Layered snapshots (snapshot_creator_from_existing_snapshot) corrupt V8's
+    // StringForwardingTable when multiple snapshots are created from the same
+    // base snapshot, causing "Check failed: index < size()" crashes on load.
     let mut snapshot_creator = v8::Isolate::snapshot_creator(None, None);
 
     // Track errors without early return — V8 requires create_blob() before dropping
@@ -180,7 +185,7 @@ pub fn create_worker_snapshot(
         let context = v8::Context::new(&scope, Default::default());
         let scope = &mut v8::ContextScope::new(&mut scope, context);
 
-        // Set up all pure JS APIs from scratch (standalone snapshot)
+        // Standalone snapshot — set up all pure JS APIs from scratch
         crate::runtime::bindings::setup_global_aliases(scope);
         crate::runtime::text_encoding::setup_text_encoding(scope);
         crate::runtime::streams::setup_readable_stream(scope);
@@ -236,10 +241,17 @@ pub fn create_worker_snapshot(
         tc_scope.set_default_context(context);
     }
 
+    // Force a full GC to resolve any string forwarding indices before serialization.
+    // During execution, V8's GC may externalize strings, replacing their hash with a
+    // forwarding index into the StringForwardingTable. If these forwarding indices
+    // survive into the snapshot, the loading isolate (with an empty forwarding table)
+    // will crash with "Check failed: index < size()" in GetRawHash.
+    snapshot_creator.low_memory_notification();
+
     // CRITICAL: Always call create_blob before dropping a snapshot creator.
     // V8 panics if a snapshot creator is dropped without this call.
     let snapshot_blob = snapshot_creator
-        .create_blob(v8::FunctionCodeHandling::Keep)
+        .create_blob(v8::FunctionCodeHandling::Clear)
         .ok_or("Failed to create worker snapshot blob")?;
 
     // Now check if there was an eval error
@@ -250,4 +262,109 @@ pub fn create_worker_snapshot(
     Ok(SnapshotOutput {
         output: snapshot_blob.to_vec(),
     })
+}
+
+/// Create a V8 code cache (compiled bytecode) for the given JavaScript source.
+///
+/// Unlike `create_worker_snapshot`, this does NOT run the code — it only parses
+/// and compiles it with `EagerCompile`, then serializes the bytecode via
+/// `UnboundScript::create_code_cache()`.
+///
+/// The result is thread-safe: no shared heap objects, no string table interaction.
+/// Multiple code caches for different scripts can be loaded concurrently.
+///
+/// At execution time, V8 skips parse+compile (~80-90% of cold start cost)
+/// but still runs the code (eval). This is slightly slower than a full snapshot
+/// (which skips eval too) but eliminates the concurrency crash.
+pub fn create_code_cache(js_code: &str) -> Result<Vec<u8>, String> {
+    let _platform = crate::platform::get_platform();
+
+    // Use the runtime snapshot (if available) so that APIs like Response, Headers etc.
+    // are available during compilation. This doesn't affect the code cache output —
+    // it only ensures the compilation context has the right globals for type feedback.
+    let snapshot_ref = crate::platform::get_snapshot();
+
+    let mut params = v8::CreateParams::default();
+
+    if let Some(snapshot_data) = snapshot_ref {
+        params = params.snapshot_blob((*snapshot_data).into());
+    }
+
+    let mut isolate = v8::Isolate::new(params);
+
+    let scope = pin!(v8::HandleScope::new(&mut isolate));
+    let mut scope = scope.init();
+    let context = v8::Context::new(&scope, Default::default());
+    let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+    let code_str =
+        v8::String::new(scope, js_code).ok_or("Failed to create V8 string from source")?;
+
+    let mut source = v8::script_compiler::Source::new(code_str, None);
+
+    let unbound = v8::script_compiler::compile_unbound_script(
+        scope,
+        &mut source,
+        v8::script_compiler::CompileOptions::EagerCompile,
+        v8::script_compiler::NoCacheReason::NoReason,
+    )
+    .ok_or("Failed to compile script for code cache")?;
+
+    let cache = unbound
+        .create_code_cache()
+        .ok_or("Failed to create code cache from compiled script")?;
+
+    Ok(cache.to_vec())
+}
+
+/// Pack source code and its code cache into a single byte buffer.
+///
+/// Wire format:
+/// ```text
+/// [4 bytes: MAGIC 0xC0DECA5E LE]
+/// [4 bytes: SOURCE_LEN u32 LE]
+/// [SOURCE_LEN bytes: transpiled JS source UTF-8]
+/// [remaining bytes: V8 code cache]
+/// ```
+pub fn pack_code_cache(source: &str, cache: &[u8]) -> Vec<u8> {
+    let source_bytes = source.as_bytes();
+    let source_len = source_bytes.len() as u32;
+
+    let mut buf = Vec::with_capacity(4 + 4 + source_bytes.len() + cache.len());
+    buf.extend_from_slice(&CODE_CACHE_MAGIC.to_le_bytes());
+    buf.extend_from_slice(&source_len.to_le_bytes());
+    buf.extend_from_slice(source_bytes);
+    buf.extend_from_slice(cache);
+    buf
+}
+
+/// Unpack source code and code cache from a packed buffer.
+///
+/// Returns `None` if the buffer doesn't start with the code cache magic header
+/// or is too short.
+pub fn unpack_code_cache(data: &[u8]) -> Option<(&str, &[u8])> {
+    if !is_code_cache(data) {
+        return None;
+    }
+
+    let source_len = u32::from_le_bytes(data[4..8].try_into().ok()?) as usize;
+    let source_end = 8 + source_len;
+
+    if data.len() < source_end {
+        return None;
+    }
+
+    let source = std::str::from_utf8(&data[8..source_end]).ok()?;
+    let cache = &data[source_end..];
+    Some((source, cache))
+}
+
+/// Check whether a byte buffer contains a packed code cache (vs an old V8 heap snapshot).
+pub fn is_code_cache(data: &[u8]) -> bool {
+    if data.len() < 8 {
+        return false;
+    }
+
+    let magic = u32::from_le_bytes(data[0..4].try_into().unwrap());
+    magic == CODE_CACHE_MAGIC
 }

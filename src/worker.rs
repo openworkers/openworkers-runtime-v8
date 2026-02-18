@@ -221,17 +221,23 @@ impl WorkerBuilder {
         })?;
 
         // Evaluate user script
-        let user_code = match &script.code {
-            WorkerCode::JavaScript(js) => js.as_str(),
+        match &script.code {
+            WorkerCode::JavaScript(js) => {
+                evaluate_in_context(isolate, &context, js).map_err(|e| {
+                    TerminationReason::Exception(format!("Script evaluation failed: {}", e))
+                })?;
+            }
+            WorkerCode::Snapshot(data) if crate::snapshot::is_code_cache(data) => {
+                evaluate_code_cache_in_context(isolate, &context, data).map_err(|e| {
+                    TerminationReason::Exception(format!("Script evaluation failed: {}", e))
+                })?;
+            }
             _ => {
                 return Err(TerminationReason::InitializationError(
                     "V8 runtime only supports JavaScript code".to_string(),
                 ));
             }
-        };
-        evaluate_in_context(isolate, &context, user_code).map_err(|e| {
-            TerminationReason::Exception(format!("Script evaluation failed: {}", e))
-        })?;
+        }
 
         setup_es_modules_handler(isolate, &context).map_err(|e| {
             TerminationReason::InitializationError(format!(
@@ -494,9 +500,13 @@ impl Worker {
         // Create log callback that bypasses scheduler (calls ops.handle_log directly)
         let log_callback = crate::runtime::bindings::log_callback_from_ops(&ops);
 
-        // Extract worker snapshot if present (isolate will be created from it)
+        // Extract worker snapshot if present (isolate will be created from it).
+        // Code cache bundles (detected by magic header) are NOT isolate snapshots —
+        // they contain source + compiled bytecode and are handled during evaluate().
         let worker_snapshot = match &script.code {
-            WorkerCode::Snapshot(data) => Some(data.clone()),
+            WorkerCode::Snapshot(data) if !crate::snapshot::is_code_cache(data) => {
+                Some(data.clone())
+            }
             _ => None,
         };
 
@@ -1041,6 +1051,57 @@ pub(crate) fn evaluate_in_context(
             .and_then(|e| e.to_string(&tc).map(|s| s.to_rust_string_lossy(&tc)))
             .unwrap_or_else(|| "Compile error".to_string())
     })?;
+
+    script_obj.run(&tc).ok_or_else(|| {
+        tc.exception()
+            .and_then(|e| e.to_string(&tc).map(|s| s.to_rust_string_lossy(&tc)))
+            .unwrap_or_else(|| "Runtime error".to_string())
+    })?;
+
+    Ok(())
+}
+
+/// Evaluate a packed code cache bundle (source + bytecode) in a V8 context.
+///
+/// Uses `v8::script_compiler::compile` with `ConsumeCodeCache` to skip parse+compile,
+/// then runs the resulting script.
+pub(crate) fn evaluate_code_cache_in_context(
+    isolate: &mut v8::Isolate,
+    context: &v8::Global<v8::Context>,
+    data: &[u8],
+) -> Result<(), String> {
+    use std::pin::pin;
+
+    let (source, cache_bytes) =
+        crate::snapshot::unpack_code_cache(data).ok_or("Failed to unpack code cache bundle")?;
+
+    let scope = pin!(v8::HandleScope::new(isolate));
+    let mut scope = scope.init();
+    let ctx = v8::Local::new(&scope, context);
+    let scope = &mut v8::ContextScope::new(&mut scope, ctx);
+
+    let code_str = v8::String::new(scope, source).ok_or("Failed to create V8 string")?;
+    let cached_data = v8::script_compiler::CachedData::new(cache_bytes);
+    let mut src = v8::script_compiler::Source::new_with_cached_data(code_str, None, cached_data);
+
+    let tc = pin!(v8::TryCatch::new(scope));
+    let tc = tc.init();
+
+    let script_obj = v8::script_compiler::compile(
+        &tc,
+        &mut src,
+        v8::script_compiler::CompileOptions::ConsumeCodeCache,
+        v8::script_compiler::NoCacheReason::NoReason,
+    )
+    .ok_or_else(|| {
+        tc.exception()
+            .and_then(|e| e.to_string(&tc).map(|s| s.to_rust_string_lossy(&tc)))
+            .unwrap_or_else(|| "Failed to compile with code cache".to_string())
+    })?;
+
+    if src.get_cached_data().map_or(false, |c| c.rejected()) {
+        tracing::warn!("Code cache rejected (V8 version mismatch?)");
+    }
 
     script_obj.run(&tc).ok_or_else(|| {
         tc.exception()

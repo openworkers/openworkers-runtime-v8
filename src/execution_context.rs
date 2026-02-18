@@ -398,52 +398,113 @@ impl ExecutionContext {
     ) -> Result<(), TerminationReason> {
         use std::pin::pin;
 
-        let script_str = match code {
-            WorkerCode::JavaScript(js) => js,
-            _ => {
-                return Err(TerminationReason::InitializationError(
-                    "V8 runtime only supports JavaScript code".to_string(),
-                ));
+        match code {
+            WorkerCode::JavaScript(js) => {
+                let scope = pin!(v8::HandleScope::new(isolate));
+                let mut scope = scope.init();
+                let context_local = v8::Local::new(&scope, context);
+                let scope = &mut v8::ContextScope::new(&mut scope, context_local);
+
+                let code_str = v8::String::new(scope, js).ok_or_else(|| {
+                    TerminationReason::InitializationError(
+                        "Failed to create script string".to_string(),
+                    )
+                })?;
+
+                let tc_scope = pin!(v8::TryCatch::new(scope));
+                let tc_scope = tc_scope.init();
+
+                let script_obj = match v8::Script::compile(&tc_scope, code_str, None) {
+                    Some(s) => s,
+                    None => {
+                        let msg = tc_scope
+                            .exception()
+                            .and_then(|e| e.to_string(&tc_scope))
+                            .map(|s| s.to_rust_string_lossy(&tc_scope))
+                            .unwrap_or_else(|| "Unknown compile error".to_string());
+                        return Err(TerminationReason::Exception(format!(
+                            "SyntaxError: {}",
+                            msg
+                        )));
+                    }
+                };
+
+                match script_obj.run(&tc_scope) {
+                    Some(_) => Ok(()),
+                    None => {
+                        let msg = tc_scope
+                            .exception()
+                            .and_then(|e| e.to_string(&tc_scope))
+                            .map(|s| s.to_rust_string_lossy(&tc_scope))
+                            .unwrap_or_else(|| "Unknown runtime error".to_string());
+                        Err(TerminationReason::Exception(msg))
+                    }
+                }
             }
-        };
+            WorkerCode::Snapshot(data) if crate::snapshot::is_code_cache(data) => {
+                // Code cache: unpack source + bytecode, compile with ConsumeCodeCache, then run
+                let (source, cache_bytes) =
+                    crate::snapshot::unpack_code_cache(data).ok_or_else(|| {
+                        TerminationReason::InitializationError(
+                            "Failed to unpack code cache bundle".to_string(),
+                        )
+                    })?;
 
-        let scope = pin!(v8::HandleScope::new(isolate));
-        let mut scope = scope.init();
-        let context_local = v8::Local::new(&scope, context);
-        let scope = &mut v8::ContextScope::new(&mut scope, context_local);
+                let scope = pin!(v8::HandleScope::new(isolate));
+                let mut scope = scope.init();
+                let context_local = v8::Local::new(&scope, context);
+                let scope = &mut v8::ContextScope::new(&mut scope, context_local);
 
-        let code_str = v8::String::new(scope, script_str).ok_or_else(|| {
-            TerminationReason::InitializationError("Failed to create script string".to_string())
-        })?;
+                let code_str = v8::String::new(scope, source).ok_or_else(|| {
+                    TerminationReason::InitializationError("Failed to create V8 string".to_string())
+                })?;
 
-        let tc_scope = pin!(v8::TryCatch::new(scope));
-        let tc_scope = tc_scope.init();
+                let cached_data = v8::script_compiler::CachedData::new(cache_bytes);
+                let mut src =
+                    v8::script_compiler::Source::new_with_cached_data(code_str, None, cached_data);
 
-        let script_obj = match v8::Script::compile(&tc_scope, code_str, None) {
-            Some(s) => s,
-            None => {
-                let msg = tc_scope
-                    .exception()
-                    .and_then(|e| e.to_string(&tc_scope))
-                    .map(|s| s.to_rust_string_lossy(&tc_scope))
-                    .unwrap_or_else(|| "Unknown compile error".to_string());
-                return Err(TerminationReason::Exception(format!(
-                    "SyntaxError: {}",
-                    msg
-                )));
+                let tc_scope = pin!(v8::TryCatch::new(scope));
+                let tc_scope = tc_scope.init();
+
+                let script_obj = v8::script_compiler::compile(
+                    &tc_scope,
+                    &mut src,
+                    v8::script_compiler::CompileOptions::ConsumeCodeCache,
+                    v8::script_compiler::NoCacheReason::NoReason,
+                )
+                .ok_or_else(|| {
+                    let msg = tc_scope
+                        .exception()
+                        .and_then(|e| e.to_string(&tc_scope))
+                        .map(|s| s.to_rust_string_lossy(&tc_scope))
+                        .unwrap_or_else(|| "Failed to compile with code cache".to_string());
+                    TerminationReason::Exception(msg)
+                })?;
+
+                if src.get_cached_data().map_or(false, |c| c.rejected()) {
+                    tracing::warn!("Code cache rejected (V8 version mismatch?)");
+                }
+
+                match script_obj.run(&tc_scope) {
+                    Some(_) => Ok(()),
+                    None => {
+                        let msg = tc_scope
+                            .exception()
+                            .and_then(|e| e.to_string(&tc_scope))
+                            .map(|s| s.to_rust_string_lossy(&tc_scope))
+                            .unwrap_or_else(|| "Unknown runtime error".to_string());
+                        Err(TerminationReason::Exception(msg))
+                    }
+                }
             }
-        };
-
-        match script_obj.run(&tc_scope) {
-            Some(_) => Ok(()),
-            None => {
-                let msg = tc_scope
-                    .exception()
-                    .and_then(|e| e.to_string(&tc_scope))
-                    .map(|s| s.to_rust_string_lossy(&tc_scope))
-                    .unwrap_or_else(|| "Unknown runtime error".to_string());
-                Err(TerminationReason::Exception(msg))
+            WorkerCode::Snapshot(_) => {
+                // Old-style heap snapshot: code is already evaluated (oneshot only)
+                Ok(())
             }
+            #[allow(unreachable_patterns)]
+            _ => Err(TerminationReason::InitializationError(
+                "V8 runtime only supports JavaScript code".to_string(),
+            )),
         }
     }
 
@@ -466,40 +527,75 @@ impl ExecutionContext {
     pub fn evaluate(&mut self, code: &WorkerCode) -> Result<(), String> {
         use std::pin::pin;
 
-        let code_str = match code {
-            WorkerCode::JavaScript(js) => js.as_str(),
-            WorkerCode::Snapshot(_) => {
-                return Err("Snapshot execution not supported via evaluate()".to_string());
-            }
-            // Default case for other unsupported code types
-            #[allow(unreachable_patterns)]
-            _ => {
-                return Err("V8 runtime only supports JavaScript code".to_string());
-            }
-        };
-
         // SAFETY: We need to access both the isolate and context, which are separate fields.
         // This is safe because we have exclusive access to self, and the isolate pointer
         // is valid for the lifetime of this ExecutionContext.
-        unsafe {
-            let isolate = &mut *self.isolate;
-            let scope = pin!(v8::HandleScope::new(isolate));
-            let mut scope = scope.init();
-            let context = v8::Local::new(&scope, &self.context);
-            let scope = &mut v8::ContextScope::new(&mut scope, context);
+        match code {
+            WorkerCode::JavaScript(js) => unsafe {
+                let isolate = &mut *self.isolate;
+                let scope = pin!(v8::HandleScope::new(isolate));
+                let mut scope = scope.init();
+                let context = v8::Local::new(&scope, &self.context);
+                let scope = &mut v8::ContextScope::new(&mut scope, context);
 
-            let source = v8::String::new(scope, code_str)
-                .ok_or_else(|| "Failed to create V8 string".to_string())?;
+                let source = v8::String::new(scope, js)
+                    .ok_or_else(|| "Failed to create V8 string".to_string())?;
 
-            let script = v8::Script::compile(scope, source, None)
-                .ok_or_else(|| "Failed to compile script".to_string())?;
+                let script = v8::Script::compile(scope, source, None)
+                    .ok_or_else(|| "Failed to compile script".to_string())?;
 
-            script
-                .run(scope)
-                .ok_or_else(|| "Script execution failed".to_string())?;
+                script
+                    .run(scope)
+                    .ok_or_else(|| "Script execution failed".to_string())?;
+
+                Ok(())
+            },
+            WorkerCode::Snapshot(data) if crate::snapshot::is_code_cache(data) => {
+                let (source, cache_bytes) = crate::snapshot::unpack_code_cache(data)
+                    .ok_or("Failed to unpack code cache bundle")?;
+
+                unsafe {
+                    let isolate = &mut *self.isolate;
+                    let scope = pin!(v8::HandleScope::new(isolate));
+                    let mut scope = scope.init();
+                    let context = v8::Local::new(&scope, &self.context);
+                    let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+                    let code_str = v8::String::new(scope, source)
+                        .ok_or_else(|| "Failed to create V8 string".to_string())?;
+
+                    let cached_data = v8::script_compiler::CachedData::new(cache_bytes);
+                    let mut src = v8::script_compiler::Source::new_with_cached_data(
+                        code_str,
+                        None,
+                        cached_data,
+                    );
+
+                    let script = v8::script_compiler::compile(
+                        scope,
+                        &mut src,
+                        v8::script_compiler::CompileOptions::ConsumeCodeCache,
+                        v8::script_compiler::NoCacheReason::NoReason,
+                    )
+                    .ok_or("Failed to compile with code cache")?;
+
+                    if src.get_cached_data().map_or(false, |c| c.rejected()) {
+                        tracing::warn!("Code cache rejected (V8 version mismatch?)");
+                    }
+
+                    script
+                        .run(scope)
+                        .ok_or_else(|| "Script execution failed".to_string())?;
+                }
+
+                Ok(())
+            }
+            WorkerCode::Snapshot(_) => {
+                Err("Old-style snapshot execution not supported via evaluate()".to_string())
+            }
+            #[allow(unreachable_patterns)]
+            _ => Err("V8 runtime only supports JavaScript code".to_string()),
         }
-
-        Ok(())
     }
 
     /// Process pending callbacks (timers, fetch responses, etc.)
