@@ -1,3 +1,6 @@
+//! Run: `cargo test --test memory_limit_test`
+//! Note: tests are skipped when compiled with the `sandbox` feature
+
 mod common;
 
 use common::run_in_local;

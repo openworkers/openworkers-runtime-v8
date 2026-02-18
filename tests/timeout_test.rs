@@ -1,3 +1,6 @@
+//! Run: `cargo test --test timeout_test`
+//! Note: wall-clock timeout tests are Linux-only
+
 mod common;
 
 use common::run_in_local;

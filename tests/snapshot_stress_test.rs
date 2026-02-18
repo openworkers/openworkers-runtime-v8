@@ -1,3 +1,7 @@
+#![cfg(feature = "unsafe-worker-snapshot")]
+//! Run: `cargo test --features unsafe-worker-snapshot --test snapshot_stress_test`
+//! Note: requires `unsafe-worker-snapshot` feature flag (known V8 concurrency bug)
+//!
 //! Stress test for concurrent worker snapshot loading.
 //!
 //! Reproduces the `StringForwardingTable::GetRawHash` crash that occurs when

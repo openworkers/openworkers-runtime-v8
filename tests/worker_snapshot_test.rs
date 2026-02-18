@@ -1,3 +1,7 @@
+#![cfg(feature = "unsafe-worker-snapshot")]
+//! Run: `cargo test --features unsafe-worker-snapshot --test worker_snapshot_test`
+//! Note: requires `unsafe-worker-snapshot` feature flag (known V8 concurrency bug)
+//!
 //! Tests for create_worker_snapshot — verifies snapshot creation and round-trip execution.
 //!
 //! All snapshot tests are in a single test function because V8 snapshot creation

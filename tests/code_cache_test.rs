@@ -1,3 +1,5 @@
+//! Run: `cargo test --test code_cache_test`
+//!
 //! Tests for V8 code cache — the replacement for worker snapshots.
 //!
 //! Code cache stores compiled bytecode only (no heap objects, no shared string table).
