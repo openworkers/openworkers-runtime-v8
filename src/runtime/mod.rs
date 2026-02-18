@@ -101,13 +101,15 @@ pub struct Runtime {
 impl Runtime {
     /// Create a new Runtime.
     ///
-    /// If `worker_snapshot` is provided, the isolate is created from that snapshot
-    /// (which already includes runtime APIs + evaluated worker code). Otherwise,
-    /// the runtime snapshot from disk is used (if available).
+    /// Uses the runtime snapshot from disk (if available) for pre-compiled JS APIs.
+    /// Worker code is evaluated separately via `evaluate()`.
+    ///
+    /// With `unsafe-worker-snapshot` feature: accepts an optional worker heap snapshot
+    /// that includes runtime APIs + pre-evaluated worker code.
     pub fn new(
         limits: Option<RuntimeLimits>,
         log_callback: LogCallback,
-        worker_snapshot: Option<Vec<u8>>,
+        #[cfg(feature = "unsafe-worker-snapshot")] worker_snapshot: Option<Vec<u8>>,
     ) -> (
         Self,
         mpsc::UnboundedReceiver<SchedulerMessage>,
@@ -137,10 +139,15 @@ impl Runtime {
         let heap_initial = limits.heap_initial_mb * 1024 * 1024;
         let heap_max = limits.heap_max_mb * 1024 * 1024;
 
-        // Load snapshot: worker snapshot takes priority over runtime snapshot
+        // Load runtime snapshot (pre-compiled JS APIs)
         let snapshot_ref = crate::platform::get_snapshot();
+
+        #[cfg(feature = "unsafe-worker-snapshot")]
         let has_worker_snapshot = worker_snapshot.is_some();
+        #[cfg(feature = "unsafe-worker-snapshot")]
         let has_snapshot = has_worker_snapshot || snapshot_ref.is_some();
+        #[cfg(not(feature = "unsafe-worker-snapshot"))]
+        let has_snapshot = snapshot_ref.is_some();
 
         // Create isolate params
         // In sandbox mode, V8 manages memory allocation, so we use the default allocator.
@@ -164,6 +171,7 @@ impl Runtime {
 
         let mut params = params;
 
+        #[cfg(feature = "unsafe-worker-snapshot")]
         if let Some(ws) = worker_snapshot {
             // Worker snapshot: includes runtime APIs + evaluated worker code
             params = params.snapshot_blob(ws.into());
@@ -172,16 +180,23 @@ impl Runtime {
             params = params.snapshot_blob((*snapshot_data).into());
         }
 
-        // Serialize isolate creation when loading worker snapshots (old path).
-        // V8's SharedHeapDeserializer::DeserializeStringTable is not thread-safe
-        // across different snapshots. Code cache doesn't use worker snapshots,
-        // so this lock only applies to the legacy backward-compat path.
-        use std::sync::Mutex;
-        static ISOLATE_INIT_MUTEX: Mutex<()> = Mutex::new(());
-        let _lock = if has_worker_snapshot {
-            Some(ISOLATE_INIT_MUTEX.lock().unwrap())
-        } else {
-            None
+        #[cfg(not(feature = "unsafe-worker-snapshot"))]
+        if let Some(snapshot_data) = snapshot_ref {
+            params = params.snapshot_blob((*snapshot_data).into());
+        }
+
+        // Worker heap snapshots require serialized isolate creation due to
+        // V8's SharedHeapDeserializer::DeserializeStringTable not being thread-safe.
+        #[cfg(feature = "unsafe-worker-snapshot")]
+        let _lock = {
+            use std::sync::Mutex;
+            static ISOLATE_INIT_MUTEX: Mutex<()> = Mutex::new(());
+
+            if has_worker_snapshot {
+                Some(ISOLATE_INIT_MUTEX.lock().unwrap())
+            } else {
+                None
+            }
         };
 
         let (isolate, heap_limit_state, context) = {
@@ -689,7 +704,7 @@ impl Runtime {
                     }
                 }
             }
-            WorkerCode::Snapshot(data) if crate::snapshot::is_code_cache(data) => {
+            WorkerCode::Snapshot(data) => {
                 // Code cache: unpack source + bytecode, compile with ConsumeCodeCache, then run
                 let (source, cache_bytes) = crate::snapshot::unpack_code_cache(data)
                     .ok_or("Failed to unpack code cache bundle")?;
@@ -719,7 +734,7 @@ impl Runtime {
 
                 // Check if cache was rejected (V8 version mismatch, etc.)
                 // Script still compiles fine, just without the cache speedup.
-                if src.get_cached_data().map_or(false, |c| c.rejected()) {
+                if src.get_cached_data().is_some_and(|c| c.rejected()) {
                     tracing::warn!("Code cache rejected (V8 version mismatch?)");
                 }
 
@@ -731,10 +746,6 @@ impl Runtime {
                         .unwrap_or_else(|| "Failed to execute script".to_string())
                 })?;
 
-                Ok(())
-            }
-            WorkerCode::Snapshot(_) => {
-                // Old-style heap snapshot: code is already evaluated in the snapshot
                 Ok(())
             }
             _ => Err("V8 runtime only supports JavaScript code".to_string()),

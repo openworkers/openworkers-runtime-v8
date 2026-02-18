@@ -74,11 +74,14 @@ pub use thread_pinned_pool::{
 pub use worker::Worker;
 pub use worker_future::WorkerFuture;
 
-// Snapshot API
-pub use snapshot::{SnapshotOutput, create_runtime_snapshot, create_worker_snapshot};
+// Snapshot & Code Cache API
+pub use snapshot::{
+    SnapshotOutput, create_code_cache, create_runtime_snapshot, is_code_cache, pack_code_cache,
+    unpack_code_cache,
+};
 
-// Code Cache API
-pub use snapshot::{create_code_cache, is_code_cache, pack_code_cache, unpack_code_cache};
+#[cfg(feature = "unsafe-worker-snapshot")]
+pub use snapshot::create_worker_snapshot;
 
 // Re-export common types from openworkers-core
 pub use openworkers_core::{

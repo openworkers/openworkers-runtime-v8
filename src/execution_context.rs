@@ -441,7 +441,7 @@ impl ExecutionContext {
                     }
                 }
             }
-            WorkerCode::Snapshot(data) if crate::snapshot::is_code_cache(data) => {
+            WorkerCode::Snapshot(data) => {
                 // Code cache: unpack source + bytecode, compile with ConsumeCodeCache, then run
                 let (source, cache_bytes) =
                     crate::snapshot::unpack_code_cache(data).ok_or_else(|| {
@@ -481,7 +481,7 @@ impl ExecutionContext {
                     TerminationReason::Exception(msg)
                 })?;
 
-                if src.get_cached_data().map_or(false, |c| c.rejected()) {
+                if src.get_cached_data().is_some_and(|c| c.rejected()) {
                     tracing::warn!("Code cache rejected (V8 version mismatch?)");
                 }
 
@@ -496,10 +496,6 @@ impl ExecutionContext {
                         Err(TerminationReason::Exception(msg))
                     }
                 }
-            }
-            WorkerCode::Snapshot(_) => {
-                // Old-style heap snapshot: code is already evaluated (oneshot only)
-                Ok(())
             }
             #[allow(unreachable_patterns)]
             _ => Err(TerminationReason::InitializationError(
@@ -550,7 +546,7 @@ impl ExecutionContext {
 
                 Ok(())
             },
-            WorkerCode::Snapshot(data) if crate::snapshot::is_code_cache(data) => {
+            WorkerCode::Snapshot(data) => {
                 let (source, cache_bytes) = crate::snapshot::unpack_code_cache(data)
                     .ok_or("Failed to unpack code cache bundle")?;
 
@@ -579,7 +575,7 @@ impl ExecutionContext {
                     )
                     .ok_or("Failed to compile with code cache")?;
 
-                    if src.get_cached_data().map_or(false, |c| c.rejected()) {
+                    if src.get_cached_data().is_some_and(|c| c.rejected()) {
                         tracing::warn!("Code cache rejected (V8 version mismatch?)");
                     }
 
@@ -589,9 +585,6 @@ impl ExecutionContext {
                 }
 
                 Ok(())
-            }
-            WorkerCode::Snapshot(_) => {
-                Err("Old-style snapshot execution not supported via evaluate()".to_string())
             }
             #[allow(unreachable_patterns)]
             _ => Err("V8 runtime only supports JavaScript code".to_string()),

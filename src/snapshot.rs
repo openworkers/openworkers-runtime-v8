@@ -1,8 +1,9 @@
+#[cfg(feature = "unsafe-worker-snapshot")]
 use std::collections::HashMap;
 use std::pin::pin;
 use v8;
 
-/// Magic header identifying a code cache bundle (as opposed to an old V8 heap snapshot).
+/// Magic header identifying a code cache bundle.
 /// "CODECA5E" in little-endian.
 const CODE_CACHE_MAGIC: u32 = 0xC0DE_CA5E;
 
@@ -12,6 +13,7 @@ pub struct SnapshotOutput {
     pub output: Vec<u8>,
 }
 
+#[cfg(feature = "unsafe-worker-snapshot")]
 /// Setup env vars on `globalThis.env` for snapshot creation.
 ///
 /// Only injects plain env vars (key/value strings), not bindings (Storage, KV, etc.)
@@ -36,6 +38,7 @@ fn setup_snapshot_env(
     script.run(scope);
 }
 
+#[cfg(feature = "unsafe-worker-snapshot")]
 /// Setup no-op console stubs for snapshot creation.
 ///
 /// During snapshotting, there's no log callback available, so we install
@@ -150,9 +153,12 @@ pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
 
 /// Create a V8 snapshot with worker code already evaluated.
 ///
-/// Creates a layered snapshot on top of the runtime snapshot (if available),
-/// or a standalone snapshot if no runtime snapshot exists. The resulting blob
-/// is fully self-contained — V8's `create_blob()` re-serializes the entire heap.
+/// **WARNING**: Concurrent loading of different worker snapshots crashes due to
+/// V8's `SharedHeapDeserializer::DeserializeStringTable` not being thread-safe.
+/// Use `create_code_cache` instead for production workloads.
+///
+/// Creates a standalone snapshot. The resulting blob is fully self-contained —
+/// V8's `create_blob()` re-serializes the entire heap.
 ///
 /// At execution time, loading this snapshot skips transform + compile + eval,
 /// giving near-instant cold starts.
@@ -163,6 +169,7 @@ pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
 ///
 /// Stub console bindings (no-ops) are installed so top-level `console.log()` calls
 /// don't crash during snapshotting. Real bindings replace them at execution time.
+#[cfg(feature = "unsafe-worker-snapshot")]
 pub fn create_worker_snapshot(
     js_code: &str,
     env: Option<&HashMap<String, String>>,
@@ -266,7 +273,7 @@ pub fn create_worker_snapshot(
 
 /// Create a V8 code cache (compiled bytecode) for the given JavaScript source.
 ///
-/// Unlike `create_worker_snapshot`, this does NOT run the code — it only parses
+/// This does NOT run the code — it only parses
 /// and compiles it with `EagerCompile`, then serializes the bytecode via
 /// `UnboundScript::create_code_cache()`.
 ///
@@ -359,7 +366,7 @@ pub fn unpack_code_cache(data: &[u8]) -> Option<(&str, &[u8])> {
     Some((source, cache))
 }
 
-/// Check whether a byte buffer contains a packed code cache (vs an old V8 heap snapshot).
+/// Check whether a byte buffer contains a valid packed code cache.
 pub fn is_code_cache(data: &[u8]) -> bool {
     if data.len() < 8 {
         return false;

@@ -227,11 +227,12 @@ impl WorkerBuilder {
                     TerminationReason::Exception(format!("Script evaluation failed: {}", e))
                 })?;
             }
-            WorkerCode::Snapshot(data) if crate::snapshot::is_code_cache(data) => {
+            WorkerCode::Snapshot(data) => {
                 evaluate_code_cache_in_context(isolate, &context, data).map_err(|e| {
                     TerminationReason::Exception(format!("Script evaluation failed: {}", e))
                 })?;
             }
+            #[allow(unreachable_patterns)]
             _ => {
                 return Err(TerminationReason::InitializationError(
                     "V8 runtime only supports JavaScript code".to_string(),
@@ -500,9 +501,9 @@ impl Worker {
         // Create log callback that bypasses scheduler (calls ops.handle_log directly)
         let log_callback = crate::runtime::bindings::log_callback_from_ops(&ops);
 
-        // Extract worker snapshot if present (isolate will be created from it).
-        // Code cache bundles (detected by magic header) are NOT isolate snapshots —
-        // they contain source + compiled bytecode and are handled during evaluate().
+        // With unsafe-worker-snapshot feature: extract heap snapshot if present
+        // (isolate will be created from it). Code cache bundles are handled during evaluate().
+        #[cfg(feature = "unsafe-worker-snapshot")]
         let worker_snapshot = match &script.code {
             WorkerCode::Snapshot(data) if !crate::snapshot::is_code_cache(data) => {
                 Some(data.clone())
@@ -510,8 +511,12 @@ impl Worker {
             _ => None,
         };
 
-        let (mut runtime, scheduler_rx, callback_tx, callback_notify) =
-            Runtime::new(limits, log_callback, worker_snapshot);
+        let (mut runtime, scheduler_rx, callback_tx, callback_notify) = Runtime::new(
+            limits,
+            log_callback,
+            #[cfg(feature = "unsafe-worker-snapshot")]
+            worker_snapshot,
+        );
 
         // Setup addEventListener
         setup_event_listener(&mut runtime.isolate, &runtime.context).map_err(|e| {
@@ -1099,7 +1104,7 @@ pub(crate) fn evaluate_code_cache_in_context(
             .unwrap_or_else(|| "Failed to compile with code cache".to_string())
     })?;
 
-    if src.get_cached_data().map_or(false, |c| c.rejected()) {
+    if src.get_cached_data().is_some_and(|c| c.rejected()) {
         tracing::warn!("Code cache rejected (V8 version mismatch?)");
     }
 

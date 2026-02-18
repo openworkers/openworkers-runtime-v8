@@ -11,6 +11,11 @@ license = "MIT"
 default = []
 ptrcomp = ["v8/v8_enable_pointer_compression"]
 sandbox = ["v8/v8_enable_sandbox", "serde_v8/v8_enable_sandbox"]
+# Worker heap snapshots: full V8 heap serialization (skips parse+compile+eval).
+# Disabled by default — concurrent loading of different snapshots crashes due to
+# V8's SharedHeapDeserializer::DeserializeStringTable not being thread-safe.
+# Code cache (always enabled) is the safe alternative (skips parse+compile only).
+unsafe-worker-snapshot = []
 
 [dependencies]
 
