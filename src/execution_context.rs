@@ -28,6 +28,45 @@ use openworkers_core::{
     TerminationReason, WorkerCode,
 };
 
+/// RAII guard that enters/exits a V8 isolate around synchronous V8 work blocks.
+///
+/// When multiple tasks interleave on the same thread (via `spawn_local`),
+/// each holding a `v8::Locker` for a different isolate, the thread-local
+/// "current isolate" (`Isolate::GetCurrent()`) can point to the wrong isolate
+/// after a yield/resume.
+///
+/// This guard pushes our isolate onto V8's per-isolate entry stack on creation
+/// (making it `GetCurrent()`) and pops it on drop. V8's entry stack is per-isolate,
+/// so enter/exit on isolate X doesn't interfere with isolate Y's stack.
+///
+/// Must wrap every block that creates `HandleScope`/`ContextScope`, since
+/// `ContextScope::new` checks `GetCurrent() == isolate`.
+struct IsolateGuard {
+    isolate: *mut v8::OwnedIsolate,
+}
+
+impl IsolateGuard {
+    /// Enter the isolate (push onto its per-thread entry stack, set thread-local).
+    ///
+    /// # Safety
+    /// The isolate pointer must be valid for the lifetime of this guard.
+    /// The guard must be dropped before any async yield point.
+    #[inline]
+    unsafe fn new(isolate: *mut v8::OwnedIsolate) -> Self {
+        unsafe { (*isolate).enter() };
+        Self { isolate }
+    }
+}
+
+impl Drop for IsolateGuard {
+    #[inline]
+    fn drop(&mut self) {
+        unsafe {
+            (*self.isolate).exit();
+        }
+    }
+}
+
 /// A disposable execution context for running a worker script
 ///
 /// This includes:
@@ -532,6 +571,7 @@ impl ExecutionContext {
         // is valid for the lifetime of this ExecutionContext.
         match code {
             WorkerCode::JavaScript(js) => unsafe {
+                let _guard = IsolateGuard::new(self.isolate);
                 let isolate = &mut *self.isolate;
                 let scope = pin!(v8::HandleScope::new(isolate));
                 let mut scope = scope.init();
@@ -555,6 +595,7 @@ impl ExecutionContext {
                     .ok_or("Failed to unpack code cache bundle")?;
 
                 unsafe {
+                    let _guard = IsolateGuard::new(self.isolate);
                     let isolate = &mut *self.isolate;
                     let scope = pin!(v8::HandleScope::new(isolate));
                     let mut scope = scope.init();
@@ -635,6 +676,7 @@ impl ExecutionContext {
 
         // Now enter V8 scope
         unsafe {
+            let _guard = IsolateGuard::new(self.isolate);
             let isolate = &mut *self.isolate;
             let scope = pin!(v8::HandleScope::new(isolate));
             let mut scope = scope.init();
@@ -787,6 +829,7 @@ impl ExecutionContext {
 
         // Pump V8 platform message loop (GC, etc.)
         unsafe {
+            let _guard = IsolateGuard::new(self.isolate);
             let isolate = &mut *self.isolate;
 
             while v8::Platform::pump_message_loop(self.platform, isolate, false) {
@@ -797,6 +840,7 @@ impl ExecutionContext {
         // Process microtasks (Promises, async/await) - CRITICAL for Promise resolution!
         // Without this, .then() handlers and async/await continuations never execute.
         unsafe {
+            let _guard = IsolateGuard::new(self.isolate);
             let isolate = &mut *self.isolate;
             let scope = pin!(v8::HandleScope::new(isolate));
             let mut scope = scope.init();
@@ -834,6 +878,7 @@ impl ExecutionContext {
         use std::pin::pin;
 
         unsafe {
+            let _guard = IsolateGuard::new(self.isolate);
             let isolate = &mut *self.isolate;
             let scope = pin!(v8::HandleScope::new(isolate));
             let mut scope = scope.init();
@@ -1102,6 +1147,7 @@ impl ExecutionContext {
         {
             use std::pin::pin;
             unsafe {
+                let _guard = IsolateGuard::new(self.isolate);
                 let isolate = &mut *self.isolate;
                 let scope = pin!(v8::HandleScope::new(isolate));
                 let mut scope = scope.init();
@@ -1127,6 +1173,7 @@ impl ExecutionContext {
         let (status, response) = {
             use std::pin::pin;
             unsafe {
+                let _guard = IsolateGuard::new(self.isolate);
                 let isolate = &mut *self.isolate;
                 let scope = pin!(v8::HandleScope::new(isolate));
                 let mut scope = scope.init();
@@ -1175,6 +1222,7 @@ impl ExecutionContext {
         {
             use std::pin::pin;
             unsafe {
+                let _guard = IsolateGuard::new(self.isolate);
                 let isolate = &mut *self.isolate;
                 let scope = pin!(v8::HandleScope::new(isolate));
                 let mut scope = scope.init();
@@ -1258,6 +1306,7 @@ impl ExecutionContext {
         let task_result = {
             use std::pin::pin;
             unsafe {
+                let _guard = IsolateGuard::new(self.isolate);
                 let isolate = &mut *self.isolate;
                 let scope = pin!(v8::HandleScope::new(isolate));
                 let mut scope = scope.init();

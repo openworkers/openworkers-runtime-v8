@@ -197,7 +197,13 @@ impl PooledIsolate {
     /// This is the preferred method for async operations.
     ///
     /// Note: The Locker is held for the entire duration of the async operation,
-    /// so the isolate remains locked. This is safe because we use LocalSet (single-threaded).
+    /// so the isolate remains locked via the V8 mutex.
+    ///
+    /// **WARNING:** The Locker also calls `Isolate::Enter()` which sets the
+    /// thread-local "current isolate". If multiple tasks interleave on the same
+    /// thread (via `spawn_local`), each holding a Locker for a different isolate,
+    /// `Isolate::GetCurrent()` will return the wrong isolate for resumed tasks.
+    /// Use `IsolateGuard` (enter/exit per V8 work block) to fix this.
     pub async fn with_lock_async<F, Fut, R>(&self, f: F) -> R
     where
         F: FnOnce(&mut v8::Isolate) -> Fut,
