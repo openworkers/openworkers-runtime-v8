@@ -1,14 +1,15 @@
 # Execution Modes
 
-Three ways to run JavaScript in the V8 runtime.
+Four ways to run JavaScript in the V8 runtime.
 
 ## Comparison
 
-| Mode              | Cold Start  | Warm Start | Thread Model             | Use Case         |
-| ----------------- | ----------- | ---------- | ------------------------ | ---------------- |
-| **IsolatePool**   | Tens of µs  | Sub-µs     | Multi-thread, v8::Locker | High throughput  |
-| **Worker**        | Few ms      | Few ms     | Single, per-request      | Max isolation    |
-| **SharedIsolate** | Tens of µs  | Tens of µs | Thread-local             | Legacy           |
+| Mode               | Cold Start | Warm Start | Thread Model             | Use Case         |
+| ------------------ | ---------- | ---------- | ------------------------ | ---------------- |
+| **Thread-Pinned**  | Few ms     | Sub-µs     | Thread-local, v8::Locker | Production       |
+| **Worker**         | Few ms     | Few ms     | Single, per-request      | Max isolation    |
+| **IsolatePool**    | Tens of µs | Sub-µs     | Multi-thread, v8::Locker | High throughput  |
+| **SharedIsolate**  | Tens of µs | Tens of µs | Thread-local             | Simple, no pool  |
 
 ## IsolatePool
 
@@ -71,7 +72,7 @@ ctx.exec(task).await?;
 // Context destroyed, isolate reused
 ```
 
-**Legacy mode.** Use IsolatePool instead.
+One isolate per thread, lightweight contexts. No pool management overhead.
 
 ---
 
@@ -80,14 +81,22 @@ ctx.exec(task).await?;
 For multi-tenant scenarios, each thread owns its local pool with per-owner isolation.
 
 ```rust
-use openworkers_runtime_v8::{init_pinned_pool_full, execute_pinned};
+use openworkers_runtime_v8::{init_pinned_pool_full, execute_pinned, PinnedExecuteRequest};
 
 // 100 isolates/thread, max 2/owner, queue of 10, 5s timeout
 init_pinned_pool_full(100, Some(2), 10, 5000, limits);
 
 // Round-robin routing at caller level (not sticky!)
 // Same owner can use isolates on ANY thread
-execute_pinned("owner-id", "worker-id", version, script, ops, task, Some(on_warm_hit)).await?;
+execute_pinned(PinnedExecuteRequest {
+    owner_id: "tenant-1".into(),
+    worker_id: "worker-123".into(),
+    version: 1,
+    script,
+    ops,
+    task,
+    on_warm_hit: None,
+}).await?;
 ```
 
 **Benefits:**
@@ -102,11 +111,11 @@ execute_pinned("owner-id", "worker-id", version, script, ops, task, Some(on_warm
 
 ### Benchmark Comparison
 
-| Scenario       | Shared Pool | Thread-Pinned |
-| -------------- | ----------- | ------------- |
-| Warm cache     | Fast        | **Faster**    |
-| CPU-bound      | Similar     | Similar       |
-| With I/O       | Similar     | Similar       |
+| Scenario   | Shared Pool | Thread-Pinned |
+| ---------- | ----------- | ------------- |
+| Warm cache | Fast        | **Faster**    |
+| CPU-bound  | Similar     | Similar       |
+| With I/O   | Similar     | Similar       |
 
 Under high contention (many threads, few isolates), shared pool can degrade to **worse than no pooling**. Thread-pinned avoids this.
 
@@ -189,22 +198,22 @@ pinned thread — it can't be offloaded.
 
 #### EventLoopExit variants
 
-| Variant           | Condition                                             | Used by                |
-| ----------------- | ----------------------------------------------------- | ---------------------- |
-| `ResponseReady`   | `__lastResponse` has a `status` property              | Both (wait for Response) |
-| `HandlerComplete` | `__requestComplete == true`                           | Task events            |
-| `StreamsComplete` | `__activeResponseStreams == 0`                         | ExecutionContext (phase 1) |
-| `FullyComplete`   | `__requestComplete && __activeResponseStreams == 0`    | Worker, drain_waituntil |
+| Variant           | Condition                                           | Used by                    |
+| ----------------- | --------------------------------------------------- | -------------------------- |
+| `ResponseReady`   | `__lastResponse` has a `status` property            | Both (wait for Response)   |
+| `HandlerComplete` | `__requestComplete == true`                         | Task events                |
+| `StreamsComplete` | `__activeResponseStreams == 0`                      | ExecutionContext (phase 1) |
+| `FullyComplete`   | `__requestComplete && __activeResponseStreams == 0` | Worker, drain_waituntil    |
 
 ---
 
 ## Decision Tree
 
 ```
-Need maximum isolation? → Worker
-High throughput (>100 req/s)? → IsolatePool
-Multi-tenant security critical? → Thread-Pinned Pool
-Legacy code using SharedIsolate? → Keep it (but migrate)
+Production (multi-tenant)? → Thread-Pinned Pool (warm reuse, zero contention)
+Need maximum isolation? → Worker (oneshot, no state leakage)
+High throughput, single-tenant? → IsolatePool (shared multi-thread)
+Simple, single-tenant? → SharedIsolate (no pool, minimal overhead)
 ```
 
 ## Thread Safety
@@ -220,18 +229,18 @@ V8 isolates are **not thread-safe**. `v8::Locker` provides mutual exclusion at t
 
 ## Code Pointers
 
-| Mode          | Entry point          | Implementation               |
-| ------------- | -------------------- | ---------------------------- |
-| Worker        | `Worker::new()`      | `worker.rs`                  |
-| IsolatePool   | `execute_pooled()`   | `pooled_execution.rs` → `isolate_pool.rs` |
-| Thread-Pinned | `execute_pinned()`   | `thread_pinned_pool.rs` (warm reuse + `CachedContext`) |
-| SharedIsolate | `ExecutionContext::new()` | `execution_context.rs` + `shared_isolate.rs` |
+| Mode          | Entry point               | Implementation                                         |
+| ------------- | ------------------------- | ------------------------------------------------------ |
+| Worker        | `Worker::new()`           | `worker.rs`                                            |
+| IsolatePool   | `execute_pooled()`        | `pooled_execution.rs` → `isolate_pool.rs`              |
+| Thread-Pinned | `execute_pinned()`        | `thread_pinned_pool.rs` (warm reuse + `CachedContext`) |
+| SharedIsolate | `ExecutionContext::new()` | `execution_context.rs` + `shared_isolate.rs`           |
 
 Key methods for warm reuse:
 
-| Method                         | File                     | Role                                    |
-| ------------------------------ | ------------------------ | --------------------------------------- |
-| `ExecutionContext::reset()`    | `execution_context.rs`   | Clear per-request state for reuse       |
-| `ExecutionContext::drain_waituntil()` | `execution_context.rs` | Pump V8 for background promises  |
-| `StreamManager::clear()`      | `runtime/stream_manager.rs` | Reset streams between requests       |
-| `check_exit_condition(StreamsComplete)` | `execution_helpers.rs` | Exit when streams done, not waitUntil |
+| Method                                  | File                        | Role                                  |
+| --------------------------------------- | --------------------------- | ------------------------------------- |
+| `ExecutionContext::reset()`             | `execution_context.rs`      | Clear per-request state for reuse     |
+| `ExecutionContext::drain_waituntil()`   | `execution_context.rs`      | Pump V8 for background promises       |
+| `StreamManager::clear()`                | `runtime/stream_manager.rs` | Reset streams between requests        |
+| `check_exit_condition(StreamsComplete)` | `execution_helpers.rs`      | Exit when streams done, not waitUntil |

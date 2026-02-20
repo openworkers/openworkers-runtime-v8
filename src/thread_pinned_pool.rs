@@ -712,7 +712,15 @@ pub const QUEUE_TIMEOUT_ERROR: &str = "Queue wait timeout";
 /// init_pinned_pool_full(100, Some(2), 20, 5000, RuntimeLimits::default());
 ///
 /// // Execute per request (caller handles thread distribution)
-/// match execute_pinned("tenant_1", "worker_123", 1, script, ops, task, None).await {
+/// match execute_pinned(PinnedExecuteRequest {
+///     owner_id: "tenant_1".into(),
+///     worker_id: "worker_123".into(),
+///     version: 1,
+///     script,
+///     ops,
+///     task,
+///     on_warm_hit: None,
+/// }).await {
 ///     Ok(()) => { /* success */ }
 ///     Err(TerminationReason::Other(msg)) if msg == QUEUE_FULL_ERROR => {
 ///         // Return 503 Service Unavailable
