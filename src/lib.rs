@@ -66,10 +66,10 @@ pub use pooled_execution::execute_pooled;
 pub use runtime::Runtime;
 pub use shared_isolate::SharedIsolate;
 pub use thread_pinned_pool::{
-    DEFAULT_QUEUE_SIZE, DEFAULT_QUEUE_TIMEOUT_MS, LocalPoolStats, PinnedPoolConfig,
-    PinnedPoolStats, QUEUE_FULL_ERROR, QUEUE_TIMEOUT_ERROR, execute_pinned, get_local_pool_stats,
-    get_pinned_pool_stats, init_pinned_pool, init_pinned_pool_full,
-    init_pinned_pool_with_owner_limit,
+    DEFAULT_QUEUE_SIZE, DEFAULT_QUEUE_TIMEOUT_MS, LocalPoolStats, PinnedExecuteRequest,
+    PinnedPoolConfig, PinnedPoolStats, QUEUE_FULL_ERROR, QUEUE_TIMEOUT_ERROR, WarmHitCallback,
+    execute_pinned, get_local_pool_stats, get_pinned_pool_stats, init_pinned_pool,
+    init_pinned_pool_full, init_pinned_pool_with_owner_limit,
 };
 pub use worker::Worker;
 pub use worker_future::WorkerFuture;

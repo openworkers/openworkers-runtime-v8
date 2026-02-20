@@ -29,7 +29,9 @@ use openworkers_core::{
     Event, HttpMethod, HttpRequest, HttpResponse, LogLevel, OpFuture, OperationsHandler,
     RequestBody, ResponseBody, RuntimeLimits, Script,
 };
-use openworkers_runtime_v8::{Worker, execute_pinned, execute_pooled, init_pinned_pool, init_pool};
+use openworkers_runtime_v8::{
+    PinnedExecuteRequest, Worker, execute_pinned, execute_pooled, init_pinned_pool, init_pool,
+};
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -450,9 +452,17 @@ async fn bench_pinned_simple() {
             let script = Script::new(SIMPLE_HANDLER);
             let (task, rx) = Event::fetch(make_request());
 
-            execute_pinned(&worker_id, script, ops.clone(), task)
-                .await
-                .unwrap();
+            execute_pinned(PinnedExecuteRequest {
+                owner_id: worker_id,
+                worker_id: "test-worker".to_string(),
+                version: 1,
+                script,
+                ops: ops.clone(),
+                task,
+                on_warm_hit: None,
+            })
+            .await
+            .unwrap();
             let _response = rx.await.unwrap();
 
             if (i + 1) % 10 == 0 {
@@ -491,9 +501,17 @@ async fn bench_pinned_with_fetch() {
             let script = Script::new(FETCH_HANDLER);
             let (task, rx) = Event::fetch(make_request());
 
-            execute_pinned(&worker_id, script, ops.clone(), task)
-                .await
-                .unwrap();
+            execute_pinned(PinnedExecuteRequest {
+                owner_id: worker_id,
+                worker_id: "test-worker".to_string(),
+                version: 1,
+                script,
+                ops: ops.clone(),
+                task,
+                on_warm_hit: None,
+            })
+            .await
+            .unwrap();
             let _response = rx.await.unwrap();
 
             if (i + 1) % 10 == 0 {
@@ -532,9 +550,17 @@ async fn bench_pinned_multi_fetch() {
             let script = Script::new(MULTI_FETCH_HANDLER);
             let (task, rx) = Event::fetch(make_request());
 
-            execute_pinned(&worker_id, script, ops.clone(), task)
-                .await
-                .unwrap();
+            execute_pinned(PinnedExecuteRequest {
+                owner_id: worker_id,
+                worker_id: "test-worker".to_string(),
+                version: 1,
+                script,
+                ops: ops.clone(),
+                task,
+                on_warm_hit: None,
+            })
+            .await
+            .unwrap();
             let _response = rx.await.unwrap();
 
             if (i + 1) % 5 == 0 {

@@ -7,7 +7,9 @@
 //!   cargo test --test multithread_bench -- --nocapture --test-threads=1
 
 use openworkers_core::{DefaultOps, Event, OperationsHandle, RuntimeLimits, Script};
-use openworkers_runtime_v8::{Worker, execute_pinned, execute_pooled, init_pinned_pool, init_pool};
+use openworkers_runtime_v8::{
+    PinnedExecuteRequest, Worker, execute_pinned, execute_pooled, init_pinned_pool, init_pool,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -171,9 +173,17 @@ fn bench_pinned_pool(config: &BenchConfig) -> BenchResult {
                                 let script = Script::new(SCRIPT);
                                 let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
-                                execute_pinned(&worker_id, script, ops.clone(), task)
-                                    .await
-                                    .unwrap();
+                                execute_pinned(PinnedExecuteRequest {
+                                    owner_id: worker_id,
+                                    worker_id: "test-worker".to_string(),
+                                    version: 1,
+                                    script,
+                                    ops: ops.clone(),
+                                    task,
+                                    on_warm_hit: None,
+                                })
+                                .await
+                                .unwrap();
                                 rx.await.unwrap();
 
                                 completed.fetch_add(1, Ordering::Relaxed);

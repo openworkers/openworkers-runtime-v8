@@ -169,6 +169,15 @@ impl StreamManager {
         self.metadata.lock().unwrap().get(&stream_id).cloned()
     }
 
+    /// Clear all streams (used for context reuse between requests)
+    pub fn clear(&self) {
+        self.senders.lock().unwrap().clear();
+        self.receivers.lock().unwrap().clear();
+        self.metadata.lock().unwrap().clear();
+        // Reset next_id so stream IDs don't grow unbounded across reuses
+        *self.next_id.lock().unwrap() = 1;
+    }
+
     /// Count active streams
     pub fn active_count(&self) -> usize {
         self.senders.lock().unwrap().len()

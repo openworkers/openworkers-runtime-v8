@@ -16,6 +16,8 @@ pub enum EventLoopExit {
     ResponseReady,
     /// Wait for __requestComplete to be true (handler finished, including async work)
     HandlerComplete,
+    /// Wait for __activeResponseStreams == 0 only (don't wait for waitUntil)
+    StreamsComplete,
     /// Wait for __requestComplete && __activeResponseStreams == 0 (fully complete)
     FullyComplete,
 }
@@ -78,6 +80,19 @@ pub fn check_exit_condition(
                 .get(scope, complete_key.into())
                 .map(|v| v.is_true())
                 .unwrap_or(false)
+        }
+
+        EventLoopExit::StreamsComplete => {
+            // Only wait for active response streams to finish (not waitUntil).
+            // Used after sending the response so streaming bodies complete,
+            // while waitUntil promises continue in the background.
+            let streams_key = v8::String::new(scope, "__activeResponseStreams").unwrap();
+            let active_streams = global
+                .get(scope, streams_key.into())
+                .and_then(|v| v.uint32_value(scope))
+                .unwrap_or(0);
+
+            active_streams == 0
         }
 
         EventLoopExit::FullyComplete => {

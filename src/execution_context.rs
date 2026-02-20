@@ -185,10 +185,14 @@ impl ExecutionContext {
         Self::setup_es_modules_handler(isolate, &context)?;
 
         // Start event loop in background (with optional Operations handle)
+        // Use tokio::spawn (not spawn_local) so the event loop survives LocalSet drops.
+        // This is critical for warm context reuse: the LocalSet is dropped between
+        // requests, but the event loop must stay alive to keep callback_tx open.
+        // The event loop only does async I/O (fetch, timers, bindings) — no V8 access.
         let event_loop_stream_manager = stream_manager.clone();
         let event_loop_callback_notify = callback_notify.clone();
 
-        let event_loop_handle = tokio::task::spawn_local(async move {
+        let event_loop_handle = tokio::spawn(async move {
             crate::runtime::run_event_loop(
                 scheduler_rx,
                 callback_tx,
@@ -921,6 +925,40 @@ impl ExecutionContext {
         // Guards are dropped here, cancelling any pending watchdogs
     }
 
+    /// Drain remaining background work (waitUntil promises) after exec().
+    ///
+    /// After exec() returns with `StreamsComplete`, the HTTP response is sent
+    /// and all response streams are closed, but waitUntil promises may still
+    /// be pending. This method pumps V8 microtasks until `FullyComplete`.
+    ///
+    /// Creates its own security guards so background work cannot run forever.
+    /// Returns Ok if all background work completed, or an error if it timed out.
+    pub async fn drain_waituntil(&mut self) -> Result<(), TerminationReason> {
+        let isolate_handle = unsafe { (*self.isolate).thread_safe_handle() };
+
+        // Fresh guards for background work — same limits as exec()
+        let wall_guard =
+            TimeoutGuard::new(isolate_handle.clone(), self.limits.max_wall_clock_time_ms);
+        let cpu_guard = CpuEnforcer::new(isolate_handle, self.limits.max_cpu_time_ms);
+
+        let result = self
+            .await_event_loop(&wall_guard, &cpu_guard, EventLoopExit::FullyComplete, None)
+            .await;
+
+        self.check_termination_reason(
+            result.map(|_| HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: ResponseBody::None,
+            }),
+            cpu_guard
+                .as_ref()
+                .map(|g| g.was_terminated())
+                .unwrap_or(false),
+            wall_guard.was_triggered(),
+        )
+    }
+
     /// Check termination reason based on execution result and guard states
     fn check_termination_reason(
         &self,
@@ -1101,12 +1139,13 @@ impl ExecutionContext {
 
         let _ = fetch_init.res_tx.send(response);
 
-        // Wait for waitUntil promises AND active response streams to complete.
+        // Wait for active response streams only (streaming bodies).
+        // waitUntil promises continue in the background on the event loop.
         // With abort detection: signals client disconnect and allows grace period.
         self.await_event_loop(
             wall_guard,
             cpu_guard,
-            EventLoopExit::FullyComplete,
+            EventLoopExit::StreamsComplete,
             Some(AbortConfig::default()),
         )
         .await?;
@@ -1276,6 +1315,47 @@ impl ExecutionContext {
         };
 
         let _ = task_init.res_tx.send(task_result);
+        Ok(())
+    }
+
+    /// Reset per-request JS and Rust state for context reuse.
+    ///
+    /// Must be called between requests (warm isolate path). Clears response state,
+    /// completion flag, stream state, stale callbacks, and V8 Global handles.
+    ///
+    /// Does NOT touch the event loop (it persists across requests).
+    /// Does NOT handle terminate_execution recovery (caller must do that before reset).
+    pub fn reset(&mut self) -> Result<(), String> {
+        // 1. Reset JS globals (response, completion, streams, task result)
+        self.evaluate(&WorkerCode::JavaScript(
+            r#"
+            globalThis.__lastResponse = undefined;
+            globalThis.__requestComplete = false;
+            globalThis.__lastResponseStreamId = undefined;
+            globalThis.__activeResponseStreams = 0;
+            globalThis.__taskResult = undefined;
+            "#
+            .to_string(),
+        ))?;
+
+        // 2. Reset Rust-side abort flag
+        self.aborted.store(false, Ordering::SeqCst);
+
+        // 3. Clear stream manager (removes all senders/receivers/metadata)
+        self.stream_manager.clear();
+
+        // 4. Drain stale callbacks (timers/fetch from previous request)
+        while self.callback_rx.try_recv().is_ok() {}
+
+        // 5. Reset fetch_response_tx
+        *self.fetch_response_tx.borrow_mut() = None;
+
+        // 6. Clear V8 callback storage (prevents Global handle leaks)
+        self.fetch_callbacks.borrow_mut().clear();
+        self.fetch_error_callbacks.borrow_mut().clear();
+        self.stream_callbacks.borrow_mut().clear();
+        *self.next_callback_id.borrow_mut() = 1;
+
         Ok(())
     }
 

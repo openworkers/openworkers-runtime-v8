@@ -19,6 +19,9 @@ use crate::execution_context::ExecutionContext;
 use crate::gc::JsLock;
 use openworkers_core::{Event, OperationsHandle, RuntimeLimits, Script, TerminationReason};
 
+/// Default max reuses before discarding a cached context (prevents memory growth)
+const DEFAULT_CONTEXT_MAX_REUSES: u32 = 1000;
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -147,9 +150,35 @@ fn get_config() -> &'static PinnedPoolConfig {
 // Thread-Local Pool with Per-Owner Isolation
 // ============================================================================
 
+/// A cached execution context for warm isolate reuse.
+///
+/// When a request succeeds, the context is cached here for the next request
+/// to the same worker+version. On warm hit, we call `ctx.reset()` and dispatch
+/// the event directly, skipping the full context creation (~6ms → ~0.1ms).
+struct CachedContext {
+    ctx: ExecutionContext,
+    worker_id: String,
+    version: i32,
+    reuse_count: u32,
+    ops: OperationsHandle,
+}
+
+/// Get the max context reuses from CONTEXT_MAX_REUSES env var
+fn context_max_reuses() -> u32 {
+    static MAX_REUSES: OnceLock<u32> = OnceLock::new();
+    *MAX_REUSES.get_or_init(|| {
+        std::env::var("CONTEXT_MAX_REUSES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_CONTEXT_MAX_REUSES)
+    })
+}
+
 /// Inner data for a tagged isolate (protected by mutex)
 struct TaggedIsolateInner {
     isolate: LockerManagedIsolate,
+    /// Cached context for warm reuse (PINNED mode only)
+    cached_context: Option<CachedContext>,
     #[allow(dead_code)]
     created_at: Instant,
     last_used: Instant,
@@ -189,6 +218,7 @@ impl TaggedIsolate {
             in_use: AtomicBool::new(false),
             inner: Mutex::new(TaggedIsolateInner {
                 isolate,
+                cached_context: None,
                 created_at: now,
                 last_used: now,
                 total_requests: 0,
@@ -336,6 +366,7 @@ impl ThreadLocalPool {
     /// 3. If pool at capacity, evict LRU (oldest last_used among free isolates)
     /// 4. If owner at limit, return None (caller should try another thread)
     /// 5. If all busy and owner under limit, create anyway (temporary over-limit)
+    #[allow(clippy::arc_with_non_send_sync)]
     fn acquire(&mut self, owner_id: &str) -> Option<AcquireResult> {
         // 1. Try to find a FREE isolate with matching owner_id
         for arc in &self.isolates {
@@ -636,11 +667,22 @@ pub const QUEUE_TIMEOUT_ERROR: &str = "Queue wait timeout";
 /// This uses thread-local storage for zero-contention access to isolates.
 /// Multiple isolates can exist for the same owner, enabling concurrent execution.
 ///
+/// ## Warm Isolates
+///
+/// When the same worker_id+version is executed on the same isolate, the context
+/// is reused (warm hit). This skips the full context creation (~6ms) and only
+/// resets per-request state (~0.1ms). On any error, the context is discarded.
+///
 /// # Arguments
 /// * `owner_id` - Owner identifier (worker_id or tenant_id) for isolation
+/// * `worker_id` - Worker identifier for context caching
+/// * `version` - Worker version for cache invalidation
 /// * `script` - Worker script to execute
-/// * `ops` - Operations handle for fetch, KV, etc.
+/// * `ops` - Operations handle for fetch, KV, etc. (used on cold path only)
 /// * `task` - Task to execute (HTTP request, scheduled event, etc.)
+/// * `on_warm_hit` - Optional callback invoked with the cached ops on warm hit.
+///   Used by the runner to update per-request state (log_tx, span) on the
+///   cached ops handle that the event loop holds.
 ///
 /// # Isolation Model
 /// - Isolates are tagged with owner_id
@@ -670,7 +712,7 @@ pub const QUEUE_TIMEOUT_ERROR: &str = "Queue wait timeout";
 /// init_pinned_pool_full(100, Some(2), 20, 5000, RuntimeLimits::default());
 ///
 /// // Execute per request (caller handles thread distribution)
-/// match execute_pinned("worker_123", script, ops, task).await {
+/// match execute_pinned("tenant_1", "worker_123", 1, script, ops, task, None).await {
 ///     Ok(()) => { /* success */ }
 ///     Err(TerminationReason::Other(msg)) if msg == QUEUE_FULL_ERROR => {
 ///         // Return 503 Service Unavailable
@@ -678,12 +720,43 @@ pub const QUEUE_TIMEOUT_ERROR: &str = "Queue wait timeout";
 ///     Err(e) => { /* other error */ }
 /// }
 /// ```
-pub async fn execute_pinned(
-    owner_id: &str,
-    script: Script,
-    ops: OperationsHandle,
-    task: Event,
-) -> Result<(), TerminationReason> {
+/// Callback invoked on warm hit with the cached operations handle.
+///
+/// The runner uses this to update per-request state (log_tx, span) on the
+/// cached ops handle, which is shared with the still-running event loop.
+pub type WarmHitCallback = Box<dyn FnOnce(&OperationsHandle) + Send>;
+
+/// Request parameters for `execute_pinned`.
+///
+/// Groups all arguments into a single struct for readability and extensibility.
+pub struct PinnedExecuteRequest {
+    /// Owner identifier (tenant_id) for isolate pool isolation
+    pub owner_id: String,
+    /// Worker identifier for context caching
+    pub worker_id: String,
+    /// Worker version for cache invalidation
+    pub version: i32,
+    /// Worker script to execute
+    pub script: Script,
+    /// Operations handle for fetch, KV, etc. (used on cold path only)
+    pub ops: OperationsHandle,
+    /// Task to execute (HTTP request, scheduled event, etc.)
+    pub task: Event,
+    /// Optional callback invoked with the cached ops on warm hit.
+    /// Used by the runner to update per-request state (log_tx, span).
+    pub on_warm_hit: Option<WarmHitCallback>,
+}
+
+pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), TerminationReason> {
+    let PinnedExecuteRequest {
+        owner_id,
+        worker_id,
+        version,
+        script,
+        ops,
+        task,
+        on_warm_hit,
+    } = req;
     TOTAL_REQUESTS.fetch_add(1, Ordering::Relaxed);
 
     // Ensure pool is initialized
@@ -696,7 +769,7 @@ pub async fn execute_pinned(
     // Try to acquire an isolate, waiting in queue if at limit
     let (isolate_arc, is_hit) = loop {
         // Try to acquire
-        if let Some(result) = acquire_from_local_pool(owner_id) {
+        if let Some(result) = acquire_from_local_pool(&owner_id) {
             break result;
         }
 
@@ -783,6 +856,43 @@ pub async fn execute_pinned(
     let memory_limit_hit = Arc::clone(&inner.isolate.memory_limit_hit);
     let destruction_queue = Arc::clone(&inner.isolate.deferred_destruction_queue);
 
+    // ── Warm hit check ─────────────────────────────────────────────────
+    // Take cached_context BEFORE creating Locker to avoid overlapping borrows.
+    // v8::Locker borrows inner.isolate.isolate, so we can't access inner.cached_context
+    // after that. Taking it out first is safe — no V8 interaction until locker exists.
+    let max_reuses = context_max_reuses();
+    let mut cached_context = inner.cached_context.take();
+
+    // Decide: warm hit, discard, or cold path
+    let warm_hit = if let Some(ref cached) = cached_context {
+        if cached.worker_id == worker_id
+            && cached.version == version
+            && cached.reuse_count < max_reuses
+        {
+            true
+        } else {
+            // Different worker/version or max reuses — discard
+            if cached.reuse_count >= max_reuses {
+                tracing::debug!(
+                    "context DISCARDED: worker={}, reason=max_reuses ({})",
+                    &cached.worker_id[..8.min(cached.worker_id.len())],
+                    max_reuses
+                );
+            } else {
+                tracing::debug!(
+                    "context DISCARDED: worker={}, reason=different_worker (new={})",
+                    &cached.worker_id[..8.min(cached.worker_id.len())],
+                    &worker_id[..8.min(worker_id.len())]
+                );
+            }
+
+            cached_context = None;
+            false
+        }
+    } else {
+        false
+    };
+
     tracing::trace!(
         "Creating v8::Locker for owner {} (before v8::Locker::new)",
         owner_id
@@ -802,7 +912,88 @@ pub async fn execute_pinned(
     // Register JsLock for GC tracking (applies any pending memory adjustments)
     let _js_lock = JsLock::new(&mut locker);
 
-    // Create execution context
+    // Reset memory limit flag
+    memory_limit_hit.store(false, Ordering::SeqCst);
+
+    // ── Warm hit path ──────────────────────────────────────────────────
+    if warm_hit {
+        let cached = cached_context.as_mut().unwrap();
+        cached.reuse_count += 1;
+        let reuse_count = cached.reuse_count;
+
+        tracing::debug!(
+            "context WARM: worker={}, version={}, reuse_count={}",
+            &worker_id[..8.min(worker_id.len())],
+            version,
+            reuse_count
+        );
+
+        // Update per-request state on the cached ops handle.
+        // The event loop is still running with this ops — updating log_tx/span
+        // via interior mutability makes it serve the new request correctly.
+        if let Some(callback) = on_warm_hit {
+            callback(&cached.ops);
+        }
+
+        match cached.ctx.reset() {
+            Ok(()) => {
+                let result = cached.ctx.exec(task).await;
+
+                if result.is_err() {
+                    let reason = result.as_ref().err().unwrap();
+                    tracing::debug!(
+                        "context DISCARDED: worker={}, reason={:?}",
+                        &worker_id[..8.min(worker_id.len())],
+                        reason
+                    );
+                    // Don't put it back — discard on error
+                    cached_context = None;
+                } else {
+                    // Drain waitUntil promises in background.
+                    // exec() returned at StreamsComplete (response already sent),
+                    // but V8 needs pumping for background promises to resolve.
+                    if let Err(reason) = cached.ctx.drain_waituntil().await {
+                        tracing::debug!(
+                            "context DISCARDED: worker={}, reason=drain_waituntil: {:?}",
+                            &worker_id[..8.min(worker_id.len())],
+                            reason
+                        );
+                        cached_context = None;
+                    }
+                }
+
+                // Drop locker BEFORE writing back to inner (releases borrow on inner.isolate)
+                drop(_js_lock);
+                drop(locker);
+
+                // Now safe to write cached_context back
+                inner.cached_context = cached_context;
+                drop(inner);
+
+                release_to_local_pool(&isolate_arc);
+                return result;
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "context DISCARDED: worker={}, reason=reset_failed: {}",
+                    &worker_id[..8.min(worker_id.len())],
+                    e
+                );
+                cached_context = None;
+                // Fall through to cold path
+            }
+        }
+    }
+
+    // Drop the old cached context (if any) before creating a new one
+    drop(cached_context);
+
+    // ── Cold path ──────────────────────────────────────────────────────
+    tracing::debug!(
+        "context COLD: worker={}, creating new context",
+        &worker_id[..8.min(worker_id.len())]
+    );
+
     let ctx_result = ExecutionContext::new_with_pooled_isolate(
         &mut locker,
         use_snapshot,
@@ -810,18 +1001,53 @@ pub async fn execute_pinned(
         limits,
         memory_limit_hit,
         script,
-        ops,
+        ops.clone(),
     );
 
-    // Execute
-    let result = match ctx_result {
-        Ok(mut ctx) => ctx.exec(task).await,
-        Err(e) => Err(e),
+    // Execute and determine whether to cache
+    let (result, new_cached_context) = match ctx_result {
+        Ok(mut ctx) => {
+            let result = ctx.exec(task).await;
+
+            if result.is_ok() {
+                // Drain waitUntil promises before caching (V8 needs pumping)
+                if let Err(reason) = ctx.drain_waituntil().await {
+                    tracing::debug!(
+                        "context NOT CACHED: worker={}, reason=drain_waituntil: {:?}",
+                        &worker_id[..8.min(worker_id.len())],
+                        reason
+                    );
+                    (Ok(()), None)
+                } else {
+                    (
+                        result,
+                        Some(CachedContext {
+                            ctx,
+                            worker_id: worker_id.to_string(),
+                            version,
+                            reuse_count: 1,
+                            ops,
+                        }),
+                    )
+                }
+            } else {
+                tracing::debug!(
+                    "context NOT CACHED: worker={}, reason={:?}",
+                    &worker_id[..8.min(worker_id.len())],
+                    result.as_ref().err()
+                );
+                (result, None)
+            }
+        }
+        Err(e) => (Err(e), None),
     };
 
-    // Drop JsLock and Locker before releasing
+    // Drop locker BEFORE writing back to inner (releases borrow on inner.isolate)
     drop(_js_lock);
     drop(locker);
+
+    // Now safe to write cached_context back
+    inner.cached_context = new_cached_context;
     drop(inner);
 
     // Release the isolate back to the pool (marks as available)
@@ -849,6 +1075,7 @@ mod tests {
             in_use: AtomicBool::new(false),
             inner: Mutex::new(TaggedIsolateInner {
                 isolate,
+                cached_context: None,
                 created_at: Instant::now(),
                 last_used: Instant::now(),
                 total_requests: 0,

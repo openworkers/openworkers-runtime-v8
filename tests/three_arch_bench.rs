@@ -14,7 +14,9 @@ mod common;
 
 use common::run_in_local;
 use openworkers_core::{DefaultOps, Event, OperationsHandle, RuntimeLimits, Script};
-use openworkers_runtime_v8::{Worker, execute_pinned, execute_pooled, init_pinned_pool, init_pool};
+use openworkers_runtime_v8::{
+    PinnedExecuteRequest, Worker, execute_pinned, execute_pooled, init_pinned_pool, init_pool,
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -293,9 +295,17 @@ async fn bench_pinned_standard() {
             let script = Script::new(SIMPLE_SCRIPT);
             let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
-            execute_pinned(&worker_id, script, ops.clone(), task)
-                .await
-                .unwrap();
+            execute_pinned(PinnedExecuteRequest {
+                owner_id: worker_id,
+                worker_id: "test-worker".to_string(),
+                version: 1,
+                script,
+                ops: ops.clone(),
+                task,
+                on_warm_hit: None,
+            })
+            .await
+            .unwrap();
             rx.await.unwrap();
 
             sleep(Duration::from_millis(io_delay_ms)).await;
@@ -336,9 +346,17 @@ async fn bench_pinned_cpu_bound() {
             let script = Script::new(CPU_HEAVY_SCRIPT);
             let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
-            execute_pinned(&worker_id, script, ops.clone(), task)
-                .await
-                .unwrap();
+            execute_pinned(PinnedExecuteRequest {
+                owner_id: worker_id,
+                worker_id: "test-worker".to_string(),
+                version: 1,
+                script,
+                ops: ops.clone(),
+                task,
+                on_warm_hit: None,
+            })
+            .await
+            .unwrap();
             rx.await.unwrap();
 
             if (i + 1) % 10 == 0 {
@@ -369,9 +387,17 @@ async fn bench_pinned_warm_cache() {
         {
             let script = Script::new(SIMPLE_SCRIPT);
             let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
-            execute_pinned("warm-pinned", script, ops.clone(), task)
-                .await
-                .unwrap();
+            execute_pinned(PinnedExecuteRequest {
+                owner_id: "warm-pinned".to_string(),
+                worker_id: "test-worker".to_string(),
+                version: 1,
+                script,
+                ops: ops.clone(),
+                task,
+                on_warm_hit: None,
+            })
+            .await
+            .unwrap();
             rx.await.unwrap();
         }
 
@@ -381,9 +407,17 @@ async fn bench_pinned_warm_cache() {
             let script = Script::new(SIMPLE_SCRIPT);
             let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
-            execute_pinned("warm-pinned", script, ops.clone(), task)
-                .await
-                .unwrap();
+            execute_pinned(PinnedExecuteRequest {
+                owner_id: "warm-pinned".to_string(),
+                worker_id: "test-worker".to_string(),
+                version: 1,
+                script,
+                ops: ops.clone(),
+                task,
+                on_warm_hit: None,
+            })
+            .await
+            .unwrap();
             rx.await.unwrap();
 
             if (i + 1) % 25 == 0 {

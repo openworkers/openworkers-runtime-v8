@@ -857,7 +857,9 @@ impl Worker {
         let _ = fetch_init.res_tx.send(response);
 
         // Wait for waitUntil promises AND active response streams to complete.
-        // With abort detection: signals client disconnect and allows grace period.
+        // Worker (oneshot) pumps V8 microtasks here — without this, JS callbacks
+        // from timers/promises would never execute. For warm reuse (ExecutionContext),
+        // StreamsComplete is used instead and background work is drained separately.
         self.await_event_loop(
             wall_guard,
             cpu_guard,
