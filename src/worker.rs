@@ -1493,7 +1493,11 @@ pub(crate) fn setup_event_listener(
                             }
                         } catch (error) {
                             console.error('[addEventListener] Error in fetch handler:', error);
-                            globalThis.__lastResponse = new Response('Handler exception: ' + (error.message || error), { status: 500 });
+                            // Only set a 500 response if no response was already produced.
+                            // A rejected waitUntil promise must NOT overwrite a valid response.
+                            if (!globalThis.__lastResponse) {
+                                globalThis.__lastResponse = new Response('Handler exception: ' + (error.message || error), { status: 500 });
+                            }
                         } finally {
                             globalThis.__requestComplete = true;
                         }
@@ -1624,10 +1628,12 @@ pub(crate) fn setup_es_modules_handler(
                         }
                     } catch (error) {
                         console.error('[ES Modules] Error in fetch handler:', error);
-                        globalThis.__lastResponse = new Response(
-                            'Handler exception: ' + (error.message || error),
-                            { status: 500 }
-                        );
+                        if (!globalThis.__lastResponse) {
+                            globalThis.__lastResponse = new Response(
+                                'Handler exception: ' + (error.message || error),
+                                { status: 500 }
+                            );
+                        }
                     } finally {
                         globalThis.__requestComplete = true;
                     }

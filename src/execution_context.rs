@@ -1321,12 +1321,19 @@ impl ExecutionContext {
     /// Reset per-request JS and Rust state for context reuse.
     ///
     /// Must be called between requests (warm isolate path). Clears response state,
-    /// completion flag, stream state, stale callbacks, and V8 Global handles.
+    /// completion flag, stream state, timer callbacks, stale callbacks, and V8 Global handles.
     ///
+    /// Cancels any lingering `terminate_execution` flag before evaluating JS.
     /// Does NOT touch the event loop (it persists across requests).
-    /// Does NOT handle terminate_execution recovery (caller must do that before reset).
+    /// Does NOT reset `__nextTimerId` (monotonically increasing to avoid ID collisions).
     pub fn reset(&mut self) -> Result<(), String> {
-        // 1. Reset JS globals (response, completion, streams, task result)
+        // 0. Cancel any lingering terminate_execution flag from a previous timeout/abort.
+        // Without this, evaluate() below would fail immediately if the flag is still set.
+        unsafe {
+            (*self.isolate).cancel_terminate_execution();
+        }
+
+        // 1. Reset JS globals (response, completion, streams, task result, timers)
         self.evaluate(&WorkerCode::JavaScript(
             r#"
             globalThis.__lastResponse = undefined;
@@ -1334,6 +1341,8 @@ impl ExecutionContext {
             globalThis.__lastResponseStreamId = undefined;
             globalThis.__activeResponseStreams = 0;
             globalThis.__taskResult = undefined;
+            globalThis.__timerCallbacks.clear();
+            globalThis.__intervalIds.clear();
             "#
             .to_string(),
         ))?;
