@@ -26,7 +26,7 @@ gc-derive = { package = "openworkers-runtime-v8-gc-derive", path = "gc-derive" }
 openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.13.1" }
 
 # V8 JavaScript engine (fork with UnenteredIsolate + Locker support for pooling)
-v8 = { package = "openworkers-v8", version = "145" }
+v8 = { package = "openworkers-v8", path = "../rusty-v8" }
 
 # Async runtime
 tokio = { version = "1.49.0", features = ["full"] }
@@ -74,3 +74,7 @@ rand = "0.9"
 [[bench]]
 name = "isolate_pool_bench"
 harness = false
+
+# Local override: forces serde_v8/glue_v8 to also use the local rusty-v8 (with IsolateScope)
+[patch.crates-io]
+openworkers-v8 = { path = "../rusty-v8" }

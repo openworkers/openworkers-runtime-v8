@@ -1043,6 +1043,11 @@ pub(crate) fn evaluate_in_context(
 ) -> Result<(), String> {
     use std::pin::pin;
 
+    // SAFETY: IsolateScope needs &mut Isolate, same source as HandleScope below.
+    // Required because Locker no longer calls Isolate::Enter() (prevents entry_stack corruption).
+    let isolate_ptr = isolate as *mut v8::Isolate;
+    let _isolate_scope = unsafe { v8::IsolateScope::new(&mut *isolate_ptr) };
+
     let scope = pin!(v8::HandleScope::new(isolate));
     let mut scope = scope.init();
     let ctx = v8::Local::new(&scope, context);
@@ -1081,6 +1086,10 @@ pub(crate) fn evaluate_code_cache_in_context(
 
     let (source, cache_bytes) =
         crate::snapshot::unpack_code_cache(data).ok_or("Failed to unpack code cache bundle")?;
+
+    // SAFETY: IsolateScope needs &mut Isolate, same source as HandleScope below.
+    let isolate_ptr = isolate as *mut v8::Isolate;
+    let _isolate_scope = unsafe { v8::IsolateScope::new(&mut *isolate_ptr) };
 
     let scope = pin!(v8::HandleScope::new(isolate));
     let mut scope = scope.init();
