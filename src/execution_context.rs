@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Notify, mpsc};
 use v8;
 
+use crate::LockerManagedIsolate;
 use crate::execution_helpers::{
     AbortConfig, EventLoopExit, check_exit_condition, get_completion_state, get_response_stream_id,
     read_response_object, signal_client_disconnect, trigger_fetch_handler,
@@ -38,6 +39,11 @@ pub struct ExecutionContext {
     /// The shared isolate this context belongs to
     /// Note: We DON'T own the isolate, just borrow it mutably
     isolate: *mut v8::OwnedIsolate,
+
+    /// Pointer to the LockerManagedIsolate for on-demand Locker creation.
+    /// Null for the SharedIsolate path (legacy/tests) where caller manages locking.
+    /// When non-null, await_event_loop acquires/releases V8 locker per poll cycle.
+    pub(crate) lmi_ptr: *mut LockerManagedIsolate,
 
     /// The V8 context for this execution
     pub context: v8::Global<v8::Context>,
@@ -93,6 +99,7 @@ impl ExecutionContext {
     /// * `ops` - Operations handle for async ops
     pub fn new_with_pooled_isolate(
         isolate: &mut v8::Isolate,
+        lmi_ptr: *mut LockerManagedIsolate,
         use_snapshot: bool,
         platform: &'static v8::SharedRef<v8::Platform>,
         limits: RuntimeLimits,
@@ -215,6 +222,7 @@ impl ExecutionContext {
 
         Ok(Self {
             isolate: isolate_ptr,
+            lmi_ptr,
             context,
             scheduler_tx,
             callback_rx,
@@ -350,6 +358,7 @@ impl ExecutionContext {
 
         Ok(Self {
             isolate: &mut shared_isolate.isolate as *mut v8::OwnedIsolate,
+            lmi_ptr: std::ptr::null_mut(),
             context,
             scheduler_tx,
             callback_rx,
@@ -1055,8 +1064,23 @@ impl ExecutionContext {
 
         let mut abort_signaled_at: Option<tokio::time::Instant> = None;
         let mut pending_callbacks: Vec<crate::runtime::CallbackMessage> = Vec::with_capacity(16);
+        let lmi_ptr = self.lmi_ptr; // Copy raw pointer (no persistent borrow on self)
 
         std::future::poll_fn(|cx| {
+            // ── Acquire V8 lock (if pooled isolate) ──
+            // For the LockerManagedIsolate path, we create a Locker + JsLock
+            // that will be dropped when this closure returns (including Pending),
+            // releasing the V8 mutex for other tasks during I/O waits.
+            let _lock_guard = if !lmi_ptr.is_null() {
+                let lmi = unsafe { &mut *lmi_ptr };
+                let mut locker = v8::Locker::new(&mut lmi.isolate);
+                lmi.deferred_destruction_queue.process_all();
+                let js = crate::gc::JsLock::new(&mut *locker);
+                Some((locker, js))
+            } else {
+                None // SharedIsolate path — caller manages locking
+            };
+
             // 1. Check termination (CPU/wall-clock guards)
             if self.is_terminated(wall_guard, cpu_guard) {
                 return Poll::Ready(Err("Execution terminated".to_string()));
@@ -1075,13 +1099,21 @@ impl ExecutionContext {
                 return Poll::Ready(Ok(()));
             }
 
-            // 6. Not done yet - waker registered via poll_recv
+            // 6. Not done yet — lock dropped here when closure returns Poll::Pending.
+            //    V8 mutex released, other tasks can run on this isolate.
             Poll::Pending
         })
         .await
     }
 
     /// Trigger a fetch event
+    ///
+    /// Split into per-phase V8 locks to release the V8 mutex during I/O waits.
+    /// Phase 0: Setup body stream (no lock needed — pure Rust)
+    /// Phase 1: Trigger fetch handler (under lock)
+    /// Phase 2: Wait for response (lock-per-poll in await_event_loop)
+    /// Phase 3: Read response (under lock)
+    /// Phase 4: Wait for streams (lock-per-poll)
     async fn trigger_fetch_event(
         &mut self,
         fetch_init: openworkers_core::FetchInit,
@@ -1090,17 +1122,14 @@ impl ExecutionContext {
     ) -> Result<HttpResponse, String> {
         let mut req = fetch_init.req;
 
-        // Create channel for response notification (like JSC)
+        // ── Phase 0: Setup (no lock needed — pure Rust) ──
         let (response_tx, _response_rx) = tokio::sync::oneshot::channel::<String>();
 
-        // Store the sender in runtime so JS can use it
         {
             let mut tx_lock = self.fetch_response_tx.borrow_mut();
             *tx_lock = Some(response_tx);
         }
 
-        // Handle streaming request body - set up pump before entering V8
-        // Note: Only take the body if it's a Stream, otherwise leave it for later
         let body_stream_id: Option<u64> = if matches!(&req.body, RequestBody::Stream(_)) {
             let RequestBody::Stream(rx) = std::mem::take(&mut req.body) else {
                 unreachable!()
@@ -1110,8 +1139,19 @@ impl ExecutionContext {
             None
         };
 
-        // Trigger fetch handler using shared helper
+        // ── Phase 1: Trigger fetch handler (under lock) ──
         {
+            let lmi_ptr = self.lmi_ptr;
+            let _lock = if !lmi_ptr.is_null() {
+                let lmi = unsafe { &mut *lmi_ptr };
+                let mut locker = v8::Locker::new(&mut lmi.isolate);
+                lmi.deferred_destruction_queue.process_all();
+                let js = crate::gc::JsLock::new(&mut *locker);
+                Some((locker, js))
+            } else {
+                None
+            };
+
             use std::pin::pin;
             unsafe {
                 let isolate = &mut *self.isolate;
@@ -1130,14 +1170,25 @@ impl ExecutionContext {
                     body_stream_id,
                 )?;
             }
-        }
+        } // lock released
 
-        // Wait for response to be ready (no abort detection needed yet)
+        // ── Phase 2: Wait for response (lock-per-poll in await_event_loop) ──
         self.await_event_loop(wall_guard, cpu_guard, EventLoopExit::ResponseReady, None)
             .await?;
 
-        // Read response from global __lastResponse using shared helper
+        // ── Phase 3: Read response (under lock) ──
         let (status, response) = {
+            let lmi_ptr = self.lmi_ptr;
+            let _lock = if !lmi_ptr.is_null() {
+                let lmi = unsafe { &mut *lmi_ptr };
+                let mut locker = v8::Locker::new(&mut lmi.isolate);
+                lmi.deferred_destruction_queue.process_all();
+                let js = crate::gc::JsLock::new(&mut *locker);
+                Some((locker, js))
+            } else {
+                None
+            };
+
             use std::pin::pin;
             unsafe {
                 let isolate = &mut *self.isolate;
@@ -1149,13 +1200,11 @@ impl ExecutionContext {
 
                 read_response_object(scope, &self.stream_manager, self.limits.stream_buffer_size)?
             }
-        };
+        }; // lock released
 
         let _ = fetch_init.res_tx.send(response);
 
-        // Wait for active response streams only (streaming bodies).
-        // waitUntil promises continue in the background on the event loop.
-        // With abort detection: signals client disconnect and allows grace period.
+        // ── Phase 4: Wait for streams (lock-per-poll) ──
         self.await_event_loop(
             wall_guard,
             cpu_guard,
@@ -1164,7 +1213,6 @@ impl ExecutionContext {
         )
         .await?;
 
-        // Return success indicator (body already sent via channel)
         Ok(HttpResponse {
             status,
             headers: vec![],
@@ -1173,20 +1221,32 @@ impl ExecutionContext {
     }
 
     /// Trigger a task event
+    ///
+    /// Split into per-phase V8 locks like trigger_fetch_event.
     async fn trigger_task_event(
         &mut self,
         task_init: openworkers_core::TaskInit,
         wall_guard: &TimeoutGuard,
         cpu_guard: &Option<CpuEnforcer>,
     ) -> Result<(), String> {
-        // Extract scheduled time if this is a schedule-triggered task
         let scheduled_time = match &task_init.source {
             Some(openworkers_core::TaskSource::Schedule { time }) => Some(*time),
             _ => None,
         };
 
-        // Trigger task handler
+        // ── Phase 1: Trigger task handler (under lock) ──
         {
+            let lmi_ptr = self.lmi_ptr;
+            let _lock = if !lmi_ptr.is_null() {
+                let lmi = unsafe { &mut *lmi_ptr };
+                let mut locker = v8::Locker::new(&mut lmi.isolate);
+                lmi.deferred_destruction_queue.process_all();
+                let js = crate::gc::JsLock::new(&mut *locker);
+                Some((locker, js))
+            } else {
+                None
+            };
+
             use std::pin::pin;
             unsafe {
                 let isolate = &mut *self.isolate;
@@ -1198,7 +1258,6 @@ impl ExecutionContext {
 
                 let global = context.global(scope);
 
-                // Try __taskHandler first (new unified handler)
                 let task_handler_key = v8::String::new(scope, "__taskHandler").unwrap();
                 let scheduled_handler_key = v8::String::new(scope, "__scheduledHandler").unwrap();
 
@@ -1207,30 +1266,26 @@ impl ExecutionContext {
                 {
                     let handler_fn: v8::Local<v8::Function> = handler_val.try_into().unwrap();
 
-                    // Create event object with full task info
                     let event_obj = v8::Object::new(scope);
 
-                    // Set taskId
                     let id_key = v8::String::new(scope, "taskId").unwrap();
                     let id_val = v8::String::new(scope, &task_init.task_id).unwrap();
                     event_obj.set(scope, id_key.into(), id_val.into());
 
-                    // Set attempt
                     let attempt_key = v8::String::new(scope, "attempt").unwrap();
                     let attempt_val = v8::Number::new(scope, task_init.attempt as f64);
                     event_obj.set(scope, attempt_key.into(), attempt_val.into());
 
-                    // Set payload if present
                     if let Some(payload) = &task_init.payload {
                         let payload_key = v8::String::new(scope, "payload").unwrap();
                         let payload_str = serde_json::to_string(payload).unwrap_or_default();
                         let payload_json = v8::String::new(scope, &payload_str).unwrap();
+
                         if let Some(parsed) = v8::json::parse(scope, payload_json) {
                             event_obj.set(scope, payload_key.into(), parsed);
                         }
                     }
 
-                    // Set scheduledTime for backward compat
                     if let Some(time) = scheduled_time {
                         let time_key = v8::String::new(scope, "scheduledTime").unwrap();
                         let time_val = v8::Number::new(scope, time as f64);
@@ -1245,10 +1300,10 @@ impl ExecutionContext {
                 } else if let Some(handler_val) = global.get(scope, scheduled_handler_key.into())
                     && handler_val.is_function()
                 {
-                    // Fallback to __scheduledHandler for backward compat
                     let handler_fn: v8::Local<v8::Function> = handler_val.try_into().unwrap();
 
                     let event_obj = v8::Object::new(scope);
+
                     if let Some(time) = scheduled_time {
                         let time_key = v8::String::new(scope, "scheduledTime").unwrap();
                         let time_val = v8::Number::new(scope, time as f64);
@@ -1262,15 +1317,25 @@ impl ExecutionContext {
                     }
                 }
             }
-        }
+        } // lock released
 
-        // Wait for handler to complete (including async work and waitUntil promises)
-        // No abort detection needed for task events (no streaming response)
+        // ── Phase 2: Wait for handler to complete (lock-per-poll) ──
         self.await_event_loop(wall_guard, cpu_guard, EventLoopExit::HandlerComplete, None)
             .await?;
 
-        // Read __taskResult from JS and send it back
+        // ── Phase 3: Read task result (under lock) ──
         let task_result = {
+            let lmi_ptr = self.lmi_ptr;
+            let _lock = if !lmi_ptr.is_null() {
+                let lmi = unsafe { &mut *lmi_ptr };
+                let mut locker = v8::Locker::new(&mut lmi.isolate);
+                lmi.deferred_destruction_queue.process_all();
+                let js = crate::gc::JsLock::new(&mut *locker);
+                Some((locker, js))
+            } else {
+                None
+            };
+
             use std::pin::pin;
             unsafe {
                 let isolate = &mut *self.isolate;
@@ -1287,14 +1352,12 @@ impl ExecutionContext {
                     if result_val.is_object() {
                         let result_obj: v8::Local<v8::Object> = result_val.try_into().unwrap();
 
-                        // Extract success
                         let success_key = v8::String::new(scope, "success").unwrap();
                         let success = result_obj
                             .get(scope, success_key.into())
                             .map(|v| v.is_true())
                             .unwrap_or(true);
 
-                        // Extract data (serialize to JSON)
                         let data_key = v8::String::new(scope, "data").unwrap();
                         let data = result_obj.get(scope, data_key.into()).and_then(|v| {
                             if v.is_undefined() || v.is_null() {
@@ -1306,7 +1369,6 @@ impl ExecutionContext {
                             }
                         });
 
-                        // Extract error
                         let error_key = v8::String::new(scope, "error").unwrap();
                         let error = result_obj.get(scope, error_key.into()).and_then(|v| {
                             if v.is_undefined() || v.is_null() {
@@ -1328,7 +1390,7 @@ impl ExecutionContext {
                     openworkers_core::TaskResult::success()
                 }
             }
-        };
+        }; // lock released
 
         let _ = task_init.res_tx.send(task_result);
         Ok(())
@@ -1343,6 +1405,18 @@ impl ExecutionContext {
     /// Does NOT touch the event loop (it persists across requests).
     /// Does NOT reset `__nextTimerId` (monotonically increasing to avoid ID collisions).
     pub fn reset(&mut self) -> Result<(), String> {
+        // Acquire lock if pooled isolate (evaluate accesses V8 directly)
+        let lmi_ptr = self.lmi_ptr;
+        let _lock_guard = if !lmi_ptr.is_null() {
+            let lmi = unsafe { &mut *lmi_ptr };
+            let mut locker = v8::Locker::new(&mut lmi.isolate);
+            lmi.deferred_destruction_queue.process_all();
+            let js = crate::gc::JsLock::new(&mut *locker);
+            Some((locker, js))
+        } else {
+            None
+        };
+
         // 0. Cancel any lingering terminate_execution flag from a previous timeout/abort.
         // Without this, evaluate() below would fail immediately if the flag is still set.
         unsafe {

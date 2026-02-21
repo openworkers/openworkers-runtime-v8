@@ -862,12 +862,9 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
     let platform = inner.isolate.platform;
     let limits = inner.isolate.limits.clone();
     let memory_limit_hit = Arc::clone(&inner.isolate.memory_limit_hit);
-    let destruction_queue = Arc::clone(&inner.isolate.deferred_destruction_queue);
 
     // ── Warm hit check ─────────────────────────────────────────────────
     // Take cached_context BEFORE creating Locker to avoid overlapping borrows.
-    // v8::Locker borrows inner.isolate.isolate, so we can't access inner.cached_context
-    // after that. Taking it out first is safe — no V8 interaction until locker exists.
     let max_reuses = context_max_reuses();
     let mut cached_context = inner.cached_context.take();
 
@@ -879,7 +876,6 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
         {
             true
         } else {
-            // Different worker/version or max reuses — discard
             if cached.reuse_count >= max_reuses {
                 tracing::debug!(
                     "context DISCARDED: worker={}, reason=max_reuses ({})",
@@ -901,24 +897,14 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
         false
     };
 
-    tracing::trace!(
-        "Creating v8::Locker for owner {} (before v8::Locker::new)",
-        owner_id
-    );
+    // ── Get raw pointer to LockerManagedIsolate ──
+    // SAFETY: Arc<TaggedIsolate> keeps memory alive. in_use flag prevents other tasks
+    // from touching this isolate. LocalSet ensures single-thread execution.
+    let lmi_ptr: *mut crate::LockerManagedIsolate = &mut inner.isolate as *mut _;
 
-    // Create v8::Locker for thread-safety
-    let mut locker = v8::Locker::new(&mut inner.isolate.isolate);
-
-    tracing::trace!(
-        "v8::Locker created for owner {}, processing deferred destructions",
-        owner_id
-    );
-
-    // Process any pending deferred handle destructions (while lock is held)
-    destruction_queue.process_all();
-
-    // Register JsLock for GC tracking (applies any pending memory adjustments)
-    let _js_lock = JsLock::new(&mut locker);
+    // Drop MutexGuard early — memory stays alive in Arc<TaggedIsolate>,
+    // exclusive access guaranteed by in_use AtomicBool flag.
+    drop(inner);
 
     // Reset memory limit flag
     memory_limit_hit.store(false, Ordering::SeqCst);
@@ -936,15 +922,17 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
             reuse_count
         );
 
-        // Update per-request state on the cached ops handle.
-        // The event loop is still running with this ops — updating log_tx/span
-        // via interior mutability makes it serve the new request correctly.
+        // Set lmi_ptr so the context can create Lockers on demand
+        cached.ctx.lmi_ptr = lmi_ptr;
+
         if let Some(callback) = on_warm_hit {
             callback(&cached.ops);
         }
 
+        // reset() now acquires its own V8 lock internally
         match cached.ctx.reset() {
             Ok(()) => {
+                // exec() and drain_waituntil() manage their own locking via await_event_loop
                 let result = cached.ctx.exec(task).await;
 
                 if result.is_err() {
@@ -954,12 +942,8 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
                         &worker_id[..8.min(worker_id.len())],
                         reason
                     );
-                    // Don't put it back — discard on error
                     cached_context = None;
                 } else {
-                    // Drain waitUntil promises in background.
-                    // exec() returned at StreamsComplete (response already sent),
-                    // but V8 needs pumping for background promises to resolve.
                     if let Err(reason) = cached.ctx.drain_waituntil().await {
                         tracing::debug!(
                             "context DISCARDED: worker={}, reason=drain_waituntil: {:?}",
@@ -970,11 +954,8 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
                     }
                 }
 
-                // Drop locker BEFORE writing back to inner (releases borrow on inner.isolate)
-                drop(_js_lock);
-                drop(locker);
-
-                // Now safe to write cached_context back
+                // Write cached_context back (no locker to drop first)
+                let mut inner = isolate_arc.inner.lock().await;
                 inner.cached_context = cached_context;
                 drop(inner);
 
@@ -1002,23 +983,32 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
         &worker_id[..8.min(worker_id.len())]
     );
 
-    let ctx_result = ExecutionContext::new_with_pooled_isolate(
-        &mut locker,
-        use_snapshot,
-        platform,
-        limits,
-        memory_limit_hit,
-        script,
-        ops.clone(),
-    );
+    // Setup under lock: create context, evaluate script, setup listeners
+    let ctx_result = {
+        let lmi = unsafe { &mut *lmi_ptr };
+        let mut locker = v8::Locker::new(&mut lmi.isolate);
+        lmi.deferred_destruction_queue.process_all();
+        let _js_lock = JsLock::new(&mut locker);
 
-    // Execute and determine whether to cache
+        ExecutionContext::new_with_pooled_isolate(
+            &mut locker,
+            lmi_ptr,
+            use_snapshot,
+            platform,
+            limits,
+            memory_limit_hit,
+            script,
+            ops.clone(),
+        )
+        // locker + js_lock dropped here — V8 mutex released
+    };
+
+    // Execute and determine whether to cache (exec manages its own locking)
     let (result, new_cached_context) = match ctx_result {
         Ok(mut ctx) => {
             let result = ctx.exec(task).await;
 
             if result.is_ok() {
-                // Drain waitUntil promises before caching (V8 needs pumping)
                 if let Err(reason) = ctx.drain_waituntil().await {
                     tracing::debug!(
                         "context NOT CACHED: worker={}, reason=drain_waituntil: {:?}",
@@ -1050,11 +1040,8 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
         Err(e) => (Err(e), None),
     };
 
-    // Drop locker BEFORE writing back to inner (releases borrow on inner.isolate)
-    drop(_js_lock);
-    drop(locker);
-
-    // Now safe to write cached_context back
+    // Write cached_context back (re-acquire MutexGuard)
+    let mut inner = isolate_arc.inner.lock().await;
     inner.cached_context = new_cached_context;
     drop(inner);
 

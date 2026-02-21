@@ -67,6 +67,7 @@ pub async fn execute_pooled(
             // Execute synchronous part (context creation) first
             let ctx_result = ExecutionContext::new_with_pooled_isolate(
                 isolate,
+                std::ptr::null_mut(), // Old pool path — caller holds the locker
                 use_snapshot,
                 platform,
                 limits,
