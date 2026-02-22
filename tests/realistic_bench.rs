@@ -19,7 +19,6 @@
 //!
 //! Or run each architecture separately:
 //!   cargo test --test realistic_bench bench_legacy -- --nocapture
-//!   cargo test --test realistic_bench bench_shared -- --nocapture
 //!   cargo test --test realistic_bench bench_pinned -- --nocapture
 
 mod common;
@@ -30,7 +29,7 @@ use openworkers_core::{
     RequestBody, ResponseBody, RuntimeLimits, Script,
 };
 use openworkers_runtime_v8::{
-    PinnedExecuteRequest, Worker, execute_pinned, execute_pooled, init_pinned_pool, init_pool,
+    PinnedExecuteRequest, PinnedPoolConfig, Worker, execute_pinned, init_pinned_pool,
 };
 use rand::Rng;
 use std::collections::HashMap;
@@ -304,129 +303,6 @@ async fn bench_legacy_with_fetch() {
 }
 
 // ============================================================================
-// Shared Pool Benchmarks
-// ============================================================================
-
-#[tokio::test(flavor = "current_thread")]
-async fn bench_shared_simple() {
-    let _lock = V8_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    run_in_local(|| async {
-        init_pool(100, RuntimeLimits::default());
-
-        let iterations = 30u32;
-
-        print_header("Shared Pool - Simple Handler");
-        println!("  Config: {} iterations, no fetch calls", iterations);
-
-        let ops = Arc::new(MockOps::new(0, 0));
-        let stats = ops.stats();
-
-        let start = Instant::now();
-
-        for i in 0..iterations {
-            let worker_id = format!("shared-simple-{}", i % 10);
-            let script = Script::new(SIMPLE_HANDLER);
-            let (task, rx) = Event::fetch(make_request());
-
-            execute_pooled(&worker_id, script, ops.clone(), task)
-                .await
-                .unwrap();
-            let _response = rx.await.unwrap();
-
-            if (i + 1) % 10 == 0 {
-                println!("  Completed {}/{}", i + 1, iterations);
-            }
-        }
-
-        print_results("Shared Simple", start.elapsed(), iterations, &stats);
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn bench_shared_with_fetch() {
-    let _lock = V8_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    run_in_local(|| async {
-        init_pool(100, RuntimeLimits::default());
-
-        let iterations = 20u32;
-        let fetch_latency_ms = 20u64;
-
-        print_header("Shared Pool - Handler with fetch()");
-        println!(
-            "  Config: {} iterations, fetch latency: {}ms",
-            iterations, fetch_latency_ms
-        );
-
-        let ops = Arc::new(MockOps::new(fetch_latency_ms, fetch_latency_ms));
-        let stats = ops.stats();
-
-        let start = Instant::now();
-
-        for i in 0..iterations {
-            let worker_id = format!("shared-fetch-{}", i % 10);
-            let script = Script::new(FETCH_HANDLER);
-            let (task, rx) = Event::fetch(make_request());
-
-            execute_pooled(&worker_id, script, ops.clone(), task)
-                .await
-                .unwrap();
-            let _response = rx.await.unwrap();
-
-            if (i + 1) % 10 == 0 {
-                println!("  Completed {}/{}", i + 1, iterations);
-            }
-        }
-
-        print_results("Shared with Fetch", start.elapsed(), iterations, &stats);
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn bench_shared_multi_fetch() {
-    let _lock = V8_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    run_in_local(|| async {
-        init_pool(100, RuntimeLimits::default());
-
-        let iterations = 15u32;
-        let fetch_latency_ms = 15u64;
-
-        print_header("Shared Pool - Multi-fetch Handler (parallel fetches)");
-        println!(
-            "  Config: {} iterations, 2 parallel fetches, {}ms each",
-            iterations, fetch_latency_ms
-        );
-
-        let ops = Arc::new(MockOps::new(fetch_latency_ms, fetch_latency_ms));
-        let stats = ops.stats();
-
-        let start = Instant::now();
-
-        for i in 0..iterations {
-            let worker_id = format!("shared-multi-{}", i % 5);
-            let script = Script::new(MULTI_FETCH_HANDLER);
-            let (task, rx) = Event::fetch(make_request());
-
-            execute_pooled(&worker_id, script, ops.clone(), task)
-                .await
-                .unwrap();
-            let _response = rx.await.unwrap();
-
-            if (i + 1) % 5 == 0 {
-                println!("  Completed {}/{}", i + 1, iterations);
-            }
-        }
-
-        print_results("Shared Multi-Fetch", start.elapsed(), iterations, &stats);
-    })
-    .await;
-}
-
-// ============================================================================
 // Thread-Pinned Pool Benchmarks
 // ============================================================================
 
@@ -435,7 +311,13 @@ async fn bench_pinned_simple() {
     let _lock = V8_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     run_in_local(|| async {
-        init_pinned_pool(100, RuntimeLimits::default());
+        init_pinned_pool(PinnedPoolConfig {
+            max_per_thread: 100,
+            max_per_owner: None,
+            max_concurrent_per_isolate: 20,
+            max_cached_contexts: 10,
+            limits: RuntimeLimits::default(),
+        });
 
         let iterations = 30u32;
 
@@ -480,7 +362,13 @@ async fn bench_pinned_with_fetch() {
     let _lock = V8_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     run_in_local(|| async {
-        init_pinned_pool(100, RuntimeLimits::default());
+        init_pinned_pool(PinnedPoolConfig {
+            max_per_thread: 100,
+            max_per_owner: None,
+            max_concurrent_per_isolate: 20,
+            max_cached_contexts: 10,
+            limits: RuntimeLimits::default(),
+        });
 
         let iterations = 20u32;
         let fetch_latency_ms = 20u64;
@@ -529,7 +417,13 @@ async fn bench_pinned_multi_fetch() {
     let _lock = V8_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     run_in_local(|| async {
-        init_pinned_pool(100, RuntimeLimits::default());
+        init_pinned_pool(PinnedPoolConfig {
+            max_per_thread: 100,
+            max_per_owner: None,
+            max_concurrent_per_isolate: 20,
+            max_cached_contexts: 10,
+            limits: RuntimeLimits::default(),
+        });
 
         let iterations = 15u32;
         let fetch_latency_ms = 15u64;
@@ -587,7 +481,7 @@ async fn bench_summary() {
     println!("  This benchmark uses MockOps to simulate real fetch() latency.");
     println!("  It tests HTTP handlers (not just scheduled events).");
     println!();
-    println!("  All architectures now support async fetch() operations!");
+    println!("  Both architectures support async fetch() operations.");
     println!();
     println!("   V8 GLOBAL STATE CONFLICT:");
     println!("  V8 initializes differently for Legacy vs Pool architectures.");
@@ -598,9 +492,6 @@ async fn bench_summary() {
     println!("  Legacy:");
     println!("    cargo test --test realistic_bench bench_legacy -- --nocapture");
     println!();
-    println!("  Shared Pool:");
-    println!("    cargo test --test realistic_bench bench_shared -- --nocapture");
-    println!();
     println!("  Thread-Pinned Pool:");
     println!("    cargo test --test realistic_bench bench_pinned -- --nocapture");
     println!();
@@ -610,19 +501,17 @@ async fn bench_summary() {
     println!("  │ Architecture      │ Simple       │ With fetch() │ vs Legacy   │");
     println!("  ├───────────────────┼──────────────┼──────────────┼─────────────┤");
     println!("  │ Legacy (Worker)   │ ~406 req/s   │ ~39 req/s    │ baseline    │");
-    println!("  │ Shared Pool       │ ~582 req/s   │ ~38 req/s    │ +43% sync   │");
     println!("  │ Thread-Pinned     │ ~651 req/s   │ ~39 req/s    │ +60% sync   │");
     println!("  └───────────────────┴──────────────┴──────────────┴─────────────┘");
     println!();
     println!("  Multi-fetch (2 parallel fetches, 15ms each):");
-    println!("  │ Shared Pool       │ ~49 req/s, 20ms latency  │ parallel  │");
     println!("  │ Thread-Pinned     │ ~48 req/s, 21ms latency  │ parallel  │");
     println!();
     println!("  Key findings:");
-    println!("  - All architectures support async fetch() operations");
-    println!("  - Parallel fetches execute concurrently (15ms each → 20ms total)");
-    println!("  - Pools are 43-60% faster than Legacy for sync workloads");
-    println!("  - With I/O (fetch), all architectures perform similarly (~39 req/s)");
+    println!("  - Both architectures support async fetch() operations");
+    println!("  - Parallel fetches execute concurrently (15ms each -> 20ms total)");
+    println!("  - Thread-Pinned is ~60% faster than Legacy for sync workloads");
+    println!("  - With I/O (fetch), both architectures perform similarly (~39 req/s)");
     println!("  - I/O latency dominates total time when fetch() is used");
     println!("  - Thread-Pinned recommended for production (security + best perf)");
     println!();

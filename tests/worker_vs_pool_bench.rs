@@ -1,4 +1,4 @@
-//! Benchmark comparing Worker (classic) vs Pool (pooled) execution
+//! Benchmark comparing Worker (classic) vs Pinned Pool execution
 //!
 //! Run with: cargo test --test worker_vs_pool_bench -- --nocapture
 
@@ -6,7 +6,9 @@ mod common;
 
 use common::run_in_local;
 use openworkers_core::{DefaultOps, Event, OperationsHandle, RuntimeLimits, Script};
-use openworkers_runtime_v8::{Worker, execute_pooled, init_pool};
+use openworkers_runtime_v8::{
+    PinnedExecuteRequest, PinnedPoolConfig, Worker, execute_pinned, init_pinned_pool,
+};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -86,12 +88,18 @@ async fn bench_worker_warm_start() {
     .await;
 }
 
-/// Benchmark: Pool cold start (first request for each worker_id)
+/// Benchmark: Pinned pool cold start (first request for each worker_id)
 /// Each iteration uses a DIFFERENT worker_id (cache miss)
 #[tokio::test(flavor = "current_thread")]
-async fn bench_pool_cold_start() {
+async fn bench_pinned_cold_start() {
     run_in_local(|| async {
-        init_pool(100, RuntimeLimits::default());
+        init_pinned_pool(PinnedPoolConfig {
+            max_per_thread: 100,
+            max_per_owner: None,
+            max_concurrent_per_isolate: 20,
+            max_cached_contexts: 10,
+            limits: RuntimeLimits::default(),
+        });
 
         let iterations = 20;
         let ops: OperationsHandle = Arc::new(DefaultOps);
@@ -103,16 +111,24 @@ async fn bench_pool_cold_start() {
             let script = Script::new(SIMPLE_SCRIPT);
             let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
-            execute_pooled(&worker_id, script, ops.clone(), task)
-                .await
-                .unwrap();
+            execute_pinned(PinnedExecuteRequest {
+                owner_id: worker_id.clone(),
+                worker_id: worker_id,
+                version: 1,
+                script,
+                ops: ops.clone(),
+                task,
+                on_warm_hit: None,
+            })
+            .await
+            .unwrap();
             rx.await.unwrap();
         }
 
         let elapsed = start.elapsed();
         let avg = elapsed / iterations;
 
-        println!("\n=== Pool Cold Start (new context each time) ===");
+        println!("\n=== Pinned Pool Cold Start (new context each time) ===");
         println!("   Iterations: {}", iterations);
         println!("   Total time: {:?}", elapsed);
         println!("   Average: {:?}", avg);
@@ -124,12 +140,18 @@ async fn bench_pool_cold_start() {
     .await;
 }
 
-/// Benchmark: Pool warm start (same worker_id, reusing cached isolate)
+/// Benchmark: Pinned pool warm start (same worker_id, reusing cached isolate)
 /// All iterations use the SAME worker_id (cache hit)
 #[tokio::test(flavor = "current_thread")]
-async fn bench_pool_warm_start() {
+async fn bench_pinned_warm_start() {
     run_in_local(|| async {
-        init_pool(100, RuntimeLimits::default());
+        init_pinned_pool(PinnedPoolConfig {
+            max_per_thread: 100,
+            max_per_owner: None,
+            max_concurrent_per_isolate: 20,
+            max_cached_contexts: 10,
+            limits: RuntimeLimits::default(),
+        });
 
         let iterations = 100;
         let ops: OperationsHandle = Arc::new(DefaultOps);
@@ -138,9 +160,18 @@ async fn bench_pool_warm_start() {
         {
             let script = Script::new(SIMPLE_SCRIPT);
             let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
-            execute_pooled("warm-worker", script, ops.clone(), task)
-                .await
-                .unwrap();
+
+            execute_pinned(PinnedExecuteRequest {
+                owner_id: "warm-worker".to_string(),
+                worker_id: "warm-worker".to_string(),
+                version: 1,
+                script,
+                ops: ops.clone(),
+                task,
+                on_warm_hit: None,
+            })
+            .await
+            .unwrap();
             rx.await.unwrap();
         }
 
@@ -150,16 +181,24 @@ async fn bench_pool_warm_start() {
             let script = Script::new(SIMPLE_SCRIPT);
             let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
-            execute_pooled("warm-worker", script, ops.clone(), task)
-                .await
-                .unwrap();
+            execute_pinned(PinnedExecuteRequest {
+                owner_id: "warm-worker".to_string(),
+                worker_id: "warm-worker".to_string(),
+                version: 1,
+                script,
+                ops: ops.clone(),
+                task,
+                on_warm_hit: None,
+            })
+            .await
+            .unwrap();
             rx.await.unwrap();
         }
 
         let elapsed = start.elapsed();
         let avg = elapsed / iterations;
 
-        println!("\n=== Pool Warm Start (cached isolate, new context) ===");
+        println!("\n=== Pinned Pool Warm Start (cached isolate, new context) ===");
         println!("   Iterations: {}", iterations);
         println!("   Total time: {:?}", elapsed);
         println!("   Average: {:?}", avg);
@@ -176,22 +215,22 @@ async fn bench_pool_warm_start() {
 async fn bench_comparison_summary() {
     println!("\n");
     println!("================================================================");
-    println!("    Worker vs Pool Performance Comparison                       ");
+    println!("    Worker vs Pinned Pool Performance Comparison                ");
     println!("================================================================");
     println!();
     println!("Run individual benchmarks with:");
     println!("  cargo test --test worker_vs_pool_bench -- --nocapture");
     println!();
     println!("Benchmark scenarios:");
-    println!("  - Worker Cold Start: New isolate + context per request");
-    println!("  - Worker Warm Start: Same isolate, reused for all requests");
-    println!("  - Pool Cold Start:   Isolate from pool, new context per request");
-    println!("  - Pool Warm Start:   Cached isolate (by worker_id), new context");
+    println!("  - Worker Cold Start:  New isolate + context per request");
+    println!("  - Worker Warm Start:  Same isolate, reused for all requests");
+    println!("  - Pinned Cold Start:  Isolate from thread-local pool, new context per request");
+    println!("  - Pinned Warm Start:  Cached isolate (by worker_id), new context");
     println!();
     println!("Expected results:");
     println!("  - Worker Cold Start:  Slowest (few ms, creates new V8 isolate)");
-    println!("  - Worker Warm Start:  Tens of µs (reuses isolate and context)");
-    println!("  - Pool Cold Start:    Tens of µs (isolate ready, creates context)");
-    println!("  - Pool Warm Start:    Sub-µs to few µs (cached isolate, creates context)");
+    println!("  - Worker Warm Start:  Tens of us (reuses isolate and context)");
+    println!("  - Pinned Cold Start:  Tens of us (isolate ready, creates context)");
+    println!("  - Pinned Warm Start:  Sub-us to few us (cached isolate, creates context)");
     println!();
 }

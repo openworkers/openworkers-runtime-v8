@@ -1,13 +1,11 @@
-//! Three Architecture Benchmark - Legacy vs Shared Pool vs Thread-Pinned Pool
+//! Architecture Benchmark - Legacy vs Thread-Pinned Pool
 //!
-//! This benchmark compares the three execution modes in runtime-v8:
+//! This benchmark compares execution modes in runtime-v8:
 //! 1. Legacy (Worker) - New isolate per request
-//! 2. Shared Pool (execute_pooled) - Global mutex-protected LRU cache
-//! 3. Thread-Pinned Pool (execute_pinned) - Thread-local pools, zero contention
+//! 2. Thread-Pinned Pool (execute_pinned) - Thread-local pools, zero contention
 //!
 //! Run with:
 //!   cargo test --test three_arch_bench bench_legacy -- --nocapture --test-threads=1
-//!   cargo test --test three_arch_bench bench_shared -- --nocapture --test-threads=1
 //!   cargo test --test three_arch_bench bench_pinned -- --nocapture --test-threads=1
 
 mod common;
@@ -15,7 +13,7 @@ mod common;
 use common::run_in_local;
 use openworkers_core::{DefaultOps, Event, OperationsHandle, RuntimeLimits, Script};
 use openworkers_runtime_v8::{
-    PinnedExecuteRequest, Worker, execute_pinned, execute_pooled, init_pinned_pool, init_pool,
+    PinnedExecuteRequest, PinnedPoolConfig, Worker, execute_pinned, init_pinned_pool,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -141,142 +139,19 @@ async fn bench_legacy_cpu_bound() {
 }
 
 // ============================================================================
-// Shared Pool Benchmarks (execute_pooled - global mutex LRU cache)
-// ============================================================================
-
-#[tokio::test(flavor = "current_thread")]
-async fn bench_shared_standard() {
-    run_in_local(|| async {
-        init_pool(100, RuntimeLimits::default());
-
-        let iterations = 20u32;
-        let io_delay_ms = 5u64;
-        let ops: OperationsHandle = Arc::new(DefaultOps);
-
-        print_header("Shared Pool (execute_pooled) - Standard Workload");
-        println!(
-            "  Config: {} iterations, {}ms I/O delay, pool_size=100",
-            iterations, io_delay_ms
-        );
-
-        let start = Instant::now();
-
-        for i in 0..iterations {
-            let worker_id = format!("shared-worker-{}", i % 10); // 10 unique workers
-            let script = Script::new(SIMPLE_SCRIPT);
-            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
-
-            execute_pooled(&worker_id, script, ops.clone(), task)
-                .await
-                .unwrap();
-            rx.await.unwrap();
-
-            sleep(Duration::from_millis(io_delay_ms)).await;
-
-            if (i + 1) % 10 == 0 {
-                println!("  Completed {}/{}", i + 1, iterations);
-            }
-        }
-
-        print_results(
-            "Shared Pool",
-            start.elapsed(),
-            iterations,
-            Some(io_delay_ms),
-        );
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn bench_shared_cpu_bound() {
-    run_in_local(|| async {
-        init_pool(100, RuntimeLimits::default());
-
-        let iterations = 30u32;
-        let ops: OperationsHandle = Arc::new(DefaultOps);
-
-        print_header("Shared Pool (execute_pooled) - CPU-Bound (no I/O)");
-        println!(
-            "  Config: {} iterations, no I/O delay, pool_size=100",
-            iterations
-        );
-
-        let start = Instant::now();
-
-        for i in 0..iterations {
-            let worker_id = format!("shared-cpu-{}", i % 10);
-            let script = Script::new(CPU_HEAVY_SCRIPT);
-            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
-
-            execute_pooled(&worker_id, script, ops.clone(), task)
-                .await
-                .unwrap();
-            rx.await.unwrap();
-
-            if (i + 1) % 10 == 0 {
-                println!("  Completed {}/{}", i + 1, iterations);
-            }
-        }
-
-        print_results("Shared Pool", start.elapsed(), iterations, None);
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn bench_shared_warm_cache() {
-    run_in_local(|| async {
-        init_pool(100, RuntimeLimits::default());
-
-        let iterations = 50u32;
-        let ops: OperationsHandle = Arc::new(DefaultOps);
-
-        print_header("Shared Pool (execute_pooled) - Warm Cache (same worker_id)");
-        println!(
-            "  Config: {} iterations, same worker_id (100% cache hit)",
-            iterations
-        );
-
-        // Pre-warm
-        {
-            let script = Script::new(SIMPLE_SCRIPT);
-            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
-            execute_pooled("warm-shared", script, ops.clone(), task)
-                .await
-                .unwrap();
-            rx.await.unwrap();
-        }
-
-        let start = Instant::now();
-
-        for i in 0..iterations {
-            let script = Script::new(SIMPLE_SCRIPT);
-            let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
-
-            execute_pooled("warm-shared", script, ops.clone(), task)
-                .await
-                .unwrap();
-            rx.await.unwrap();
-
-            if (i + 1) % 25 == 0 {
-                println!("  Completed {}/{}", i + 1, iterations);
-            }
-        }
-
-        print_results("Shared Pool (warm)", start.elapsed(), iterations, None);
-    })
-    .await;
-}
-
-// ============================================================================
 // Thread-Pinned Pool Benchmarks (execute_pinned - thread-local, zero contention)
 // ============================================================================
 
 #[tokio::test(flavor = "current_thread")]
 async fn bench_pinned_standard() {
     run_in_local(|| async {
-        init_pinned_pool(100, RuntimeLimits::default());
+        init_pinned_pool(PinnedPoolConfig {
+            max_per_thread: 100,
+            max_per_owner: None,
+            max_concurrent_per_isolate: 20,
+            max_cached_contexts: 10,
+            limits: RuntimeLimits::default(),
+        });
 
         let iterations = 20u32;
         let io_delay_ms = 5u64;
@@ -328,7 +203,13 @@ async fn bench_pinned_standard() {
 #[tokio::test(flavor = "current_thread")]
 async fn bench_pinned_cpu_bound() {
     run_in_local(|| async {
-        init_pinned_pool(100, RuntimeLimits::default());
+        init_pinned_pool(PinnedPoolConfig {
+            max_per_thread: 100,
+            max_per_owner: None,
+            max_concurrent_per_isolate: 20,
+            max_cached_contexts: 10,
+            limits: RuntimeLimits::default(),
+        });
 
         let iterations = 30u32;
         let ops: OperationsHandle = Arc::new(DefaultOps);
@@ -372,7 +253,13 @@ async fn bench_pinned_cpu_bound() {
 #[tokio::test(flavor = "current_thread")]
 async fn bench_pinned_warm_cache() {
     run_in_local(|| async {
-        init_pinned_pool(100, RuntimeLimits::default());
+        init_pinned_pool(PinnedPoolConfig {
+            max_per_thread: 100,
+            max_per_owner: None,
+            max_concurrent_per_isolate: 20,
+            max_cached_contexts: 10,
+            limits: RuntimeLimits::default(),
+        });
 
         let iterations = 50u32;
         let ops: OperationsHandle = Arc::new(DefaultOps);
@@ -448,12 +335,7 @@ async fn bench_summary() {
         "     cargo test --test three_arch_bench bench_legacy -- --nocapture --test-threads=1"
     );
     println!();
-    println!("  2. Shared Pool (execute_pooled - global mutex LRU cache):");
-    println!(
-        "     cargo test --test three_arch_bench bench_shared -- --nocapture --test-threads=1"
-    );
-    println!();
-    println!("  3. Thread-Pinned Pool (execute_pinned - thread-local, zero contention):");
+    println!("  2. Thread-Pinned Pool (execute_pinned - thread-local, zero contention):");
     println!(
         "     cargo test --test three_arch_bench bench_pinned -- --nocapture --test-threads=1"
     );
@@ -463,14 +345,12 @@ async fn bench_summary() {
     println!("  │ Architecture        │ Throughput    │ Notes                                  │");
     println!("  ├─────────────────────┼───────────────┼────────────────────────────────────────┤");
     println!("  │ Legacy (Worker)     │ Slowest       │ Creates new isolate each time (~ms)   │");
-    println!("  │ Shared Pool         │ Faster        │ Reuses isolates, has mutex overhead   │");
     println!("  │ Thread-Pinned Pool  │ Fastest       │ Reuses isolates, no mutex contention  │");
     println!("  │ Any (warm cache)    │ Very fast     │ Same worker_id = cache hit            │");
     println!("  └─────────────────────┴───────────────┴────────────────────────────────────────┘");
     println!();
     println!("  Key insights:");
     println!("  - Thread-Pinned wins in CPU-bound scenarios (no mutex contention)");
-    println!("  - Shared Pool can degrade under high contention (worse than Legacy!)");
     println!("  - Warm cache (same worker_id) is fastest for all pool architectures");
     println!("  - For multi-tenant security, Thread-Pinned with sticky routing is required");
     println!();

@@ -1,18 +1,20 @@
-//! Architecture Benchmark - Legacy Worker vs Shared Pool
+//! Architecture Benchmark - Legacy Worker vs Pinned Pool
 //!
 //! Compares the actual runtime-v8 implementations:
 //! - Legacy: Worker::new_with_ops (new isolate per request)
-//! - Shared Pool: execute_pooled (current pool implementation)
+//! - Pinned Pool: execute_pinned (thread-local pool, zero contention)
 //!
 //! Run with:
 //!   cargo test --test architecture_bench bench_legacy -- --nocapture --test-threads=1
-//!   cargo test --test architecture_bench bench_pool -- --nocapture --test-threads=1
+//!   cargo test --test architecture_bench bench_pinned -- --nocapture --test-threads=1
 
 mod common;
 
 use common::run_in_local;
 use openworkers_core::{DefaultOps, Event, OperationsHandle, RuntimeLimits, Script};
-use openworkers_runtime_v8::{Worker, execute_pooled, init_pool};
+use openworkers_runtime_v8::{
+    PinnedExecuteRequest, PinnedPoolConfig, Worker, execute_pinned, init_pinned_pool,
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -127,23 +129,29 @@ async fn bench_legacy_cpu_bound() {
 }
 
 // ============================================================================
-// Shared Pool Benchmark (execute_pooled - current implementation)
+// Pinned Pool Benchmark (execute_pinned - thread-local, zero contention)
 // ============================================================================
 
 #[tokio::test(flavor = "current_thread")]
-async fn bench_pool_standard() {
+async fn bench_pinned_standard() {
     run_in_local(|| async {
-        init_pool(10, RuntimeLimits::default());
+        init_pinned_pool(PinnedPoolConfig {
+            max_per_thread: 10,
+            max_per_owner: None,
+            max_concurrent_per_isolate: 20,
+            max_cached_contexts: 10,
+            limits: RuntimeLimits::default(),
+        });
 
         let iterations = 20;
         let io_delay_ms = 5u64;
         let ops: OperationsHandle = Arc::new(DefaultOps);
 
         println!("\n╔═══════════════════════════════════════════════════════════════════════╗");
-        println!("║             Shared Pool - Standard Workload                            ║");
+        println!("║             Pinned Pool - Standard Workload                            ║");
         println!("╚═══════════════════════════════════════════════════════════════════════╝");
         println!(
-            "  Iterations: {}, I/O delay: {}ms, Pool size: 10\n",
+            "  Iterations: {}, I/O delay: {}ms, max_per_thread: 10\n",
             iterations, io_delay_ms
         );
 
@@ -154,9 +162,17 @@ async fn bench_pool_standard() {
             let script = Script::new(SIMPLE_SCRIPT);
             let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
-            execute_pooled(&worker_id, script, ops.clone(), task)
-                .await
-                .unwrap();
+            execute_pinned(PinnedExecuteRequest {
+                owner_id: worker_id.clone(),
+                worker_id: worker_id,
+                version: 1,
+                script,
+                ops: ops.clone(),
+                task,
+                on_warm_hit: None,
+            })
+            .await
+            .unwrap();
             rx.await.unwrap();
 
             // Simulate I/O
@@ -187,17 +203,23 @@ async fn bench_pool_standard() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn bench_pool_cpu_bound() {
+async fn bench_pinned_cpu_bound() {
     run_in_local(|| async {
-        init_pool(10, RuntimeLimits::default());
+        init_pinned_pool(PinnedPoolConfig {
+            max_per_thread: 10,
+            max_per_owner: None,
+            max_concurrent_per_isolate: 20,
+            max_cached_contexts: 10,
+            limits: RuntimeLimits::default(),
+        });
 
         let iterations = 30;
         let ops: OperationsHandle = Arc::new(DefaultOps);
 
         println!("\n╔═══════════════════════════════════════════════════════════════════════╗");
-        println!("║             Shared Pool - CPU-bound (no I/O)                           ║");
+        println!("║             Pinned Pool - CPU-bound (no I/O)                           ║");
         println!("╚═══════════════════════════════════════════════════════════════════════╝");
-        println!("  Iterations: {}, Pool size: 10\n", iterations);
+        println!("  Iterations: {}, max_per_thread: 10\n", iterations);
 
         let start = Instant::now();
 
@@ -206,9 +228,17 @@ async fn bench_pool_cpu_bound() {
             let script = Script::new(SIMPLE_SCRIPT);
             let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
-            execute_pooled(&worker_id, script, ops.clone(), task)
-                .await
-                .unwrap();
+            execute_pinned(PinnedExecuteRequest {
+                owner_id: worker_id.clone(),
+                worker_id: worker_id,
+                version: 1,
+                script,
+                ops: ops.clone(),
+                task,
+                on_warm_hit: None,
+            })
+            .await
+            .unwrap();
             rx.await.unwrap();
 
             if (i + 1) % 10 == 0 {
@@ -230,25 +260,40 @@ async fn bench_pool_cpu_bound() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn bench_pool_warm_cache() {
+async fn bench_pinned_warm_cache() {
     run_in_local(|| async {
-        init_pool(10, RuntimeLimits::default());
+        init_pinned_pool(PinnedPoolConfig {
+            max_per_thread: 10,
+            max_per_owner: None,
+            max_concurrent_per_isolate: 20,
+            max_cached_contexts: 10,
+            limits: RuntimeLimits::default(),
+        });
 
         let iterations = 50;
         let ops: OperationsHandle = Arc::new(DefaultOps);
 
         println!("\n╔═══════════════════════════════════════════════════════════════════════╗");
-        println!("║             Shared Pool - Warm Cache (same worker_id)                  ║");
+        println!("║             Pinned Pool - Warm Cache (same worker_id)                  ║");
         println!("╚═══════════════════════════════════════════════════════════════════════╝");
-        println!("  Iterations: {}, Pool size: 10\n", iterations);
+        println!("  Iterations: {}, max_per_thread: 10\n", iterations);
 
         // Pre-warm
         {
             let script = Script::new(SIMPLE_SCRIPT);
             let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
-            execute_pooled("warm-worker", script, ops.clone(), task)
-                .await
-                .unwrap();
+
+            execute_pinned(PinnedExecuteRequest {
+                owner_id: "warm-worker".to_string(),
+                worker_id: "warm-worker".to_string(),
+                version: 1,
+                script,
+                ops: ops.clone(),
+                task,
+                on_warm_hit: None,
+            })
+            .await
+            .unwrap();
             rx.await.unwrap();
         }
 
@@ -259,9 +304,17 @@ async fn bench_pool_warm_cache() {
             let script = Script::new(SIMPLE_SCRIPT);
             let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
 
-            execute_pooled("warm-worker", script, ops.clone(), task)
-                .await
-                .unwrap();
+            execute_pinned(PinnedExecuteRequest {
+                owner_id: "warm-worker".to_string(),
+                worker_id: "warm-worker".to_string(),
+                version: 1,
+                script,
+                ops: ops.clone(),
+                task,
+                on_warm_hit: None,
+            })
+            .await
+            .unwrap();
             rx.await.unwrap();
 
             if (i + 1) % 25 == 0 {
@@ -293,19 +346,21 @@ async fn bench_summary() {
     println!("  Runtime-v8 Architecture Benchmark - Run Instructions");
     println!("════════════════════════════════════════════════════════════════════════════");
     println!();
-    println!("  IMPORTANT: Run Legacy and Pool tests SEPARATELY due to V8 state conflicts.");
+    println!("  IMPORTANT: Run Legacy and Pinned tests SEPARATELY due to V8 state conflicts.");
     println!();
     println!("  Legacy benchmarks (Worker - new isolate per request):");
     println!(
         "    cargo test --test architecture_bench bench_legacy -- --nocapture --test-threads=1"
     );
     println!();
-    println!("  Pool benchmarks (execute_pooled - shared pool):");
-    println!("    cargo test --test architecture_bench bench_pool -- --nocapture --test-threads=1");
+    println!("  Pinned Pool benchmarks (execute_pinned - thread-local pool):");
+    println!(
+        "    cargo test --test architecture_bench bench_pinned -- --nocapture --test-threads=1"
+    );
     println!();
     println!("  Expected results:");
     println!("    - Legacy: ~400-500 req/s (creates new isolate each time)");
-    println!("    - Pool:   ~500-800 req/s (reuses isolates from pool)");
-    println!("    - Pool (warm): ~1000+ req/s (same worker_id = cache hit)");
+    println!("    - Pinned: ~500-800 req/s (reuses isolates from thread-local pool)");
+    println!("    - Pinned (warm): ~1000+ req/s (same worker_id = cache hit)");
     println!();
 }

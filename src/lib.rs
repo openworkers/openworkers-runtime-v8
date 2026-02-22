@@ -4,21 +4,26 @@
 //!
 //! ## Execution Modes
 //!
-//! ### Shared Pool (Recommended for Production)
+//! ### Pinned Pool (Recommended for Production)
 //!
-//! Best for: High-volume production workloads, I/O-bound workers
+//! Thread-local isolate pool with per-owner isolation. Two implementations
+//! selected at compile time via feature flags:
+//!
+//! - **Simple** (default): One request per isolate (exclusive access).
+//!   Best for most workloads.
+//! - **Multiplexed** (`--features multiplexing`): Multiple concurrent requests
+//!   per isolate via `AsyncWaiter` fair queue. Best for high-concurrency,
+//!   I/O-bound workers.
 //!
 //! ```ignore
-//! use openworkers_runtime_v8::{init_pool, execute_pooled};
+//! use openworkers_runtime_v8::{init_pinned_pool, execute_pinned, PinnedPoolConfig, PinnedExecuteRequest};
 //!
 //! // Initialize pool once at startup
-//! init_pool(1000, limits);
+//! init_pinned_pool(PinnedPoolConfig { .. });
 //!
-//! // Execute worker (handles everything internally)
-//! execute_pooled("worker-id", script, ops, event).await?;
+//! // Execute worker
+//! execute_pinned(PinnedExecuteRequest { .. }).await?;
 //! ```
-//!
-//! Performance: Sub-µs warm start, tens of µs cold start (with snapshot)
 //!
 //! ### Worker (Maximum Isolation)
 //!
@@ -33,25 +38,27 @@
 //!
 //! Performance: Few ms per request (creates new isolate)
 
+pub mod async_waiter;
 pub mod event_loop;
 pub mod execution_context;
 pub mod execution_helpers;
 pub mod gc;
 pub mod icudata;
-pub mod isolate_pool;
 pub mod locker_managed_isolate;
 pub mod platform;
-pub mod pooled_execution;
+pub mod pool_common;
+pub mod request_context;
 pub mod runtime;
 pub mod security;
-pub mod shared_isolate;
 pub mod snapshot;
-pub mod thread_pinned_pool;
 pub mod v8_helpers;
 pub mod worker;
 pub mod worker_future;
 
+mod pool;
+
 // Core API
+pub use async_waiter::AsyncWaiter;
 pub use execution_context::ExecutionContext;
 pub use gc::{
     DeferredDestructionQueue, ExternalMemoryGuard, GcTraceable, JsLock, JsLockRef, Tracked,
@@ -60,19 +67,15 @@ pub use gc::{
 
 // Re-export derive macro
 pub use gc_derive::GcTraceable as DeriveGcTraceable;
-pub use isolate_pool::{IsolatePool, PoolStats, get_pool_stats, init_pool};
 pub use locker_managed_isolate::LockerManagedIsolate;
-pub use pooled_execution::execute_pooled;
-pub use runtime::Runtime;
-pub use shared_isolate::SharedIsolate;
-pub use thread_pinned_pool::{
-    DEFAULT_QUEUE_SIZE, DEFAULT_QUEUE_TIMEOUT_MS, LocalPoolStats, PinnedExecuteRequest,
-    PinnedPoolConfig, PinnedPoolStats, QUEUE_FULL_ERROR, QUEUE_TIMEOUT_ERROR, WarmHitCallback,
-    execute_pinned, get_local_pool_stats, get_pinned_pool_stats, init_pinned_pool,
-    init_pinned_pool_full, init_pinned_pool_with_owner_limit,
+pub use pool_common::{
+    LocalPoolStats, PinnedExecuteRequest, PinnedPoolConfig, PinnedPoolStats, WarmHitCallback,
 };
+pub use runtime::Runtime;
 pub use worker::Worker;
 pub use worker_future::WorkerFuture;
+
+pub use pool::{execute_pinned, get_local_pool_stats, get_pinned_pool_stats, init_pinned_pool};
 
 // Snapshot & Code Cache API
 pub use snapshot::{

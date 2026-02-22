@@ -1,42 +1,91 @@
-//! Integration test: Execute real worker with isolate pool
+//! Integration test: Execute worker with pinned pool
 
 mod common;
 
 use common::run_in_local;
 use openworkers_core::{DefaultOps, Event, OperationsHandle, RuntimeLimits, Script};
-use openworkers_runtime_v8::{get_pool_stats, init_pool};
+use openworkers_runtime_v8::{
+    PinnedExecuteRequest, PinnedPoolConfig, execute_pinned, get_pinned_pool_stats, init_pinned_pool,
+};
 use std::sync::Arc;
 
-#[tokio::test]
-async fn test_pool_initialization() {
-    // Initialize pool
-    init_pool(10, RuntimeLimits::default());
+#[tokio::test(flavor = "current_thread")]
+async fn test_pinned_pool_initialization() {
+    run_in_local(|| async {
+        // Initialize pinned pool
+        init_pinned_pool(PinnedPoolConfig {
+            max_per_thread: 10,
+            max_per_owner: None,
+            max_concurrent_per_isolate: 20,
+            max_cached_contexts: 10,
+            limits: RuntimeLimits::default(),
+        });
 
-    // Get stats
-    let stats = get_pool_stats().await;
+        // Get stats (counters are global, so other parallel tests may have incremented them)
+        let stats = get_pinned_pool_stats();
 
-    assert_eq!(stats.total, 10);
-    // Note: cached count may vary depending on test execution order (pool is global)
+        // Just verify stats are accessible and hit_rate is sane
+        assert!(stats.hit_rate >= 0.0 && stats.hit_rate <= 1.0);
 
-    println!("Pool initialized: {:?}", stats);
-}
-
-#[tokio::test]
-async fn test_pool_stats_after_use() {
-    init_pool(10, RuntimeLimits::default()); // Same as first test (pool is global)
-
-    // TODO: Once execute_pooled is implemented, this will actually execute
-    // For now just check stats
-    let stats = get_pool_stats().await;
-
-    assert_eq!(stats.capacity, 10);
-    println!("Pool capacity: {}", stats.capacity);
+        println!("Pinned pool initialized: {:?}", stats);
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn test_execute_pooled_simple() {
+async fn test_pinned_pool_stats_after_use() {
     run_in_local(|| async {
-        init_pool(10, RuntimeLimits::default());
+        init_pinned_pool(PinnedPoolConfig {
+            max_per_thread: 10,
+            max_per_owner: None,
+            max_concurrent_per_isolate: 20,
+            max_cached_contexts: 10,
+            limits: RuntimeLimits::default(),
+        });
+
+        let ops: OperationsHandle = Arc::new(DefaultOps);
+
+        // Execute a worker to generate some stats
+        let code = r#"
+            addEventListener('scheduled', event => {
+                console.log('Scheduled event handled!');
+            });
+        "#;
+
+        let script = Script::new(code);
+        let (task, rx) = Event::from_schedule("test-stats".to_string(), 1000);
+
+        execute_pinned(PinnedExecuteRequest {
+            owner_id: "test-owner".to_string(),
+            worker_id: "test-worker".to_string(),
+            version: 1,
+            script,
+            ops: ops.clone(),
+            task,
+            on_warm_hit: None,
+        })
+        .await
+        .unwrap();
+        rx.await.unwrap();
+
+        let stats = get_pinned_pool_stats();
+
+        assert!(stats.total_requests > 0);
+        println!("Pinned pool stats after use: {:?}", stats);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn test_execute_pinned_simple() {
+    run_in_local(|| async {
+        init_pinned_pool(PinnedPoolConfig {
+            max_per_thread: 10,
+            max_per_owner: None,
+            max_concurrent_per_isolate: 20,
+            max_cached_contexts: 10,
+            limits: RuntimeLimits::default(),
+        });
 
         // Create a simple worker script that responds to scheduled events
         let code = r#"
@@ -48,27 +97,36 @@ async fn test_execute_pooled_simple() {
         let script = Script::new(code);
 
         // Create a scheduled task
-        let (task, _rx) = Event::from_schedule("test-pooled".to_string(), 1000);
+        let (task, _rx) = Event::from_schedule("test-pinned".to_string(), 1000);
 
         // Create operations handle (DefaultOps for testing)
         let ops: OperationsHandle = Arc::new(DefaultOps);
 
         // Execute the worker
-        let result =
-            openworkers_runtime_v8::execute_pooled("test-worker-1", script, ops, task).await;
+        let result = execute_pinned(PinnedExecuteRequest {
+            owner_id: "test-owner-1".to_string(),
+            worker_id: "test-worker-1".to_string(),
+            version: 1,
+            script,
+            ops,
+            task,
+            on_warm_hit: None,
+        })
+        .await;
 
         // Should succeed
         assert!(
             result.is_ok(),
-            "Pooled execution should succeed: {:?}",
+            "Pinned execution should succeed: {:?}",
             result
         );
 
-        // Check that the worker is now cached
-        let stats = get_pool_stats().await;
-        assert_eq!(stats.cached, 1);
+        // Check stats reflect usage
+        let stats = get_pinned_pool_stats();
 
-        println!("Pooled execution test passed!");
+        assert!(stats.total_requests > 0);
+
+        println!("Pinned execution test passed!");
     })
     .await;
 }

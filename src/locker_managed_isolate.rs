@@ -3,7 +3,7 @@
 //! This module provides a wrapper around v8::UnenteredIsolate that is designed
 //! for use in multi-threaded isolate pools with v8::Locker.
 //!
-//! Unlike SharedIsolate which uses OwnedIsolate (auto-enter), LockerManagedIsolate
+//! Unlike Worker's Runtime which uses OwnedIsolate (auto-enter), LockerManagedIsolate
 //! uses UnenteredIsolate and requires explicit locking via v8::Locker.
 
 use std::sync::Arc;

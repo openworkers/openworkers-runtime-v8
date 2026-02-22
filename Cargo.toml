@@ -3,7 +3,7 @@ members = ["gc-derive"]
 
 [package]
 name = "openworkers-runtime-v8"
-version = "0.13.5"
+version = "0.13.6"
 edition = "2024"
 license = "MIT"
 
@@ -16,6 +16,9 @@ sandbox = ["v8/v8_enable_sandbox", "serde_v8/v8_enable_sandbox"]
 # V8's SharedHeapDeserializer::DeserializeStringTable not being thread-safe.
 # Code cache (always enabled) is the safe alternative (skips parse+compile only).
 unsafe-worker-snapshot = []
+# Multiplexed isolate pool: multiple concurrent requests per isolate via Locker + AsyncWaiter.
+# Without this feature, the simple pool is used (1 request per isolate, no Locker).
+multiplexing = []
 
 [dependencies]
 
@@ -26,7 +29,7 @@ gc-derive = { package = "openworkers-runtime-v8-gc-derive", path = "gc-derive" }
 openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.13.1" }
 
 # V8 JavaScript engine (fork with UnenteredIsolate + Locker support for pooling)
-v8 = { package = "openworkers-v8", version = "145" }
+v8 = { package = "openworkers-v8", version = "145.0.2" }
 
 # Async runtime
 tokio = { version = "1.49.0", features = ["full"] }
@@ -52,9 +55,6 @@ bytes = { version = "1.11", features = ["serde"] }
 ring = "0.17"
 uuid = { version = "1", features = ["v4"] }
 
-# LRU cache for isolate pool
-lru = "0.16.3"
-
 # CPU time measurement (Unix only)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.180"
@@ -70,7 +70,3 @@ tokio-stream = "0.1"
 ntest = "0.9.5"
 criterion = { version = "0.8", features = ["async_tokio"] }
 rand = "0.9"
-
-[[bench]]
-name = "isolate_pool_bench"
-harness = false

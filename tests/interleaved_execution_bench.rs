@@ -10,7 +10,9 @@ mod common;
 
 use common::run_in_local;
 use openworkers_core::{DefaultOps, Event, OperationsHandle, RuntimeLimits, Script};
-use openworkers_runtime_v8::{Worker, execute_pooled, init_pool};
+use openworkers_runtime_v8::{
+    PinnedExecuteRequest, PinnedPoolConfig, Worker, execute_pinned, init_pinned_pool,
+};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -101,7 +103,13 @@ async fn bench_sequential_workers_with_io() {
 #[tokio::test(flavor = "current_thread")]
 async fn bench_concurrent_pool_with_io() {
     run_in_local(|| async {
-        init_pool(10, RuntimeLimits::default());
+        init_pinned_pool(PinnedPoolConfig {
+            max_per_thread: 10,
+            max_per_owner: None,
+            max_concurrent_per_isolate: 20,
+            max_cached_contexts: 10,
+            limits: RuntimeLimits::default(),
+        });
 
         let num_requests = 10;
         let io_delay_ms = 50; // Simulated network latency
@@ -125,7 +133,17 @@ async fn bench_concurrent_pool_with_io() {
                 // Execute JS using pool
                 let script = Script::new(SCHEDULED_SCRIPT);
                 let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
-                execute_pooled(&worker_id, script, ops, task).await.unwrap();
+                execute_pinned(PinnedExecuteRequest {
+                    owner_id: worker_id.clone(),
+                    worker_id,
+                    version: 1,
+                    script,
+                    ops,
+                    task,
+                    on_warm_hit: None,
+                })
+                .await
+                .unwrap();
                 rx.await.unwrap();
 
                 // Simulate network I/O
@@ -179,7 +197,13 @@ async fn bench_concurrent_pool_with_io() {
 #[tokio::test(flavor = "current_thread")]
 async fn bench_high_concurrency_pool() {
     run_in_local(|| async {
-        init_pool(5, RuntimeLimits::default()); // Only 5 isolates
+        init_pinned_pool(PinnedPoolConfig {
+            max_per_thread: 5,
+            max_per_owner: None,
+            max_concurrent_per_isolate: 20,
+            max_cached_contexts: 10,
+            limits: RuntimeLimits::default(),
+        });
 
         let num_requests = 50;
         let io_delay_ms = 20;
@@ -205,7 +229,17 @@ async fn bench_high_concurrency_pool() {
                 // Execute JS
                 let script = Script::new(SCHEDULED_SCRIPT);
                 let (task, rx) = Event::from_schedule("bench".to_string(), 1000);
-                execute_pooled(&worker_id, script, ops, task).await.unwrap();
+                execute_pinned(PinnedExecuteRequest {
+                    owner_id: worker_id.clone(),
+                    worker_id,
+                    version: 1,
+                    script,
+                    ops,
+                    task,
+                    on_warm_hit: None,
+                })
+                .await
+                .unwrap();
                 rx.await.unwrap();
 
                 // Simulate I/O

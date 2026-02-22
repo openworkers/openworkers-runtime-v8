@@ -1,10 +1,10 @@
 //! Execution context - a disposable V8 context with its own event loop
 //!
 //! Each ExecutionContext represents one worker script execution. It creates
-//! a fresh V8 Context within an existing SharedIsolate, providing complete
-//! isolation from other executions.
+//! a fresh V8 Context within an existing isolate (from the thread-pinned pool),
+//! providing complete isolation from other executions.
 //!
-//! The context is cheap to create (tens of µs) compared to an isolate (few ms without snapshot).
+//! The context is cheap to create (tens of us) compared to an isolate (few ms without snapshot).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -14,94 +14,36 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Notify, mpsc};
 use v8;
 
+use crate::LockerManagedIsolate;
+use crate::async_waiter::AsyncWaiter;
 use crate::execution_helpers::{
     AbortConfig, EventLoopExit, check_exit_condition, get_completion_state, get_response_stream_id,
     read_response_object, signal_client_disconnect, trigger_fetch_handler,
 };
+use crate::request_context::RequestContext;
 use crate::runtime::stream_manager;
-use crate::runtime::{CallbackId, CallbackMessage, SchedulerMessage};
 use crate::runtime::{bindings, crypto, streams, text_encoding};
 use crate::security::{CpuEnforcer, TimeoutGuard};
-use crate::shared_isolate::SharedIsolate;
 use openworkers_core::{
     Event, HttpResponse, OperationsHandle, RequestBody, ResponseBody, RuntimeLimits, Script,
     TerminationReason, WorkerCode,
 };
 
-/// RAII guard that enters/exits a V8 isolate around synchronous V8 work blocks.
-///
-/// When multiple tasks interleave on the same thread (via `spawn_local`),
-/// each holding a `v8::Locker` for a different isolate, the thread-local
-/// "current isolate" (`Isolate::GetCurrent()`) can point to the wrong isolate
-/// after a yield/resume.
-///
-/// This guard pushes our isolate onto V8's per-isolate entry stack on creation
-/// (making it `GetCurrent()`) and pops it on drop. V8's entry stack is per-isolate,
-/// so enter/exit on isolate X doesn't interfere with isolate Y's stack.
-///
-/// Must wrap every block that creates `HandleScope`/`ContextScope`, since
-/// `ContextScope::new` checks `GetCurrent() == isolate`.
-struct IsolateGuard {
-    isolate: *mut v8::OwnedIsolate,
-}
-
-impl IsolateGuard {
-    /// Enter the isolate (push onto its per-thread entry stack, set thread-local).
-    ///
-    /// # Safety
-    /// The isolate pointer must be valid for the lifetime of this guard.
-    /// The guard must be dropped before any async yield point.
-    #[inline]
-    unsafe fn new(isolate: *mut v8::OwnedIsolate) -> Self {
-        unsafe { (*isolate).enter() };
-        Self { isolate }
-    }
-}
-
-impl Drop for IsolateGuard {
-    #[inline]
-    fn drop(&mut self) {
-        unsafe {
-            (*self.isolate).exit();
-        }
-    }
-}
-
 /// A disposable execution context for running a worker script
 ///
 /// This includes:
-/// - A fresh V8 Context (isolated global scope)
-/// - Event loop infrastructure (channels, callbacks)
-/// - Worker script loaded and ready to execute
+/// - Per-isolate state: isolate pointer, platform, limits, memory tracking
+/// - Per-request state (via RequestContext): V8 Context, event loop, callbacks
 pub struct ExecutionContext {
     /// The shared isolate this context belongs to
     /// Note: We DON'T own the isolate, just borrow it mutably
     isolate: *mut v8::OwnedIsolate,
 
-    /// The V8 context for this execution
-    pub context: v8::Global<v8::Context>,
-
-    /// Channels for async operations
-    pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    pub callback_rx: mpsc::UnboundedReceiver<CallbackMessage>,
-
-    /// Callback storage (Rc/RefCell since V8 types aren't thread-safe)
-    pub fetch_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
-    pub fetch_error_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
-    pub stream_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
-    pub next_callback_id: Rc<RefCell<CallbackId>>,
-
-    /// Fetch response channel
-    pub fetch_response_tx: Rc<RefCell<Option<tokio::sync::oneshot::Sender<String>>>>,
-
-    /// Stream manager
-    pub stream_manager: Arc<stream_manager::StreamManager>,
-
-    /// Event loop handle
-    pub event_loop_handle: tokio::task::JoinHandle<()>,
-
-    /// Callback notification
-    pub callback_notify: Arc<Notify>,
+    /// Pointer to the LockerManagedIsolate for on-demand Locker creation.
+    /// Non-null for both pool modes (simple and multiplexed).
+    /// Null only for the Worker path (OwnedIsolate, auto-entered).
+    /// When non-null, await_event_loop acquires/releases V8 locker per poll cycle.
+    pub(crate) lmi_ptr: *mut LockerManagedIsolate,
 
     /// Platform reference (from shared isolate)
     pub platform: &'static v8::SharedRef<v8::Platform>,
@@ -112,14 +54,16 @@ pub struct ExecutionContext {
     /// Memory limit flag (shared with isolate)
     pub memory_limit_hit: Arc<AtomicBool>,
 
-    /// Abort flag
-    pub aborted: Arc<AtomicBool>,
+    /// Per-request state (V8 context, channels, callbacks, streams)
+    pub request: RequestContext,
+
+    /// Fair FIFO queue for V8 Locker when multiplexing (None for simple pool path)
+    pub(crate) async_waiter: Option<Arc<AsyncWaiter>>,
 }
 
 impl ExecutionContext {
-    /// Create a new execution context with a pooled isolate (locked via v8::Locker)
+    /// Create a new execution context with a pooled isolate.
     ///
-    /// This variant works with isolates from the IsolatePool.
     /// The isolate must already be locked with v8::Locker before calling this method.
     ///
     /// # Arguments
@@ -130,8 +74,10 @@ impl ExecutionContext {
     /// * `memory_limit_hit` - Memory limit tracking flag
     /// * `script` - Worker script to load
     /// * `ops` - Operations handle for async ops
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_pooled_isolate(
         isolate: &mut v8::Isolate,
+        lmi_ptr: *mut LockerManagedIsolate,
         use_snapshot: bool,
         platform: &'static v8::SharedRef<v8::Platform>,
         limits: RuntimeLimits,
@@ -158,7 +104,10 @@ impl ExecutionContext {
         let context = {
             use std::pin::pin;
 
-            // Create HandleScope with the mutable isolate reference
+            // SAFETY: IsolateScope and HandleScope both need &mut Isolate from the same source.
+            // This is the same pattern used in evaluate() (line 535).
+            let isolate_ptr = isolate as *mut v8::Isolate;
+            let _isolate_scope = unsafe { v8::IsolateScope::new(&mut *isolate_ptr) };
             let scope = pin!(v8::HandleScope::new(isolate));
             let mut scope = scope.init();
             let context = v8::Context::new(&scope, Default::default());
@@ -249,8 +198,7 @@ impl ExecutionContext {
         // 3. v8::Isolate and v8::OwnedIsolate have same memory layout
         let isolate_ptr = isolate as *mut v8::Isolate as *mut v8::OwnedIsolate;
 
-        Ok(Self {
-            isolate: isolate_ptr,
+        let request = RequestContext {
             context,
             scheduler_tx,
             callback_rx,
@@ -262,146 +210,51 @@ impl ExecutionContext {
             fetch_response_tx,
             stream_manager,
             event_loop_handle,
+            aborted: Arc::new(AtomicBool::new(false)),
+        };
+
+        Ok(Self {
+            isolate: isolate_ptr,
+            lmi_ptr,
             platform,
             limits,
             memory_limit_hit,
-            aborted: Arc::new(AtomicBool::new(false)),
+            request,
+            async_waiter: None,
         })
     }
 
-    /// Create a new execution context within a shared isolate
+    /// Reconstruct an ExecutionContext from a cached RequestContext (warm hit path).
     ///
-    /// This is relatively cheap (tens of µs) compared to creating an isolate.
+    /// Used by `execute_pinned` to wrap a cached RequestContext with fresh
+    /// per-isolate metadata for the next request.
+    pub(crate) fn from_cached(
+        isolate: *mut v8::OwnedIsolate,
+        lmi_ptr: *mut LockerManagedIsolate,
+        platform: &'static v8::SharedRef<v8::Platform>,
+        limits: RuntimeLimits,
+        memory_limit_hit: Arc<AtomicBool>,
+        request: RequestContext,
+        async_waiter: Option<Arc<AsyncWaiter>>,
+    ) -> Self {
+        Self {
+            isolate,
+            lmi_ptr,
+            platform,
+            limits,
+            memory_limit_hit,
+            request,
+            async_waiter,
+        }
+    }
+
+    /// Consume this ExecutionContext, returning the RequestContext and isolate pointer.
     ///
-    /// # Safety
-    /// The SharedIsolate must remain valid for the lifetime of this ExecutionContext.
-    /// The ExecutionContext must be dropped before the SharedIsolate is released.
-    pub fn new(
-        shared_isolate: &mut SharedIsolate,
-        script: Script,
-        ops: OperationsHandle,
-    ) -> Result<Self, TerminationReason> {
-        // Create channels for this context
-        let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel();
-        let (callback_tx, callback_rx) = mpsc::unbounded_channel();
-        let callback_notify = Arc::new(Notify::new());
-
-        let fetch_callbacks = Rc::new(RefCell::new(HashMap::new()));
-        let fetch_error_callbacks = Rc::new(RefCell::new(HashMap::new()));
-        let stream_callbacks = Rc::new(RefCell::new(HashMap::new()));
-        let next_callback_id = Rc::new(RefCell::new(1));
-        let fetch_response_tx = Rc::new(RefCell::new(None));
-        let stream_manager = Arc::new(stream_manager::StreamManager::new());
-
-        // Create log callback that bypasses scheduler (calls ops.handle_log directly)
-        let log_callback = bindings::log_callback_from_ops(&ops);
-
-        // Create NEW context in the shared isolate
-        let context = {
-            use std::pin::pin;
-            let scope = pin!(v8::HandleScope::new(&mut shared_isolate.isolate));
-            let mut scope = scope.init();
-            let context = v8::Context::new(&scope, Default::default());
-            let scope = &mut v8::ContextScope::new(&mut scope, context);
-
-            // Setup global aliases (self, global) for compatibility
-            bindings::setup_global_aliases(scope);
-
-            // Always setup native bindings (not in snapshot)
-            bindings::setup_console(scope, log_callback.clone());
-            bindings::setup_performance(scope);
-            bindings::setup_timers(scope, scheduler_tx.clone());
-            bindings::setup_fetch_helpers(scope); // Must be before setup_fetch
-            bindings::setup_fetch(
-                scope,
-                scheduler_tx.clone(),
-                fetch_callbacks.clone(),
-                fetch_error_callbacks.clone(),
-                next_callback_id.clone(),
-            );
-            bindings::setup_stream_ops(
-                scope,
-                scheduler_tx.clone(),
-                stream_callbacks.clone(),
-                next_callback_id.clone(),
-            );
-            bindings::setup_response_stream_ops(scope, stream_manager.clone());
-            crypto::setup_crypto(scope);
-
-            // Only setup pure JS APIs if no snapshot (they're in the snapshot)
-            if !shared_isolate.use_snapshot {
-                text_encoding::setup_text_encoding(scope);
-                streams::setup_readable_stream(scope);
-                bindings::setup_blob(scope);
-                bindings::setup_form_data(scope);
-                bindings::setup_abort_controller(scope);
-                bindings::setup_structured_clone(scope);
-                bindings::setup_base64(scope);
-                bindings::setup_url_search_params(scope);
-                bindings::setup_url(scope);
-                bindings::setup_headers(scope);
-                bindings::setup_request(scope);
-                bindings::setup_response(scope);
-            }
-
-            // Security: Remove SharedArrayBuffer and Atomics (Spectre mitigations)
-            // Must be done at context creation, not in snapshot (breaks V8 bootstrapping)
-            bindings::setup_security_restrictions(scope);
-
-            v8::Global::new(scope.as_ref(), context)
-        };
-
-        // Setup addEventListener
-        Self::setup_event_listener(&mut shared_isolate.isolate, &context)?;
-
-        // Setup environment variables and bindings
-        Self::setup_env(
-            &mut shared_isolate.isolate,
-            &context,
-            &script.env,
-            &script.bindings,
-        )?;
-
-        // Evaluate user script
-        Self::evaluate_script(&mut shared_isolate.isolate, &context, &script.code)?;
-
-        // Setup ES Modules handler if `export default { fetch }` is used
-        Self::setup_es_modules_handler(&mut shared_isolate.isolate, &context)?;
-
-        // Start event loop in background (with optional Operations handle)
-        // Clone before moving into the async block
-        let event_loop_stream_manager = stream_manager.clone();
-        let event_loop_callback_notify = callback_notify.clone();
-
-        let event_loop_handle = tokio::task::spawn_local(async move {
-            crate::runtime::run_event_loop(
-                scheduler_rx,
-                callback_tx,
-                event_loop_callback_notify,
-                event_loop_stream_manager,
-                ops,
-            )
-            .await;
-        });
-
-        Ok(Self {
-            isolate: &mut shared_isolate.isolate as *mut v8::OwnedIsolate,
-            context,
-            scheduler_tx,
-            callback_rx,
-            fetch_callbacks,
-            fetch_error_callbacks,
-            stream_callbacks,
-            next_callback_id,
-            fetch_response_tx,
-            stream_manager,
-            event_loop_handle,
-            callback_notify,
-            platform: shared_isolate.platform,
-            limits: shared_isolate.limits.clone(),
-            memory_limit_hit: shared_isolate.memory_limit_hit.clone(),
-            aborted: Arc::new(AtomicBool::new(false)),
-        })
+    /// Used by `execute_pinned` to save the RequestContext back to the cache
+    /// without aborting the event loop. The remaining EC fields (raw pointers,
+    /// static refs, Arcs) are dropped normally.
+    pub(crate) fn into_parts(self) -> (RequestContext, *mut v8::OwnedIsolate) {
+        (self.request, self.isolate)
     }
 
     /// Helper: Setup addEventListener in the context
@@ -440,6 +293,10 @@ impl ExecutionContext {
         code: &WorkerCode,
     ) -> Result<(), TerminationReason> {
         use std::pin::pin;
+
+        // SAFETY: IsolateScope needs &mut Isolate, same source as HandleScope below.
+        let isolate_ptr = isolate as *mut v8::Isolate;
+        let _isolate_scope = unsafe { v8::IsolateScope::new(&mut *isolate_ptr) };
 
         match code {
             WorkerCode::JavaScript(js) => {
@@ -571,11 +428,11 @@ impl ExecutionContext {
         // is valid for the lifetime of this ExecutionContext.
         match code {
             WorkerCode::JavaScript(js) => unsafe {
-                let _guard = IsolateGuard::new(self.isolate);
                 let isolate = &mut *self.isolate;
+                let _scope = v8::IsolateScope::new(isolate);
                 let scope = pin!(v8::HandleScope::new(isolate));
                 let mut scope = scope.init();
-                let context = v8::Local::new(&scope, &self.context);
+                let context = v8::Local::new(&scope, &self.request.context);
                 let scope = &mut v8::ContextScope::new(&mut scope, context);
 
                 let source = v8::String::new(scope, js)
@@ -595,11 +452,11 @@ impl ExecutionContext {
                     .ok_or("Failed to unpack code cache bundle")?;
 
                 unsafe {
-                    let _guard = IsolateGuard::new(self.isolate);
                     let isolate = &mut *self.isolate;
+                    let _scope = v8::IsolateScope::new(isolate);
                     let scope = pin!(v8::HandleScope::new(isolate));
                     let mut scope = scope.init();
-                    let context = v8::Local::new(&scope, &self.context);
+                    let context = v8::Local::new(&scope, &self.request.context);
                     let scope = &mut v8::ContextScope::new(&mut scope, context);
 
                     let code_str = v8::String::new(scope, source)
@@ -642,7 +499,7 @@ impl ExecutionContext {
     /// use WorkerFuture which polls the channel with a waker.
     pub fn process_callbacks(&mut self) {
         // Process our custom callbacks (timers, fetch, etc.)
-        while let Ok(msg) = self.callback_rx.try_recv() {
+        while let Ok(msg) = self.request.callback_rx.try_recv() {
             self.process_single_callback(msg);
         }
 
@@ -662,13 +519,29 @@ impl ExecutionContext {
         // Get callback data before entering V8 scope
         let (fetch_callback, fetch_error_callback) = match &msg {
             CallbackMessage::FetchError(callback_id, _) => {
-                let cb1 = self.fetch_callbacks.borrow_mut().remove(callback_id);
-                let cb2 = self.fetch_error_callbacks.borrow_mut().remove(callback_id);
+                let cb1 = self
+                    .request
+                    .fetch_callbacks
+                    .borrow_mut()
+                    .remove(callback_id);
+                let cb2 = self
+                    .request
+                    .fetch_error_callbacks
+                    .borrow_mut()
+                    .remove(callback_id);
                 (cb1, cb2)
             }
             CallbackMessage::FetchStreamingSuccess(callback_id, _, _) => {
-                let cb1 = self.fetch_callbacks.borrow_mut().remove(callback_id);
-                let cb2 = self.fetch_error_callbacks.borrow_mut().remove(callback_id);
+                let cb1 = self
+                    .request
+                    .fetch_callbacks
+                    .borrow_mut()
+                    .remove(callback_id);
+                let cb2 = self
+                    .request
+                    .fetch_error_callbacks
+                    .borrow_mut()
+                    .remove(callback_id);
                 (cb1, cb2)
             }
             _ => (None, None),
@@ -676,11 +549,11 @@ impl ExecutionContext {
 
         // Now enter V8 scope
         unsafe {
-            let _guard = IsolateGuard::new(self.isolate);
             let isolate = &mut *self.isolate;
+            let _scope = v8::IsolateScope::new(isolate);
             let scope = pin!(v8::HandleScope::new(isolate));
             let mut scope = scope.init();
-            let context = v8::Local::new(&scope, &self.context);
+            let context = v8::Local::new(&scope, &self.request.context);
             let scope = &mut v8::ContextScope::new(&mut scope, context);
 
             match msg {
@@ -724,7 +597,7 @@ impl ExecutionContext {
                     use crate::runtime::callback_handlers;
 
                     let callback_opt = {
-                        let mut cbs = self.stream_callbacks.borrow_mut();
+                        let mut cbs = self.request.stream_callbacks.borrow_mut();
                         cbs.remove(&callback_id)
                     };
 
@@ -749,7 +622,7 @@ impl ExecutionContext {
                                 scope,
                                 result_obj,
                                 storage_result,
-                                &self.stream_manager,
+                                &self.request.stream_manager,
                             );
                             (None, Some(result_obj.into()))
                         };
@@ -757,8 +630,8 @@ impl ExecutionContext {
                     dispatch_binding_callbacks(
                         scope,
                         callback_id,
-                        &self.fetch_callbacks,
-                        &self.fetch_error_callbacks,
+                        &self.request.fetch_callbacks,
+                        &self.request.fetch_error_callbacks,
                         error_msg,
                         result_value,
                     );
@@ -778,8 +651,8 @@ impl ExecutionContext {
                     dispatch_binding_callbacks(
                         scope,
                         callback_id,
-                        &self.fetch_callbacks,
-                        &self.fetch_error_callbacks,
+                        &self.request.fetch_callbacks,
+                        &self.request.fetch_error_callbacks,
                         error_msg,
                         result_value,
                     );
@@ -804,8 +677,8 @@ impl ExecutionContext {
                     dispatch_binding_callbacks(
                         scope,
                         callback_id,
-                        &self.fetch_callbacks,
-                        &self.fetch_error_callbacks,
+                        &self.request.fetch_callbacks,
+                        &self.request.fetch_error_callbacks,
                         error_msg,
                         result_value,
                     );
@@ -829,7 +702,6 @@ impl ExecutionContext {
 
         // Pump V8 platform message loop (GC, etc.)
         unsafe {
-            let _guard = IsolateGuard::new(self.isolate);
             let isolate = &mut *self.isolate;
 
             while v8::Platform::pump_message_loop(self.platform, isolate, false) {
@@ -840,11 +712,11 @@ impl ExecutionContext {
         // Process microtasks (Promises, async/await) - CRITICAL for Promise resolution!
         // Without this, .then() handlers and async/await continuations never execute.
         unsafe {
-            let _guard = IsolateGuard::new(self.isolate);
             let isolate = &mut *self.isolate;
+            let _scope = v8::IsolateScope::new(isolate);
             let scope = pin!(v8::HandleScope::new(isolate));
             let mut scope = scope.init();
-            let context = v8::Local::new(&scope, &self.context);
+            let context = v8::Local::new(&scope, &self.request.context);
             let scope = &mut v8::ContextScope::new(&mut scope, context);
 
             let tc_scope = pin!(v8::TryCatch::new(scope));
@@ -878,11 +750,11 @@ impl ExecutionContext {
         use std::pin::pin;
 
         unsafe {
-            let _guard = IsolateGuard::new(self.isolate);
             let isolate = &mut *self.isolate;
+            let _scope = v8::IsolateScope::new(isolate);
             let scope = pin!(v8::HandleScope::new(isolate));
             let mut scope = scope.init();
-            let context = v8::Local::new(&scope, &self.context);
+            let context = v8::Local::new(&scope, &self.request.context);
             let scope = &mut v8::ContextScope::new(&mut scope, context);
             let global = context.global(scope);
 
@@ -897,7 +769,7 @@ impl ExecutionContext {
                 if active_streams > 0
                     && abort_signaled_at.is_none()
                     && let Some(stream_id) = get_response_stream_id(scope, global)
-                    && !self.stream_manager.has_sender(stream_id)
+                    && !self.request.stream_manager.has_sender(stream_id)
                 {
                     *abort_signaled_at = Some(tokio::time::Instant::now());
                     signal_client_disconnect(scope);
@@ -920,7 +792,7 @@ impl ExecutionContext {
     /// Execute a task in this context
     pub async fn exec(&mut self, mut task: Event) -> Result<(), TerminationReason> {
         // Check if aborted before starting
-        if self.aborted.load(Ordering::SeqCst) {
+        if self.request.aborted.load(Ordering::SeqCst) {
             return Err(TerminationReason::Aborted);
         }
 
@@ -1026,7 +898,7 @@ impl ExecutionContext {
         }
 
         // Check if aborted
-        if self.aborted.load(Ordering::SeqCst) {
+        if self.request.aborted.load(Ordering::SeqCst) {
             return Err(TerminationReason::Aborted);
         }
 
@@ -1088,15 +960,48 @@ impl ExecutionContext {
 
         let mut abort_signaled_at: Option<tokio::time::Instant> = None;
         let mut pending_callbacks: Vec<crate::runtime::CallbackMessage> = Vec::with_capacity(16);
+        let lmi_ptr = self.lmi_ptr; // Copy raw pointer (no persistent borrow on self)
+        let async_waiter = self.async_waiter.clone(); // Clone Rc (cheap) to avoid borrow on self
 
         std::future::poll_fn(|cx| {
+            // -- Fair queue gate (if multiplexing enabled) --
+            // When multiple requests share an isolate, only one can hold the
+            // V8 Locker at a time. Others wait in FIFO order.
+            if let Some(ref waiter) = async_waiter
+                && !waiter.try_lock(cx)
+            {
+                return Poll::Pending; // Not our turn, will be woken in FIFO order
+            }
+
+            // -- Acquire V8 lock (if pooled isolate) --
+            // For the LockerManagedIsolate path, we create a Locker + JsLock
+            // that will be dropped when this closure returns (including Pending),
+            // releasing the V8 mutex for other tasks during I/O waits.
+            let _lock_guard = if !lmi_ptr.is_null() {
+                let lmi = unsafe { &mut *lmi_ptr };
+                let mut locker = v8::Locker::new(&mut lmi.isolate);
+                lmi.deferred_destruction_queue.process_all();
+                let js = crate::gc::JsLock::new(&mut locker);
+                Some((locker, js))
+            } else {
+                None // Worker path — OwnedIsolate is auto-entered
+            };
+
             // 1. Check termination (CPU/wall-clock guards)
             if self.is_terminated(wall_guard, cpu_guard) {
+                if let Some(ref waiter) = async_waiter {
+                    waiter.unlock();
+                }
+
                 return Poll::Ready(Err("Execution terminated".to_string()));
             }
 
             // 2-4. Drain callbacks, process, pump V8
             if let Err(e) = drain_and_process(cx, self, &mut pending_callbacks) {
+                if let Some(ref waiter) = async_waiter {
+                    waiter.unlock();
+                }
+
                 return Poll::Ready(Err(e));
             }
 
@@ -1105,16 +1010,32 @@ impl ExecutionContext {
                 self.check_exit_with_abort(exit_condition, &abort_config, &mut abort_signaled_at);
 
             if should_exit {
+                if let Some(ref waiter) = async_waiter {
+                    waiter.unlock();
+                }
+
                 return Poll::Ready(Ok(()));
             }
 
-            // 6. Not done yet - waker registered via poll_recv
+            // 6. Not done yet — release fair queue and V8 lock.
+            //    V8 mutex released, other requests can run on this isolate.
+            if let Some(ref waiter) = async_waiter {
+                waiter.unlock();
+            }
+
             Poll::Pending
         })
         .await
     }
 
     /// Trigger a fetch event
+    ///
+    /// Split into per-phase V8 locks to release the V8 mutex during I/O waits.
+    /// Phase 0: Setup body stream (no lock needed — pure Rust)
+    /// Phase 1: Trigger fetch handler (under lock)
+    /// Phase 2: Wait for response (lock-per-poll in await_event_loop)
+    /// Phase 3: Read response (under lock)
+    /// Phase 4: Wait for streams (lock-per-poll)
     async fn trigger_fetch_event(
         &mut self,
         fetch_init: openworkers_core::FetchInit,
@@ -1123,72 +1044,127 @@ impl ExecutionContext {
     ) -> Result<HttpResponse, String> {
         let mut req = fetch_init.req;
 
-        // Create channel for response notification (like JSC)
+        // -- Phase 0: Setup (no lock needed — pure Rust) --
         let (response_tx, _response_rx) = tokio::sync::oneshot::channel::<String>();
 
-        // Store the sender in runtime so JS can use it
         {
-            let mut tx_lock = self.fetch_response_tx.borrow_mut();
+            let mut tx_lock = self.request.fetch_response_tx.borrow_mut();
             *tx_lock = Some(response_tx);
         }
 
-        // Handle streaming request body - set up pump before entering V8
-        // Note: Only take the body if it's a Stream, otherwise leave it for later
         let body_stream_id: Option<u64> = if matches!(&req.body, RequestBody::Stream(_)) {
             let RequestBody::Stream(rx) = std::mem::take(&mut req.body) else {
                 unreachable!()
             };
-            Some(self.stream_manager.pump_request_body(rx))
+            Some(self.request.stream_manager.pump_request_body(rx))
         } else {
             None
         };
 
-        // Trigger fetch handler using shared helper
+        // -- Phase 1: Trigger fetch handler (fair queue + lock) --
         {
-            use std::pin::pin;
-            unsafe {
-                let _guard = IsolateGuard::new(self.isolate);
-                let isolate = &mut *self.isolate;
-                let scope = pin!(v8::HandleScope::new(isolate));
-                let mut scope = scope.init();
-                let context = v8::Local::new(&scope, &self.context);
-                let scope = &mut v8::ContextScope::new(&mut scope, context);
+            let lmi_ptr = self.lmi_ptr;
+            let async_waiter = self.async_waiter.clone();
 
-                trigger_fetch_handler(
-                    scope,
-                    &req.url,
-                    req.method.as_str(),
-                    &req.headers,
-                    &mut req.body,
-                    body_stream_id,
-                )?;
-            }
+            std::future::poll_fn(|cx| {
+                if let Some(ref waiter) = async_waiter
+                    && !waiter.try_lock(cx)
+                {
+                    return std::task::Poll::Pending;
+                }
+
+                let _lock = if !lmi_ptr.is_null() {
+                    let lmi = unsafe { &mut *lmi_ptr };
+                    let mut locker = v8::Locker::new(&mut lmi.isolate);
+                    lmi.deferred_destruction_queue.process_all();
+                    let js = crate::gc::JsLock::new(&mut locker);
+                    Some((locker, js))
+                } else {
+                    None
+                };
+
+                use std::pin::pin;
+                let result = unsafe {
+                    let isolate = &mut *self.isolate;
+                    let _scope = v8::IsolateScope::new(isolate);
+                    let scope = pin!(v8::HandleScope::new(isolate));
+                    let mut scope = scope.init();
+                    let context = v8::Local::new(&scope, &self.request.context);
+                    let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+                    trigger_fetch_handler(
+                        scope,
+                        &req.url,
+                        req.method.as_str(),
+                        &req.headers,
+                        &mut req.body,
+                        body_stream_id,
+                    )
+                };
+
+                if let Some(ref waiter) = async_waiter {
+                    waiter.unlock();
+                }
+
+                std::task::Poll::Ready(result)
+            })
+            .await?;
         }
 
-        // Wait for response to be ready (no abort detection needed yet)
+        // -- Phase 2: Wait for response (lock-per-poll in await_event_loop) --
         self.await_event_loop(wall_guard, cpu_guard, EventLoopExit::ResponseReady, None)
             .await?;
 
-        // Read response from global __lastResponse using shared helper
+        // -- Phase 3: Read response (fair queue + lock) --
         let (status, response) = {
-            use std::pin::pin;
-            unsafe {
-                let _guard = IsolateGuard::new(self.isolate);
-                let isolate = &mut *self.isolate;
-                let scope = pin!(v8::HandleScope::new(isolate));
-                let mut scope = scope.init();
-                let context = v8::Local::new(&scope, &self.context);
-                let scope = &mut v8::ContextScope::new(&mut scope, context);
+            let lmi_ptr = self.lmi_ptr;
+            let async_waiter = self.async_waiter.clone();
 
-                read_response_object(scope, &self.stream_manager, self.limits.stream_buffer_size)?
-            }
+            std::future::poll_fn(|cx| {
+                if let Some(ref waiter) = async_waiter
+                    && !waiter.try_lock(cx)
+                {
+                    return std::task::Poll::Pending;
+                }
+
+                let _lock = if !lmi_ptr.is_null() {
+                    let lmi = unsafe { &mut *lmi_ptr };
+                    let mut locker = v8::Locker::new(&mut lmi.isolate);
+                    lmi.deferred_destruction_queue.process_all();
+                    let js = crate::gc::JsLock::new(&mut locker);
+                    Some((locker, js))
+                } else {
+                    None
+                };
+
+                use std::pin::pin;
+                let result = unsafe {
+                    let isolate = &mut *self.isolate;
+                    let _scope = v8::IsolateScope::new(isolate);
+                    let scope = pin!(v8::HandleScope::new(isolate));
+                    let mut scope = scope.init();
+                    let context = v8::Local::new(&scope, &self.request.context);
+                    let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+                    read_response_object(
+                        scope,
+                        &self.request.stream_manager,
+                        self.limits.stream_buffer_size,
+                    )
+                };
+
+                if let Some(ref waiter) = async_waiter {
+                    waiter.unlock();
+                }
+
+                std::task::Poll::Ready(result)
+            })
+            .await?
         };
 
         let _ = fetch_init.res_tx.send(response);
 
-        // Wait for active response streams only (streaming bodies).
-        // waitUntil promises continue in the background on the event loop.
-        // With abort detection: signals client disconnect and allows grace period.
+        // -- Phase 4: Wait for streams (lock-per-poll) --
         self.await_event_loop(
             wall_guard,
             cpu_guard,
@@ -1197,7 +1173,6 @@ impl ExecutionContext {
         )
         .await?;
 
-        // Return success indicator (body already sent via channel)
         Ok(HttpResponse {
             status,
             headers: vec![],
@@ -1206,161 +1181,219 @@ impl ExecutionContext {
     }
 
     /// Trigger a task event
+    ///
+    /// Split into per-phase V8 locks like trigger_fetch_event.
     async fn trigger_task_event(
         &mut self,
         task_init: openworkers_core::TaskInit,
         wall_guard: &TimeoutGuard,
         cpu_guard: &Option<CpuEnforcer>,
     ) -> Result<(), String> {
-        // Extract scheduled time if this is a schedule-triggered task
         let scheduled_time = match &task_init.source {
             Some(openworkers_core::TaskSource::Schedule { time }) => Some(*time),
             _ => None,
         };
 
-        // Trigger task handler
+        // -- Phase 1: Trigger task handler (fair queue + lock) --
         {
-            use std::pin::pin;
-            unsafe {
-                let _guard = IsolateGuard::new(self.isolate);
-                let isolate = &mut *self.isolate;
-                let scope = pin!(v8::HandleScope::new(isolate));
-                let mut scope = scope.init();
-                let context = v8::Local::new(&scope, &self.context);
-                let scope = &mut v8::ContextScope::new(&mut scope, context);
+            let lmi_ptr = self.lmi_ptr;
+            let async_waiter = self.async_waiter.clone();
 
-                let global = context.global(scope);
-
-                // Try __taskHandler first (new unified handler)
-                let task_handler_key = v8::String::new(scope, "__taskHandler").unwrap();
-                let scheduled_handler_key = v8::String::new(scope, "__scheduledHandler").unwrap();
-
-                if let Some(handler_val) = global.get(scope, task_handler_key.into())
-                    && handler_val.is_function()
+            std::future::poll_fn(|cx| {
+                if let Some(ref waiter) = async_waiter
+                    && !waiter.try_lock(cx)
                 {
-                    let handler_fn: v8::Local<v8::Function> = handler_val.try_into().unwrap();
-
-                    // Create event object with full task info
-                    let event_obj = v8::Object::new(scope);
-
-                    // Set taskId
-                    let id_key = v8::String::new(scope, "taskId").unwrap();
-                    let id_val = v8::String::new(scope, &task_init.task_id).unwrap();
-                    event_obj.set(scope, id_key.into(), id_val.into());
-
-                    // Set attempt
-                    let attempt_key = v8::String::new(scope, "attempt").unwrap();
-                    let attempt_val = v8::Number::new(scope, task_init.attempt as f64);
-                    event_obj.set(scope, attempt_key.into(), attempt_val.into());
-
-                    // Set payload if present
-                    if let Some(payload) = &task_init.payload {
-                        let payload_key = v8::String::new(scope, "payload").unwrap();
-                        let payload_str = serde_json::to_string(payload).unwrap_or_default();
-                        let payload_json = v8::String::new(scope, &payload_str).unwrap();
-                        if let Some(parsed) = v8::json::parse(scope, payload_json) {
-                            event_obj.set(scope, payload_key.into(), parsed);
-                        }
-                    }
-
-                    // Set scheduledTime for backward compat
-                    if let Some(time) = scheduled_time {
-                        let time_key = v8::String::new(scope, "scheduledTime").unwrap();
-                        let time_val = v8::Number::new(scope, time as f64);
-                        event_obj.set(scope, time_key.into(), time_val.into());
-                    }
-
-                    let result = handler_fn.call(scope, global.into(), &[event_obj.into()]);
-
-                    if result.is_none() {
-                        return Err("Execution terminated".to_string());
-                    }
-                } else if let Some(handler_val) = global.get(scope, scheduled_handler_key.into())
-                    && handler_val.is_function()
-                {
-                    // Fallback to __scheduledHandler for backward compat
-                    let handler_fn: v8::Local<v8::Function> = handler_val.try_into().unwrap();
-
-                    let event_obj = v8::Object::new(scope);
-                    if let Some(time) = scheduled_time {
-                        let time_key = v8::String::new(scope, "scheduledTime").unwrap();
-                        let time_val = v8::Number::new(scope, time as f64);
-                        event_obj.set(scope, time_key.into(), time_val.into());
-                    }
-
-                    let result = handler_fn.call(scope, global.into(), &[event_obj.into()]);
-
-                    if result.is_none() {
-                        return Err("Execution terminated".to_string());
-                    }
+                    return std::task::Poll::Pending;
                 }
-            }
+
+                let _lock = if !lmi_ptr.is_null() {
+                    let lmi = unsafe { &mut *lmi_ptr };
+                    let mut locker = v8::Locker::new(&mut lmi.isolate);
+                    lmi.deferred_destruction_queue.process_all();
+                    let js = crate::gc::JsLock::new(&mut locker);
+                    Some((locker, js))
+                } else {
+                    None
+                };
+
+                use std::pin::pin;
+                let result: Result<(), String> = unsafe {
+                    let isolate = &mut *self.isolate;
+                    let _scope = v8::IsolateScope::new(isolate);
+                    let scope = pin!(v8::HandleScope::new(isolate));
+                    let mut scope = scope.init();
+                    let context = v8::Local::new(&scope, &self.request.context);
+                    let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+                    let global = context.global(scope);
+
+                    let task_handler_key = v8::String::new(scope, "__taskHandler").unwrap();
+                    let scheduled_handler_key =
+                        v8::String::new(scope, "__scheduledHandler").unwrap();
+
+                    if let Some(handler_val) = global.get(scope, task_handler_key.into())
+                        && handler_val.is_function()
+                    {
+                        let handler_fn: v8::Local<v8::Function> = handler_val.try_into().unwrap();
+
+                        let event_obj = v8::Object::new(scope);
+
+                        let id_key = v8::String::new(scope, "taskId").unwrap();
+                        let id_val = v8::String::new(scope, &task_init.task_id).unwrap();
+                        event_obj.set(scope, id_key.into(), id_val.into());
+
+                        let attempt_key = v8::String::new(scope, "attempt").unwrap();
+                        let attempt_val = v8::Number::new(scope, task_init.attempt as f64);
+                        event_obj.set(scope, attempt_key.into(), attempt_val.into());
+
+                        if let Some(payload) = &task_init.payload {
+                            let payload_key = v8::String::new(scope, "payload").unwrap();
+                            let payload_str = serde_json::to_string(payload).unwrap_or_default();
+                            let payload_json = v8::String::new(scope, &payload_str).unwrap();
+
+                            if let Some(parsed) = v8::json::parse(scope, payload_json) {
+                                event_obj.set(scope, payload_key.into(), parsed);
+                            }
+                        }
+
+                        if let Some(time) = scheduled_time {
+                            let time_key = v8::String::new(scope, "scheduledTime").unwrap();
+                            let time_val = v8::Number::new(scope, time as f64);
+                            event_obj.set(scope, time_key.into(), time_val.into());
+                        }
+
+                        let call_result =
+                            handler_fn.call(scope, global.into(), &[event_obj.into()]);
+
+                        if call_result.is_none() {
+                            Err("Execution terminated".to_string())
+                        } else {
+                            Ok(())
+                        }
+                    } else if let Some(handler_val) =
+                        global.get(scope, scheduled_handler_key.into())
+                        && handler_val.is_function()
+                    {
+                        let handler_fn: v8::Local<v8::Function> = handler_val.try_into().unwrap();
+
+                        let event_obj = v8::Object::new(scope);
+
+                        if let Some(time) = scheduled_time {
+                            let time_key = v8::String::new(scope, "scheduledTime").unwrap();
+                            let time_val = v8::Number::new(scope, time as f64);
+                            event_obj.set(scope, time_key.into(), time_val.into());
+                        }
+
+                        let call_result =
+                            handler_fn.call(scope, global.into(), &[event_obj.into()]);
+
+                        if call_result.is_none() {
+                            Err("Execution terminated".to_string())
+                        } else {
+                            Ok(())
+                        }
+                    } else {
+                        Ok(())
+                    }
+                };
+
+                if let Some(ref waiter) = async_waiter {
+                    waiter.unlock();
+                }
+
+                std::task::Poll::Ready(result)
+            })
+            .await?;
         }
 
-        // Wait for handler to complete (including async work and waitUntil promises)
-        // No abort detection needed for task events (no streaming response)
+        // -- Phase 2: Wait for handler to complete (lock-per-poll) --
         self.await_event_loop(wall_guard, cpu_guard, EventLoopExit::HandlerComplete, None)
             .await?;
 
-        // Read __taskResult from JS and send it back
+        // -- Phase 3: Read task result (fair queue + lock) --
         let task_result = {
-            use std::pin::pin;
-            unsafe {
-                let _guard = IsolateGuard::new(self.isolate);
-                let isolate = &mut *self.isolate;
-                let scope = pin!(v8::HandleScope::new(isolate));
-                let mut scope = scope.init();
-                let context = v8::Local::new(&scope, &self.context);
-                let scope = &mut v8::ContextScope::new(&mut scope, context);
+            let lmi_ptr = self.lmi_ptr;
+            let async_waiter = self.async_waiter.clone();
 
-                let global = context.global(scope);
-                let result_key = v8::String::new(scope, "__taskResult").unwrap();
+            std::future::poll_fn(|cx| {
+                if let Some(ref waiter) = async_waiter
+                    && !waiter.try_lock(cx)
+                {
+                    return std::task::Poll::Pending;
+                }
 
-                if let Some(result_val) = global.get(scope, result_key.into()) {
-                    if result_val.is_object() {
-                        let result_obj: v8::Local<v8::Object> = result_val.try_into().unwrap();
+                let _lock = if !lmi_ptr.is_null() {
+                    let lmi = unsafe { &mut *lmi_ptr };
+                    let mut locker = v8::Locker::new(&mut lmi.isolate);
+                    lmi.deferred_destruction_queue.process_all();
+                    let js = crate::gc::JsLock::new(&mut locker);
+                    Some((locker, js))
+                } else {
+                    None
+                };
 
-                        // Extract success
-                        let success_key = v8::String::new(scope, "success").unwrap();
-                        let success = result_obj
-                            .get(scope, success_key.into())
-                            .map(|v| v.is_true())
-                            .unwrap_or(true);
+                use std::pin::pin;
+                let result = unsafe {
+                    let isolate = &mut *self.isolate;
+                    let _scope = v8::IsolateScope::new(isolate);
+                    let scope = pin!(v8::HandleScope::new(isolate));
+                    let mut scope = scope.init();
+                    let context = v8::Local::new(&scope, &self.request.context);
+                    let scope = &mut v8::ContextScope::new(&mut scope, context);
 
-                        // Extract data (serialize to JSON)
-                        let data_key = v8::String::new(scope, "data").unwrap();
-                        let data = result_obj.get(scope, data_key.into()).and_then(|v| {
-                            if v.is_undefined() || v.is_null() {
-                                None
-                            } else {
-                                let json_str = v8::json::stringify(scope, v)?;
-                                let json_string = json_str.to_rust_string_lossy(scope);
-                                serde_json::from_str(&json_string).ok()
+                    let global = context.global(scope);
+                    let result_key = v8::String::new(scope, "__taskResult").unwrap();
+
+                    if let Some(result_val) = global.get(scope, result_key.into()) {
+                        if result_val.is_object() {
+                            let result_obj: v8::Local<v8::Object> = result_val.try_into().unwrap();
+
+                            let success_key = v8::String::new(scope, "success").unwrap();
+                            let success = result_obj
+                                .get(scope, success_key.into())
+                                .map(|v| v.is_true())
+                                .unwrap_or(true);
+
+                            let data_key = v8::String::new(scope, "data").unwrap();
+                            let data = result_obj.get(scope, data_key.into()).and_then(|v| {
+                                if v.is_undefined() || v.is_null() {
+                                    None
+                                } else {
+                                    let json_str = v8::json::stringify(scope, v)?;
+                                    let json_string = json_str.to_rust_string_lossy(scope);
+                                    serde_json::from_str(&json_string).ok()
+                                }
+                            });
+
+                            let error_key = v8::String::new(scope, "error").unwrap();
+                            let error = result_obj.get(scope, error_key.into()).and_then(|v| {
+                                if v.is_undefined() || v.is_null() {
+                                    None
+                                } else {
+                                    Some(v.to_rust_string_lossy(scope))
+                                }
+                            });
+
+                            openworkers_core::TaskResult {
+                                success,
+                                data,
+                                error,
                             }
-                        });
-
-                        // Extract error
-                        let error_key = v8::String::new(scope, "error").unwrap();
-                        let error = result_obj.get(scope, error_key.into()).and_then(|v| {
-                            if v.is_undefined() || v.is_null() {
-                                None
-                            } else {
-                                Some(v.to_rust_string_lossy(scope))
-                            }
-                        });
-
-                        openworkers_core::TaskResult {
-                            success,
-                            data,
-                            error,
+                        } else {
+                            openworkers_core::TaskResult::success()
                         }
                     } else {
                         openworkers_core::TaskResult::success()
                     }
-                } else {
-                    openworkers_core::TaskResult::success()
+                };
+
+                if let Some(ref waiter) = async_waiter {
+                    waiter.unlock();
                 }
-            }
+
+                std::task::Poll::Ready(result)
+            })
+            .await
         };
 
         let _ = task_init.res_tx.send(task_result);
@@ -1376,6 +1409,18 @@ impl ExecutionContext {
     /// Does NOT touch the event loop (it persists across requests).
     /// Does NOT reset `__nextTimerId` (monotonically increasing to avoid ID collisions).
     pub fn reset(&mut self) -> Result<(), String> {
+        // Acquire lock if pooled isolate (evaluate accesses V8 directly)
+        let lmi_ptr = self.lmi_ptr;
+        let _lock_guard = if !lmi_ptr.is_null() {
+            let lmi = unsafe { &mut *lmi_ptr };
+            let mut locker = v8::Locker::new(&mut lmi.isolate);
+            lmi.deferred_destruction_queue.process_all();
+            let js = crate::gc::JsLock::new(&mut locker);
+            Some((locker, js))
+        } else {
+            None
+        };
+
         // 0. Cancel any lingering terminate_execution flag from a previous timeout/abort.
         // Without this, evaluate() below would fail immediately if the flag is still set.
         unsafe {
@@ -1397,42 +1442,32 @@ impl ExecutionContext {
         ))?;
 
         // 2. Reset Rust-side abort flag
-        self.aborted.store(false, Ordering::SeqCst);
+        self.request.aborted.store(false, Ordering::SeqCst);
 
         // 3. Clear stream manager (removes all senders/receivers/metadata)
-        self.stream_manager.clear();
+        self.request.stream_manager.clear();
 
         // 4. Drain stale callbacks (timers/fetch from previous request)
-        while self.callback_rx.try_recv().is_ok() {}
+        while self.request.callback_rx.try_recv().is_ok() {}
 
         // 5. Reset fetch_response_tx
-        *self.fetch_response_tx.borrow_mut() = None;
+        *self.request.fetch_response_tx.borrow_mut() = None;
 
         // 6. Clear V8 callback storage (prevents Global handle leaks)
-        self.fetch_callbacks.borrow_mut().clear();
-        self.fetch_error_callbacks.borrow_mut().clear();
-        self.stream_callbacks.borrow_mut().clear();
-        *self.next_callback_id.borrow_mut() = 1;
+        self.request.fetch_callbacks.borrow_mut().clear();
+        self.request.fetch_error_callbacks.borrow_mut().clear();
+        self.request.stream_callbacks.borrow_mut().clear();
+        *self.request.next_callback_id.borrow_mut() = 1;
 
         Ok(())
     }
 
     /// Abort execution
     pub fn abort(&mut self) {
-        self.aborted
+        self.request
+            .aborted
             .store(true, std::sync::atomic::Ordering::SeqCst);
         unsafe { (*self.isolate).terminate_execution() };
-    }
-}
-
-// ExecutionContext should be dropped properly to clean up the event loop
-impl Drop for ExecutionContext {
-    fn drop(&mut self) {
-        // Event loop handle will be aborted when dropped
-        self.event_loop_handle.abort();
-
-        // Context will be dropped, cleaning up the V8 context
-        // The isolate pointer remains valid (owned by SharedIsolate)
     }
 }
 
@@ -1440,7 +1475,7 @@ impl crate::event_loop::EventLoopRuntime for ExecutionContext {
     fn callback_rx_mut(
         &mut self,
     ) -> &mut tokio::sync::mpsc::UnboundedReceiver<crate::runtime::CallbackMessage> {
-        &mut self.callback_rx
+        &mut self.request.callback_rx
     }
 
     fn process_callback(&mut self, msg: crate::runtime::CallbackMessage) {
@@ -1452,117 +1487,5 @@ impl crate::event_loop::EventLoopRuntime for ExecutionContext {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use openworkers_core::WorkerCode;
-    use std::sync::Arc;
-
-    /// No-op operations handler for testing
-    struct NoopOperations;
-
-    impl openworkers_core::OperationsHandler for NoopOperations {}
-
-    fn noop_ops() -> OperationsHandle {
-        Arc::new(NoopOperations)
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_execution_context_creation() {
-        let local_set = tokio::task::LocalSet::new();
-
-        local_set
-            .run_until(async {
-                let limits = RuntimeLimits::default();
-                let mut shared_isolate = SharedIsolate::new(limits.clone());
-
-                let script = Script {
-                    code: WorkerCode::JavaScript("console.log('test');".to_string()),
-                    env: None,
-                    bindings: vec![],
-                };
-
-                let ops = noop_ops();
-
-                let exec_ctx = ExecutionContext::new(&mut shared_isolate, script, ops);
-
-                assert!(exec_ctx.is_ok());
-            })
-            .await;
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_execution_context_evaluate() {
-        let local_set = tokio::task::LocalSet::new();
-
-        local_set
-            .run_until(async {
-                let limits = RuntimeLimits::default();
-                let mut shared_isolate = SharedIsolate::new(limits.clone());
-
-                let script = Script {
-                    code: WorkerCode::JavaScript("globalThis.testValue = 42;".to_string()),
-                    env: None,
-                    bindings: vec![],
-                };
-
-                let ops = noop_ops();
-
-                let mut exec_ctx = ExecutionContext::new(&mut shared_isolate, script, ops).unwrap();
-
-                // Evaluate additional code
-                let result = exec_ctx.evaluate(&WorkerCode::JavaScript(
-                    "globalThis.testValue * 2;".to_string(),
-                ));
-
-                assert!(result.is_ok());
-
-                drop(exec_ctx);
-            })
-            .await;
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn test_execution_context_reuse_isolate() {
-        let local_set = tokio::task::LocalSet::new();
-
-        local_set
-            .run_until(async {
-                let limits = RuntimeLimits::default();
-                let mut shared_isolate = SharedIsolate::new(limits.clone());
-
-                // Create first execution context
-                {
-                    let script = Script {
-                        code: WorkerCode::JavaScript("globalThis.first = 1;".to_string()),
-                        env: None,
-                        bindings: vec![],
-                    };
-
-                    let ops = noop_ops();
-                    let exec_ctx = ExecutionContext::new(&mut shared_isolate, script, ops).unwrap();
-
-                    drop(exec_ctx);
-                }
-
-                // Create second execution context in the same isolate
-                // The global scope should be fresh (isolated from first context)
-                {
-                    let script = Script {
-                        code: WorkerCode::JavaScript("globalThis.second = 2;".to_string()),
-                        env: None,
-                        bindings: vec![],
-                    };
-
-                    let ops = noop_ops();
-                    let exec_ctx = ExecutionContext::new(&mut shared_isolate, script, ops).unwrap();
-
-                    drop(exec_ctx);
-                }
-
-                // Both contexts should have been isolated
-                // (We can't verify this directly without executing code, but no crashes = good)
-            })
-            .await;
-    }
-}
+// Tests for ExecutionContext are in pool_multiplexed.rs (pool integration tests)
+// and in Worker tests (worker.rs).
