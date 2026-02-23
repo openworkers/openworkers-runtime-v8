@@ -168,6 +168,7 @@ struct CachedContext {
     reuse_count: u32,
     last_used: Instant,
     ops: OperationsHandle,
+    env_updated_at: Option<i64>,
 }
 
 /// Get the max context reuses from CONTEXT_MAX_REUSES env var
@@ -610,6 +611,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
         ops,
         task,
         on_warm_hit,
+        env_updated_at,
     } = req;
     TOTAL_REQUESTS.fetch_add(1, Ordering::Relaxed);
 
@@ -664,6 +666,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
         for (i, cached) in inner.cached_contexts.iter().enumerate() {
             if cached.worker_id == worker_id
                 && cached.version == version
+                && cached.env_updated_at == env_updated_at
                 && cached.reuse_count < max_reuses
             {
                 found_idx = Some(i);
@@ -689,6 +692,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
             version: cached_ver,
             reuse_count: mut reuse_cnt,
             ops: cached_ops,
+            env_updated_at: cached_env_ts,
             ..
         } = cached_context.unwrap();
 
@@ -764,6 +768,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
                         reuse_count: reuse_cnt,
                         last_used: Instant::now(),
                         ops: cached_ops,
+                        env_updated_at: cached_env_ts,
                     });
                     drop(inner);
 
@@ -835,6 +840,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
                                 reuse_count: 1,
                                 last_used: Instant::now(),
                                 ops,
+                                env_updated_at,
                             }),
                         )
                     }

@@ -45,6 +45,8 @@ pub struct PinnedExecuteRequest {
     /// Optional callback invoked with the cached ops on warm hit.
     /// Used by the runner to update per-request state (log_tx, span).
     pub on_warm_hit: Option<WarmHitCallback>,
+    /// Environment timestamp for cache invalidation (None = don't check)
+    pub env_updated_at: Option<i64>,
 }
 
 /// Thread-local pool statistics.

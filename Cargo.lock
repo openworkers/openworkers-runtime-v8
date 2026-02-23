@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "openworkers-runtime-v8"
-version = "0.13.6"
+version = "0.13.7"
 dependencies = [
  "bytes",
  "criterion",
@@ -926,9 +926,9 @@ dependencies = [
 
 [[package]]
 name = "openworkers-v8"
-version = "145.0.2"
+version = "145.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da248c96ea2d9f2c29206de495a365bdeb223eb571edf0690dfbf11d8a767e67"
+checksum = "cea6dea21b986c41cb0a2eea781cd7df65ddf5afe7b62a86712c304a578bf968"
 dependencies = [
  "bindgen",
  "bitflags",
