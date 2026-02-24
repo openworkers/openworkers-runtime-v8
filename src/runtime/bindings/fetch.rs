@@ -546,12 +546,18 @@ pub fn setup_fetch(
                 contentType = 'multipart/form-data; boundary=' + serialized.boundary;
             }
 
+            // Handle URLSearchParams body - serialize to form-encoded string
+            if (body instanceof URLSearchParams) {
+                body = new TextEncoder().encode(body.toString());
+                if (!contentType) contentType = 'application/x-www-form-urlencoded;charset=UTF-8';
+            }
+
             // Convert string/primitive body to Uint8Array for native consumption
             if (body !== null && typeof body !== 'object') {
                 body = new TextEncoder().encode(String(body));
             }
 
-            // Set Content-Type for FormData if not already set
+            // Set Content-Type if not already set (FormData or URLSearchParams)
             if (contentType && !headers['Content-Type'] && !headers['content-type']) {
                 headers['Content-Type'] = contentType;
             }
