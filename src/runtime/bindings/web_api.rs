@@ -464,7 +464,7 @@ pub fn setup_url_search_params(scope: &mut v8::PinScope) {
                         }
                     }
                 } else if (init instanceof URLSearchParams) {
-                    this._entries = [...init._entries];
+                    this._entries = init._entries.map(e => [...e]);
                 } else if (Array.isArray(init)) {
                     for (const [key, value] of init) {
                         this._entries.push([String(key), String(value)]);
