@@ -7,9 +7,10 @@
 //! ## How it works
 //!
 //! When V8's heap approaches the configured limit, it calls our callback.
-//! The callback:
-//! 1. First call: Increases the limit slightly (10%) to give V8 room to GC
-//! 2. Subsequent calls: Terminates execution via `isolate.terminate_execution()`
+//! The callback calls `terminate_execution()` and returns a slightly increased
+//! limit (+2 MB headroom). The headroom is critical: V8 only checks the
+//! termination flag when returning to JS execution, not during GC. Without it,
+//! V8 sees "no room given" and calls `FatalProcessOutOfMemory` (process crash).
 //!
 //! This prevents a single misbehaving worker from crashing the entire runner.
 //!
@@ -55,11 +56,20 @@ impl HeapLimitState {
     }
 }
 
+/// Headroom given to V8 after calling `terminate_execution()`.
+///
+/// V8 only checks the termination flag when returning to JS execution.
+/// If we return the same `current_heap_limit`, V8 considers the allocation
+/// failed and goes straight to `FatalProcessOutOfMemory` (process crash).
+/// By returning a slightly higher limit, V8 can complete the pending
+/// allocation, return to JS, and see the termination flag.
+const TERMINATION_HEADROOM: usize = 2 * 1024 * 1024; // 2 MB
+
 /// Near-heap-limit callback for V8.
 ///
 /// This callback is invoked when V8's heap is approaching its limit.
-/// Returns a new heap limit to allow V8 to continue, or terminates execution
-/// if we've already given V8 extra room.
+/// On first call, terminates execution and gives V8 a small headroom
+/// so it can unwind back to JS where `terminate_execution()` takes effect.
 ///
 /// # Safety
 ///
@@ -68,7 +78,7 @@ impl HeapLimitState {
 pub unsafe extern "C" fn near_heap_limit_callback(
     data: *mut c_void,
     current_heap_limit: usize,
-    initial_heap_limit: usize,
+    _initial_heap_limit: usize,
 ) -> usize {
     // SAFETY: data is a valid pointer to HeapLimitState, passed from install_heap_limit_callback
     let state = unsafe { &*(data as *const HeapLimitState) };
@@ -76,32 +86,10 @@ pub unsafe extern "C" fn near_heap_limit_callback(
     let count = state.invocation_count.fetch_add(1, Ordering::SeqCst);
 
     tracing::warn!(
-        "Near heap limit callback invoked (count: {}, current: {} MB, initial: {} MB, max: {} MB)",
+        "Near heap limit callback invoked (count: {}, current: {} MB, max: {} MB)",
         count + 1,
         current_heap_limit / (1024 * 1024),
-        initial_heap_limit / (1024 * 1024),
         state.max_heap_bytes / (1024 * 1024)
-    );
-
-    // First invocation: give V8 a bit more room to try GC
-    if count == 0 {
-        // Increase by 10%, but don't exceed max
-        let extra = current_heap_limit / 10;
-        let new_limit = (current_heap_limit + extra).min(state.max_heap_bytes);
-
-        if new_limit > current_heap_limit {
-            tracing::warn!(
-                "Increasing heap limit to {} MB to allow GC",
-                new_limit / (1024 * 1024)
-            );
-            return new_limit;
-        }
-    }
-
-    // We've already given extra room or can't give more - terminate execution
-    tracing::error!(
-        "Heap limit exhausted after {} callbacks, terminating execution",
-        count + 1
     );
 
     // Set the memory limit flag so the runner knows why execution stopped
@@ -110,8 +98,17 @@ pub unsafe extern "C" fn near_heap_limit_callback(
     // Terminate execution gracefully instead of letting V8 crash
     state.isolate_handle.terminate_execution();
 
-    // Return current limit (V8 will see termination and stop)
-    current_heap_limit
+    tracing::error!(
+        "Heap limit exhausted after {} callbacks, terminating execution",
+        count + 1
+    );
+
+    // CRITICAL: Always return more than current_heap_limit.
+    // V8 does not check terminate_execution() during GC — only when returning
+    // to JS. If we return <= current_heap_limit, V8 sees "no room given" and
+    // calls FatalProcessOutOfMemory, crashing the entire process.
+    // The headroom lets V8 complete the pending allocation and unwind to JS.
+    current_heap_limit + TERMINATION_HEADROOM
 }
 
 /// OOM error handler for V8 isolates.
