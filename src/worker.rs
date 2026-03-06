@@ -746,52 +746,63 @@ impl Worker {
                 return Poll::Ready(Err("Execution terminated".to_string()));
             }
 
-            // 2-4. Drain callbacks, process, pump V8
-            if let Err(e) = drain_and_process(cx, &mut self.runtime, &mut pending_callbacks) {
-                return Poll::Ready(Err(e));
-            }
+            // 2-5. Coalesced event loop: process callbacks in a loop while
+            // more work arrives during processing.
+            const MAX_COALESCE_ROUNDS: usize = 4;
 
-            // 5. Check exit condition with abort handling
-            // CRITICAL: Wrap in explicit block to drop V8 scopes BEFORE returning Pending.
-            let should_exit = {
-                use std::pin::pin;
-                let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
-                let mut scope = scope.init();
-                let context = v8::Local::new(&scope, &self.runtime.context);
-                let scope = &mut v8::ContextScope::new(&mut scope, context);
-                let global = context.global(scope);
+            for round in 0..MAX_COALESCE_ROUNDS {
+                let count = match drain_and_process(cx, &mut self.runtime, &mut pending_callbacks) {
+                    Ok(c) => c,
+                    Err(e) => return Poll::Ready(Err(e)),
+                };
 
-                // Basic exit condition check
-                let base_exit = check_exit_condition(scope, global, exit_condition);
+                // Check exit condition with abort handling
+                // CRITICAL: Wrap in explicit block to drop V8 scopes BEFORE returning Pending.
+                let should_exit = {
+                    use std::pin::pin;
+                    let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
+                    let mut scope = scope.init();
+                    let context = v8::Local::new(&scope, &self.runtime.context);
+                    let scope = &mut v8::ContextScope::new(&mut scope, context);
+                    let global = context.global(scope);
 
-                // If abort detection is enabled, handle client disconnects
-                if let Some(ref config) = abort_config {
-                    let (request_complete, active_streams) = get_completion_state(scope, global);
+                    // Basic exit condition check
+                    let base_exit = check_exit_condition(scope, global, exit_condition);
 
-                    // Detect client disconnect and signal abort to JS
-                    if active_streams > 0
-                        && abort_signaled_at.is_none()
-                        && let Some(stream_id) = get_response_stream_id(scope, global)
-                        && !self.runtime.stream_manager.has_sender(stream_id)
-                    {
-                        abort_signaled_at = Some(tokio::time::Instant::now());
-                        signal_client_disconnect(scope);
+                    // If abort detection is enabled, handle client disconnects
+                    if let Some(ref config) = abort_config {
+                        let (request_complete, active_streams) =
+                            get_completion_state(scope, global);
+
+                        // Detect client disconnect and signal abort to JS
+                        if active_streams > 0
+                            && abort_signaled_at.is_none()
+                            && let Some(stream_id) = get_response_stream_id(scope, global)
+                            && !self.runtime.stream_manager.has_sender(stream_id)
+                        {
+                            abort_signaled_at = Some(tokio::time::Instant::now());
+                            signal_client_disconnect(scope);
+                        }
+
+                        // Check grace period
+                        let grace_exceeded = abort_signaled_at
+                            .map(|t| t.elapsed() > config.grace_period)
+                            .unwrap_or(false);
+
+                        // Exit if base condition met, OR if request complete and grace exceeded
+                        base_exit || (request_complete && grace_exceeded)
+                    } else {
+                        base_exit
                     }
+                }; // V8 scopes dropped here
 
-                    // Check grace period
-                    let grace_exceeded = abort_signaled_at
-                        .map(|t| t.elapsed() > config.grace_period)
-                        .unwrap_or(false);
-
-                    // Exit if base condition met, OR if request complete and grace exceeded
-                    base_exit || (request_complete && grace_exceeded)
-                } else {
-                    base_exit
+                if should_exit {
+                    return Poll::Ready(Ok(()));
                 }
-            }; // V8 scopes dropped here
 
-            if should_exit {
-                return Poll::Ready(Ok(()));
+                if count == 0 || round == MAX_COALESCE_ROUNDS - 1 {
+                    break;
+                }
             }
 
             // 6. Not done yet - waker registered via poll_recv

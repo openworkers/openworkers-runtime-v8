@@ -66,20 +66,29 @@ impl Future for WorkerFuture<'_> {
             return Poll::Ready(Err("Execution terminated".to_string()));
         }
 
-        // 2-4. Drain callbacks, process, pump V8
-        if let Err(e) = drain_and_process(cx, this.ctx, &mut this.pending_callbacks) {
-            return Poll::Ready(Err(e));
-        }
+        // 2-5. Coalesced event loop: process callbacks in a loop while
+        // more work arrives during processing.
+        const MAX_COALESCE_ROUNDS: usize = 4;
 
-        // 5. Check exit condition with abort handling
-        let should_exit = this.ctx.check_exit_with_abort(
-            this.exit_condition,
-            &this.abort_config,
-            &mut this.abort_signaled_at,
-        );
+        for round in 0..MAX_COALESCE_ROUNDS {
+            let count = match drain_and_process(cx, this.ctx, &mut this.pending_callbacks) {
+                Ok(c) => c,
+                Err(e) => return Poll::Ready(Err(e)),
+            };
 
-        if should_exit {
-            return Poll::Ready(Ok(()));
+            let should_exit = this.ctx.check_exit_with_abort(
+                this.exit_condition,
+                &this.abort_config,
+                &mut this.abort_signaled_at,
+            );
+
+            if should_exit {
+                return Poll::Ready(Ok(()));
+            }
+
+            if count == 0 || round == MAX_COALESCE_ROUNDS - 1 {
+                break;
+            }
         }
 
         // 6. Not done yet - waker registered via poll_recv

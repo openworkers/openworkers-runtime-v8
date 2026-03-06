@@ -44,13 +44,13 @@ pub trait EventLoopRuntime {
 /// * `pending_callbacks` - Buffer for batching callbacks (reused across polls)
 ///
 /// # Returns
-/// * `Ok(())` - Callbacks processed, continue event loop
+/// * `Ok(count)` - Number of callbacks processed, continue event loop
 /// * `Err(msg)` - Channel closed, event loop should exit
 pub fn drain_and_process<R: EventLoopRuntime>(
     cx: &mut Context<'_>,
     runtime: &mut R,
     pending_callbacks: &mut Vec<CallbackMessage>,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     // 1. Poll callback channel - TRUE ASYNC with waker
     //    This drains all available messages without blocking
     loop {
@@ -66,6 +66,8 @@ pub fn drain_and_process<R: EventLoopRuntime>(
     }
 
     // 2. Process all received callbacks in batch
+    let count = pending_callbacks.len();
+
     for msg in pending_callbacks.drain(..) {
         runtime.process_callback(msg);
     }
@@ -73,5 +75,5 @@ pub fn drain_and_process<R: EventLoopRuntime>(
     // 3. V8 platform messages + microtask checkpoint
     runtime.pump_and_checkpoint();
 
-    Ok(())
+    Ok(count)
 }

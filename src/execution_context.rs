@@ -1014,25 +1014,46 @@ impl ExecutionContext {
                 return Poll::Ready(Err("Execution terminated".to_string()));
             }
 
-            // 2-4. Drain callbacks, process, pump V8
-            if let Err(e) = drain_and_process(cx, self, &mut pending_callbacks) {
-                if let Some(ref waiter) = async_waiter {
-                    waiter.unlock();
+            // 2-5. Coalesced event loop: process callbacks in a loop while
+            // more work arrives during processing. This avoids releasing and
+            // re-acquiring the V8 lock between bursts of callbacks.
+            // Cap iterations to prevent starving other requests on the same isolate.
+            const MAX_COALESCE_ROUNDS: usize = 4;
+
+            for round in 0..MAX_COALESCE_ROUNDS {
+                let count = match drain_and_process(cx, self, &mut pending_callbacks) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        if let Some(ref waiter) = async_waiter {
+                            waiter.unlock();
+                        }
+
+                        return Poll::Ready(Err(e));
+                    }
+                };
+
+                // Check exit condition after each round
+                let should_exit = self.check_exit_with_abort(
+                    exit_condition,
+                    &abort_config,
+                    &mut abort_signaled_at,
+                );
+
+                if should_exit {
+                    if let Some(ref waiter) = async_waiter {
+                        waiter.unlock();
+                    }
+
+                    return Poll::Ready(Ok(()));
                 }
 
-                return Poll::Ready(Err(e));
-            }
-
-            // 5. Check exit condition with abort handling
-            let should_exit =
-                self.check_exit_with_abort(exit_condition, &abort_config, &mut abort_signaled_at);
-
-            if should_exit {
-                if let Some(ref waiter) = async_waiter {
-                    waiter.unlock();
+                // No callbacks processed in this round — no more work pending
+                if count == 0 || round == MAX_COALESCE_ROUNDS - 1 {
+                    break;
                 }
 
-                return Poll::Ready(Ok(()));
+                // Callbacks were processed — loop to check if more arrived
+                // during processing (e.g., promise chains, microtasks)
             }
 
             // 6. Not done yet — release fair queue and V8 lock.
