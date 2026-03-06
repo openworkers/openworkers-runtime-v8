@@ -22,7 +22,6 @@ use tokio::sync::Mutex;
 
 use crate::LockerManagedIsolate;
 use crate::execution_context::ExecutionContext;
-use crate::gc::JsLock;
 use crate::pool_common::{LocalPoolStats, PinnedExecuteRequest, PinnedPoolConfig, PinnedPoolStats};
 use crate::request_context::RequestContext;
 use openworkers_core::{OperationsHandle, RuntimeLimits, TerminationReason};
@@ -803,9 +802,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
     // Acquire Locker to enter the unentered isolate, create context
     let ctx_result = {
         let lmi = unsafe { &mut *lmi_ptr };
-        let mut locker = v8::Locker::new(&mut lmi.isolate);
-        lmi.deferred_destruction_queue.process_all();
-        let _js_lock = JsLock::new(&mut locker);
+        let (mut locker, _js_lock) = lmi.lock();
 
         ExecutionContext::new_with_pooled_isolate(
             &mut locker,

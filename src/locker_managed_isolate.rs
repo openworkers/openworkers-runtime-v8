@@ -7,7 +7,7 @@
 //! uses UnenteredIsolate and requires explicit locking via v8::Locker.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 use v8;
 
 use crate::gc::DeferredDestructionQueue;
@@ -33,6 +33,12 @@ pub struct LockerManagedIsolate {
     /// processed on the next lock acquisition. Wrapped in Arc for
     /// safe sharing during lock acquisition.
     pub deferred_destruction_queue: Arc<DeferredDestructionQueue>,
+    /// Per-isolate pending external memory delta.
+    ///
+    /// When an `ExternalMemoryGuard` is dropped without the lock held,
+    /// the adjustment is accumulated here and applied on next `JsLock::new()`.
+    /// Per-isolate (not global) to prevent cross-isolate contamination.
+    pub pending_memory_delta: Arc<AtomicI64>,
     /// Heap limit state - must be kept alive for the isolate's lifetime
     #[allow(dead_code)]
     _heap_limit_state: Box<HeapLimitState>,
@@ -108,8 +114,25 @@ impl LockerManagedIsolate {
             memory_limit_hit,
             use_snapshot,
             deferred_destruction_queue: Arc::new(DeferredDestructionQueue::new()),
+            pending_memory_delta: Arc::new(AtomicI64::new(0)),
             _heap_limit_state: heap_limit_state,
         }
+    }
+
+    /// Acquire the V8 lock, process deferred destructions, and create a JsLock.
+    ///
+    /// This encapsulates the 3-step lock acquisition pattern:
+    /// 1. `v8::Locker::new()` — acquire V8 mutex
+    /// 2. `deferred_destruction_queue.process_all()` — clean up queued handles
+    /// 3. `JsLock::new()` — apply deferred memory deltas + enable GC tracking
+    ///
+    /// Returns both the Locker (RAII mutex) and JsLock (RAII GC tracking).
+    /// Both are dropped together when the caller's scope ends.
+    pub fn lock(&mut self) -> (v8::Locker<'_>, crate::gc::JsLock) {
+        let mut locker = v8::Locker::new(&mut self.isolate);
+        self.deferred_destruction_queue.process_all();
+        let js = crate::gc::JsLock::new(&mut locker, &self.pending_memory_delta);
+        (locker, js)
     }
 
     /// Check if memory limit was hit

@@ -30,6 +30,27 @@ use openworkers_core::{
     TerminationReason, WorkerCode,
 };
 
+/// Acquire the V8 lock for a pooled isolate (null check + deref + lock).
+///
+/// Returns `None` for the Worker path (null pointer = OwnedIsolate, auto-entered).
+///
+/// # Safety
+///
+/// When non-null, `lmi_ptr` must point to a valid `LockerManagedIsolate` that
+/// outlives the returned Locker. This is guaranteed by the pool architecture:
+/// the LMI is pinned to its thread and outlives all ExecutionContexts.
+unsafe fn try_lock_v8(
+    lmi_ptr: *mut LockerManagedIsolate,
+) -> Option<(v8::Locker<'static>, crate::gc::JsLock)> {
+    if lmi_ptr.is_null() {
+        return None;
+    }
+
+    // SAFETY: caller guarantees lmi_ptr is valid when non-null
+    let lmi = unsafe { &mut *lmi_ptr };
+    Some(lmi.lock())
+}
+
 /// A disposable execution context for running a worker script
 ///
 /// This includes:
@@ -981,15 +1002,8 @@ impl ExecutionContext {
             // For the LockerManagedIsolate path, we create a Locker + JsLock
             // that will be dropped when this closure returns (including Pending),
             // releasing the V8 mutex for other tasks during I/O waits.
-            let _lock_guard = if !lmi_ptr.is_null() {
-                let lmi = unsafe { &mut *lmi_ptr };
-                let mut locker = v8::Locker::new(&mut lmi.isolate);
-                lmi.deferred_destruction_queue.process_all();
-                let js = crate::gc::JsLock::new(&mut locker);
-                Some((locker, js))
-            } else {
-                None // Worker path — OwnedIsolate is auto-entered
-            };
+            // SAFETY: lmi_ptr valid for request lifetime (pool-managed)
+            let _lock_guard = unsafe { try_lock_v8(lmi_ptr) };
 
             // 1. Check termination (CPU/wall-clock guards)
             if self.is_terminated(wall_guard, cpu_guard) {
@@ -1077,15 +1091,8 @@ impl ExecutionContext {
                     return std::task::Poll::Pending;
                 }
 
-                let _lock = if !lmi_ptr.is_null() {
-                    let lmi = unsafe { &mut *lmi_ptr };
-                    let mut locker = v8::Locker::new(&mut lmi.isolate);
-                    lmi.deferred_destruction_queue.process_all();
-                    let js = crate::gc::JsLock::new(&mut locker);
-                    Some((locker, js))
-                } else {
-                    None
-                };
+                // SAFETY: lmi_ptr valid for request lifetime (pool-managed)
+                let _lock = unsafe { try_lock_v8(lmi_ptr) };
 
                 use std::pin::pin;
                 let result = unsafe {
@@ -1131,15 +1138,8 @@ impl ExecutionContext {
                     return std::task::Poll::Pending;
                 }
 
-                let _lock = if !lmi_ptr.is_null() {
-                    let lmi = unsafe { &mut *lmi_ptr };
-                    let mut locker = v8::Locker::new(&mut lmi.isolate);
-                    lmi.deferred_destruction_queue.process_all();
-                    let js = crate::gc::JsLock::new(&mut locker);
-                    Some((locker, js))
-                } else {
-                    None
-                };
+                // SAFETY: lmi_ptr valid for request lifetime (pool-managed)
+                let _lock = unsafe { try_lock_v8(lmi_ptr) };
 
                 use std::pin::pin;
                 let result = unsafe {
@@ -1210,15 +1210,8 @@ impl ExecutionContext {
                     return std::task::Poll::Pending;
                 }
 
-                let _lock = if !lmi_ptr.is_null() {
-                    let lmi = unsafe { &mut *lmi_ptr };
-                    let mut locker = v8::Locker::new(&mut lmi.isolate);
-                    lmi.deferred_destruction_queue.process_all();
-                    let js = crate::gc::JsLock::new(&mut locker);
-                    Some((locker, js))
-                } else {
-                    None
-                };
+                // SAFETY: lmi_ptr valid for request lifetime (pool-managed)
+                let _lock = unsafe { try_lock_v8(lmi_ptr) };
 
                 use std::pin::pin;
                 let result: Result<(), String> = unsafe {
@@ -1326,15 +1319,8 @@ impl ExecutionContext {
                     return std::task::Poll::Pending;
                 }
 
-                let _lock = if !lmi_ptr.is_null() {
-                    let lmi = unsafe { &mut *lmi_ptr };
-                    let mut locker = v8::Locker::new(&mut lmi.isolate);
-                    lmi.deferred_destruction_queue.process_all();
-                    let js = crate::gc::JsLock::new(&mut locker);
-                    Some((locker, js))
-                } else {
-                    None
-                };
+                // SAFETY: lmi_ptr valid for request lifetime (pool-managed)
+                let _lock = unsafe { try_lock_v8(lmi_ptr) };
 
                 use std::pin::pin;
                 let result = unsafe {
@@ -1415,15 +1401,8 @@ impl ExecutionContext {
     pub fn reset(&mut self) -> Result<(), String> {
         // Acquire lock if pooled isolate (evaluate accesses V8 directly)
         let lmi_ptr = self.lmi_ptr;
-        let _lock_guard = if !lmi_ptr.is_null() {
-            let lmi = unsafe { &mut *lmi_ptr };
-            let mut locker = v8::Locker::new(&mut lmi.isolate);
-            lmi.deferred_destruction_queue.process_all();
-            let js = crate::gc::JsLock::new(&mut locker);
-            Some((locker, js))
-        } else {
-            None
-        };
+        // SAFETY: lmi_ptr valid for request lifetime (pool-managed)
+        let _lock_guard = unsafe { try_lock_v8(lmi_ptr) };
 
         // 0. Cancel any lingering terminate_execution flag from a previous timeout/abort.
         // Without this, evaluate() below would fail immediately if the flag is still set.

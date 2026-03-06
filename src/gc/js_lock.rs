@@ -2,19 +2,25 @@
 //!
 //! This module provides utilities for tracking when a V8 isolate is locked,
 //! enabling deferred external memory adjustments.
+//!
+//! Pending memory deltas are per-isolate (stored as `Arc<AtomicI64>` in
+//! `LockerManagedIsolate`). This prevents cross-isolate contamination when
+//! guards are dropped without holding the lock.
 
-use std::cell::Cell;
+use std::cell::RefCell;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-/// Global pending memory delta for deferred adjustments.
-/// When memory is freed without holding the lock, we accumulate here.
-/// Applied on next JsLock construction.
-static PENDING_MEMORY_DELTA: AtomicI64 = AtomicI64::new(0);
+/// Per-isolate state stored in the thread-local.
+struct CurrentIsolateState {
+    isolate: *mut v8::Isolate,
+    pending_delta: Arc<AtomicI64>,
+}
 
 thread_local! {
-    /// Current isolate pointer for this thread (if any).
+    /// Current isolate + pending delta for this thread (if any).
     /// Used by `JsLock::try_current()` to access the isolate from anywhere.
-    static CURRENT_ISOLATE: Cell<Option<*mut v8::Isolate>> = const { Cell::new(None) };
+    static CURRENT_STATE: RefCell<Option<CurrentIsolateState>> = const { RefCell::new(None) };
 }
 
 /// RAII guard that tracks when a V8 isolate is locked.
@@ -26,7 +32,7 @@ thread_local! {
 /// - External memory adjustments are applied immediately
 ///
 /// On construction:
-/// - Applies any pending deferred memory adjustments
+/// - Applies any pending deferred memory adjustments for this isolate
 /// - Registers the isolate in thread-local for `try_current()`
 ///
 /// On drop:
@@ -42,14 +48,16 @@ thread_local! {
 /// destruction_queue.process_all(&mut locker);
 ///
 /// // Then create JsLock for GC tracking
-/// let _gc_lock = JsLock::new(&mut *locker);
+/// let _gc_lock = JsLock::new(&mut *locker, &isolate_wrapper.pending_memory_delta);
 ///
 /// // Now ExternalMemoryGuard can track memory
 /// let guard = ExternalMemoryGuard::new(1_000_000);
 /// ```
 pub struct JsLock {
     isolate: *mut v8::Isolate,
-    previous: Option<*mut v8::Isolate>,
+    #[allow(dead_code)]
+    pending_delta: Arc<AtomicI64>,
+    previous: Option<CurrentIsolateState>,
 }
 
 impl JsLock {
@@ -58,13 +66,17 @@ impl JsLock {
     /// The isolate must already be locked via v8::Locker.
     /// This applies any pending memory adjustments and registers for `try_current()`.
     ///
+    /// `pending_delta` is the per-isolate deferred memory accumulator from
+    /// `LockerManagedIsolate`.
+    ///
     /// Note: For pooled isolates, call `DeferredDestructionQueue::process_all()`
     /// BEFORE creating JsLock to ensure deferred handles are cleaned up.
-    pub fn new(isolate: &mut v8::Isolate) -> Self {
+    pub fn new(isolate: &mut v8::Isolate, pending_delta: &Arc<AtomicI64>) -> Self {
         let isolate_ptr = isolate as *mut _;
+        let pending_delta = Arc::clone(pending_delta);
 
-        // Apply any deferred memory adjustments
-        let pending = PENDING_MEMORY_DELTA.swap(0, Ordering::SeqCst);
+        // Apply any deferred memory adjustments for THIS isolate
+        let pending = pending_delta.swap(0, Ordering::SeqCst);
 
         if pending != 0 {
             isolate.adjust_amount_of_external_allocated_memory(pending);
@@ -74,11 +86,17 @@ impl JsLock {
             );
         }
 
-        // Save previous isolate (for nested locks) and set ourselves as current
-        let previous = CURRENT_ISOLATE.with(|c| c.replace(Some(isolate_ptr)));
+        // Save previous state (for nested locks) and set ourselves as current
+        let previous = CURRENT_STATE.with(|c| {
+            c.replace(Some(CurrentIsolateState {
+                isolate: isolate_ptr,
+                pending_delta: Arc::clone(&pending_delta),
+            }))
+        });
 
         Self {
             isolate: isolate_ptr,
+            pending_delta,
             previous,
         }
     }
@@ -91,7 +109,14 @@ impl JsLock {
     /// This is used by `ExternalMemoryGuard` to determine whether to
     /// apply memory adjustments immediately or defer them.
     pub fn try_current() -> Option<JsLockRef> {
-        CURRENT_ISOLATE.with(|c| c.get().map(|ptr| JsLockRef { isolate: ptr }))
+        CURRENT_STATE.with(|c| {
+            let borrow = c.borrow();
+
+            borrow.as_ref().map(|state| JsLockRef {
+                isolate: state.isolate,
+                pending_delta: Arc::clone(&state.pending_delta),
+            })
+        })
     }
 
     /// Adjust the amount of external memory tracked by V8.
@@ -115,17 +140,18 @@ impl JsLock {
 
 impl Drop for JsLock {
     fn drop(&mut self) {
-        // Restore previous isolate (for nested locks)
-        CURRENT_ISOLATE.with(|c| c.set(self.previous));
+        // Restore previous state (for nested locks)
+        CURRENT_STATE.with(|c| c.replace(self.previous.take()));
     }
 }
 
 /// A reference to the current JsLock.
 ///
 /// This is a lightweight handle returned by `JsLock::try_current()`.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct JsLockRef {
     isolate: *mut v8::Isolate,
+    pending_delta: Arc<AtomicI64>,
 }
 
 impl JsLockRef {
@@ -138,20 +164,12 @@ impl JsLockRef {
             tracing::trace!("Adjusted external memory (via ref): {} bytes", delta);
         }
     }
-}
 
-/// Defer a memory adjustment until the next JsLock is acquired.
-///
-/// This is called when memory is freed without holding the lock.
-pub(crate) fn defer_memory_adjustment(delta: i64) {
-    if delta != 0 {
-        PENDING_MEMORY_DELTA.fetch_add(delta, Ordering::SeqCst);
-        tracing::trace!("Deferred external memory adjustment: {} bytes", delta);
+    /// Get a clone of the per-isolate pending memory delta accumulator.
+    ///
+    /// Used by `ExternalMemoryGuard` to capture the target isolate at creation
+    /// time, so deferred drops go to the correct isolate.
+    pub fn pending_delta(&self) -> Arc<AtomicI64> {
+        Arc::clone(&self.pending_delta)
     }
-}
-
-/// Get the current pending memory delta (for testing/debugging).
-#[cfg(test)]
-pub(crate) fn pending_memory_delta() -> i64 {
-    PENDING_MEMORY_DELTA.load(Ordering::SeqCst)
 }
