@@ -202,7 +202,7 @@ impl ExecutionContext {
         // 3. v8::Isolate and v8::OwnedIsolate have same memory layout
         let isolate_ptr = isolate as *mut v8::Isolate as *mut v8::OwnedIsolate;
 
-        let request = RequestContext {
+        let request = RequestContext::new(
             context,
             scheduler_tx,
             callback_rx,
@@ -214,9 +214,8 @@ impl ExecutionContext {
             fetch_response_tx,
             stream_manager,
             event_loop_handle,
-            aborted: Arc::new(AtomicBool::new(false)),
             cancel,
-        };
+        );
 
         Ok(Self {
             isolate: isolate_ptr,

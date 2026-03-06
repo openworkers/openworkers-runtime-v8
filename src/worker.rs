@@ -12,7 +12,8 @@ use openworkers_core::{
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio_util::task::AbortOnDropHandle;
 use v8;
 
 /// Worker provides per-request V8 isolate execution.
@@ -24,15 +25,9 @@ use v8;
 /// **For production:** Use [`crate::execute_pinned`] instead for better performance.
 pub struct Worker {
     pub(crate) runtime: Runtime,
-    _event_loop_handle: tokio::task::JoinHandle<()>,
+    _event_loop_handle: AbortOnDropHandle<()>,
     aborted: Arc<AtomicBool>,
-    cancel: CancellationToken,
-}
-
-impl Drop for Worker {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-    }
+    _cancel_guard: DropGuard,
 }
 
 /// Builder for creating Workers with flexible configuration.
@@ -585,9 +580,9 @@ impl Worker {
 
         Ok(Self {
             runtime,
-            _event_loop_handle: event_loop_handle,
+            _event_loop_handle: AbortOnDropHandle::new(event_loop_handle),
             aborted: Arc::new(AtomicBool::new(false)),
-            cancel,
+            _cancel_guard: cancel.drop_guard(),
         })
     }
 

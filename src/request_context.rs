@@ -13,7 +13,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{Notify, mpsc};
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::runtime::stream_manager::StreamManager;
 use crate::runtime::{CallbackId, CallbackMessage, SchedulerMessage};
@@ -53,20 +54,48 @@ pub struct RequestContext {
     /// Stream manager for body streaming
     pub stream_manager: Arc<StreamManager>,
 
-    /// Event loop task handle (aborted on drop)
-    pub event_loop_handle: tokio::task::JoinHandle<()>,
+    /// Event loop task handle — automatically aborted on drop
+    pub event_loop_handle: AbortOnDropHandle<()>,
 
     /// Abort flag (set on client disconnect or explicit abort)
     pub aborted: Arc<AtomicBool>,
 
-    /// Cancellation token for all spawned I/O tasks.
-    /// Cancelled on drop so in-flight fetch/KV/storage/stream tasks are cleaned up.
-    pub cancel: CancellationToken,
+    /// Cancellation token for all spawned I/O tasks — automatically cancelled on drop
+    _cancel_guard: DropGuard,
 }
 
-impl Drop for RequestContext {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.event_loop_handle.abort();
+impl RequestContext {
+    /// Create a new RequestContext. Takes ownership of the CancellationToken
+    /// and returns a clone for the caller to pass to the event loop.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        context: v8::Global<v8::Context>,
+        scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+        callback_rx: mpsc::UnboundedReceiver<CallbackMessage>,
+        callback_notify: Arc<Notify>,
+        fetch_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+        fetch_error_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+        stream_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+        next_callback_id: Rc<RefCell<CallbackId>>,
+        fetch_response_tx: Rc<RefCell<Option<tokio::sync::oneshot::Sender<String>>>>,
+        stream_manager: Arc<StreamManager>,
+        event_loop_handle: tokio::task::JoinHandle<()>,
+        cancel: CancellationToken,
+    ) -> Self {
+        Self {
+            context,
+            scheduler_tx,
+            callback_rx,
+            callback_notify,
+            fetch_callbacks,
+            fetch_error_callbacks,
+            stream_callbacks,
+            next_callback_id,
+            fetch_response_tx,
+            stream_manager,
+            event_loop_handle: AbortOnDropHandle::new(event_loop_handle),
+            aborted: Arc::new(AtomicBool::new(false)),
+            _cancel_guard: cancel.drop_guard(),
+        }
     }
 }
