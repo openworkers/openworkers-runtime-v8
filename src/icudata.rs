@@ -47,12 +47,11 @@ mod tests {
 
     #[test]
     fn test_intl_datetimeformat_works() {
-        // Use LockerManagedIsolate to be consistent with other tests
-        // Mixing v8::Isolate::new() with Locker-based isolates causes race conditions
         let limits = RuntimeLimits::default();
         let mut isolate_wrapper = LockerManagedIsolate::new(limits);
 
         let mut locker = v8::Locker::new(&mut isolate_wrapper.isolate);
+        let _isolate_scope = locker.enter();
         let scope = pin!(v8::HandleScope::new(&mut *locker));
         let mut scope = scope.init();
         let context = v8::Context::new(&scope, Default::default());
@@ -107,6 +106,7 @@ mod tests {
         let mut isolate_wrapper = LockerManagedIsolate::new(limits);
 
         let mut locker = v8::Locker::new(&mut isolate_wrapper.isolate);
+        let _isolate_scope = locker.enter();
         let scope = pin!(v8::HandleScope::new(&mut *locker));
         let mut scope = scope.init();
         let context = v8::Context::new(&scope, Default::default());
@@ -130,6 +130,73 @@ mod tests {
         let result_str = result.to_string(scope).unwrap().to_rust_string_lossy(scope);
 
         // German format: 1.234,56 €
+        assert!(
+            result_str.contains("1.234,56") || result_str.contains("€"),
+            "Should format as German currency: {}",
+            result_str
+        );
+    }
+
+    /// Same Intl tests with OwnedIsolate (auto-entered) to ensure consistent behavior.
+    #[test]
+    fn test_intl_datetimeformat_owned_isolate() {
+        crate::platform::get_platform();
+
+        let mut isolate = v8::Isolate::new(Default::default());
+
+        let scope = pin!(v8::HandleScope::new(&mut isolate));
+        let mut scope = scope.init();
+        let context = v8::Context::new(&scope, Default::default());
+        let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+        let code = v8::String::new(
+            scope,
+            r#"
+            const formatter = new Intl.DateTimeFormat('en-US', {
+                timeZone: 'Europe/Paris',
+                hour: 'numeric',
+                minute: 'numeric',
+                hour12: false
+            });
+            formatter.resolvedOptions().timeZone;
+            "#,
+        )
+        .unwrap();
+
+        let script = v8::Script::compile(scope, code, None).expect("Failed to compile script");
+        let result = script.run(scope).expect("Script should not OOM");
+
+        let result_str = result.to_string(scope).unwrap().to_rust_string_lossy(scope);
+        assert_eq!(result_str, "Europe/Paris");
+    }
+
+    #[test]
+    fn test_intl_numberformat_owned_isolate() {
+        crate::platform::get_platform();
+
+        let mut isolate = v8::Isolate::new(Default::default());
+
+        let scope = pin!(v8::HandleScope::new(&mut isolate));
+        let mut scope = scope.init();
+        let context = v8::Context::new(&scope, Default::default());
+        let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+        let code = v8::String::new(
+            scope,
+            r#"
+            const formatter = new Intl.NumberFormat('de-DE', {
+                style: 'currency',
+                currency: 'EUR'
+            });
+            formatter.format(1234.56);
+            "#,
+        )
+        .unwrap();
+
+        let script = v8::Script::compile(scope, code, None).expect("Failed to compile script");
+        let result = script.run(scope).expect("Script should execute");
+
+        let result_str = result.to_string(scope).unwrap().to_rust_string_lossy(scope);
         assert!(
             result_str.contains("1.234,56") || result_str.contains("€"),
             "Should format as German currency: {}",
