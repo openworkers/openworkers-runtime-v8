@@ -12,6 +12,7 @@ use openworkers_core::{
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio_util::sync::CancellationToken;
 use v8;
 
 /// Worker provides per-request V8 isolate execution.
@@ -25,6 +26,13 @@ pub struct Worker {
     pub(crate) runtime: Runtime,
     _event_loop_handle: tokio::task::JoinHandle<()>,
     aborted: Arc<AtomicBool>,
+    cancel: CancellationToken,
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 /// Builder for creating Workers with flexible configuration.
@@ -250,6 +258,8 @@ impl WorkerBuilder {
         // Start event loop
         let event_loop_stream_manager = stream_manager.clone();
         let event_loop_callback_notify = callback_notify.clone();
+        let cancel = CancellationToken::new();
+        let event_loop_cancel = cancel.clone();
 
         let event_loop_handle = tokio::task::spawn_local(async move {
             run_event_loop(
@@ -258,6 +268,7 @@ impl WorkerBuilder {
                 event_loop_callback_notify,
                 event_loop_stream_manager,
                 ops,
+                event_loop_cancel,
             )
             .await;
         });
@@ -431,7 +442,8 @@ impl WorkerBuilder {
             )),
         };
 
-        // Cleanup
+        // Cleanup: cancel all spawned I/O tasks, then abort the event loop
+        cancel.cancel();
         event_loop_handle.abort();
 
         result
@@ -553,6 +565,8 @@ impl Worker {
 
         // Get stream_manager for event loop
         let stream_manager = runtime.stream_manager.clone();
+        let cancel = CancellationToken::new();
+        let event_loop_cancel = cancel.clone();
 
         // Start event loop in background (with optional Operations handle)
         // Use spawn_local to keep it in the same LocalSet as the V8 worker,
@@ -564,6 +578,7 @@ impl Worker {
                 callback_notify,
                 stream_manager,
                 ops,
+                event_loop_cancel,
             )
             .await;
         });
@@ -572,6 +587,7 @@ impl Worker {
             runtime,
             _event_loop_handle: event_loop_handle,
             aborted: Arc::new(AtomicBool::new(false)),
+            cancel,
         })
     }
 

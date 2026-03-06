@@ -33,6 +33,7 @@ v8 = { package = "openworkers-v8", version = "145.0.3" }
 
 # Async runtime
 tokio = { version = "1.49.0", features = ["full"] }
+tokio-util = "0.7"
 futures = "0.3"
 
 # Logging & Tracing

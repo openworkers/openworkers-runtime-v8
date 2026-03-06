@@ -13,6 +13,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{Notify, mpsc};
+use tokio_util::sync::CancellationToken;
 
 use crate::runtime::stream_manager::StreamManager;
 use crate::runtime::{CallbackId, CallbackMessage, SchedulerMessage};
@@ -57,10 +58,15 @@ pub struct RequestContext {
 
     /// Abort flag (set on client disconnect or explicit abort)
     pub aborted: Arc<AtomicBool>,
+
+    /// Cancellation token for all spawned I/O tasks.
+    /// Cancelled on drop so in-flight fetch/KV/storage/stream tasks are cleaned up.
+    pub cancel: CancellationToken,
 }
 
 impl Drop for RequestContext {
     fn drop(&mut self) {
+        self.cancel.cancel();
         self.event_loop_handle.abort();
     }
 }

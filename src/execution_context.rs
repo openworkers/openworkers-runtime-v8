@@ -12,6 +12,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Notify, mpsc};
+use tokio_util::sync::CancellationToken;
 use v8;
 
 use crate::LockerManagedIsolate;
@@ -179,6 +180,8 @@ impl ExecutionContext {
         // The event loop only does async I/O (fetch, timers, bindings) — no V8 access.
         let event_loop_stream_manager = stream_manager.clone();
         let event_loop_callback_notify = callback_notify.clone();
+        let cancel = CancellationToken::new();
+        let event_loop_cancel = cancel.clone();
 
         let event_loop_handle = tokio::spawn(async move {
             crate::runtime::run_event_loop(
@@ -187,6 +190,7 @@ impl ExecutionContext {
                 event_loop_callback_notify,
                 event_loop_stream_manager,
                 ops,
+                event_loop_cancel,
             )
             .await;
         });
@@ -211,6 +215,7 @@ impl ExecutionContext {
             stream_manager,
             event_loop_handle,
             aborted: Arc::new(AtomicBool::new(false)),
+            cancel,
         };
 
         Ok(Self {

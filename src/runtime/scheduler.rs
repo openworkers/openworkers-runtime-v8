@@ -2,6 +2,9 @@
 //!
 //! Uses FuturesUnordered for timers instead of spawning individual tasks,
 //! similar to Deno's approach.
+//!
+//! All spawned I/O tasks observe a CancellationToken so they are cleaned up
+//! when the request ends (timeout, response sent, or context dropped).
 
 use std::collections::HashSet;
 use std::pin::Pin;
@@ -11,6 +14,7 @@ use std::time::Duration;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{Notify, mpsc};
 use tokio::time::Sleep;
+use tokio_util::sync::CancellationToken;
 
 use super::stream_manager::{self, StreamManager};
 use openworkers_core::{
@@ -119,6 +123,7 @@ pub async fn run_event_loop(
     callback_notify: Arc<Notify>,
     stream_manager: Arc<StreamManager>,
     ops: OperationsHandle,
+    cancel: CancellationToken,
 ) {
     let callback_tx = CallbackSender::new(callback_tx, callback_notify);
 
@@ -153,9 +158,14 @@ pub async fn run_event_loop(
                         let callback_tx = callback_tx.clone();
                         let manager = stream_manager.clone();
                         let ops = ops.clone();
+                        let cancel = cancel.clone();
 
                         tokio::spawn(async move {
-                            let result = execute_fetch_via_ops(request, manager, ops).await;
+                            let result = tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => return,
+                                r = execute_fetch_via_ops(request, manager, ops, cancel.clone()) => r,
+                            };
 
                             match result {
                                 Ok((meta, stream_id)) => {
@@ -174,10 +184,14 @@ pub async fn run_event_loop(
                         let callback_tx = callback_tx.clone();
                         let manager = stream_manager.clone();
                         let ops = ops.clone();
+                        let cancel = cancel.clone();
 
                         tokio::spawn(async move {
-                            let result =
-                                execute_binding_fetch_via_ops(binding_name, request, manager, ops).await;
+                            let result = tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => return,
+                                r = execute_binding_fetch_via_ops(binding_name, request, manager, ops, cancel.clone()) => r,
+                            };
 
                             match result {
                                 Ok((meta, stream_id)) => {
@@ -195,14 +209,17 @@ pub async fn run_event_loop(
                     SchedulerMessage::BindingStorage(callback_id, binding_name, storage_op) => {
                         let callback_tx = callback_tx.clone();
                         let ops = ops.clone();
+                        let cancel = cancel.clone();
 
                         tokio::spawn(async move {
-                            let result = ops
-                                .handle(Operation::BindingStorage {
+                            let result = tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => return,
+                                r = ops.handle(Operation::BindingStorage {
                                     binding: binding_name,
                                     op: storage_op,
-                                })
-                                .await;
+                                }) => r,
+                            };
 
                             let storage_result = match result {
                                 OperationResult::Storage(r) => r,
@@ -217,14 +234,17 @@ pub async fn run_event_loop(
                     SchedulerMessage::BindingKv(callback_id, binding_name, kv_op) => {
                         let callback_tx = callback_tx.clone();
                         let ops = ops.clone();
+                        let cancel = cancel.clone();
 
                         tokio::spawn(async move {
-                            let result = ops
-                                .handle(Operation::BindingKv {
+                            let result = tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => return,
+                                r = ops.handle(Operation::BindingKv {
                                     binding: binding_name,
                                     op: kv_op,
-                                })
-                                .await;
+                                }) => r,
+                            };
 
                             let kv_result = match result {
                                 OperationResult::Kv(r) => r,
@@ -238,14 +258,17 @@ pub async fn run_event_loop(
                     SchedulerMessage::BindingDatabase(callback_id, binding_name, database_op) => {
                         let callback_tx = callback_tx.clone();
                         let ops = ops.clone();
+                        let cancel = cancel.clone();
 
                         tokio::spawn(async move {
-                            let result = ops
-                                .handle(Operation::BindingDatabase {
+                            let result = tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => return,
+                                r = ops.handle(Operation::BindingDatabase {
                                     binding: binding_name,
                                     op: database_op,
-                                })
-                                .await;
+                                }) => r,
+                            };
 
                             let database_result = match result {
                                 OperationResult::Database(r) => r,
@@ -263,14 +286,17 @@ pub async fn run_event_loop(
                         let callback_tx = callback_tx.clone();
                         let manager = stream_manager.clone();
                         let ops = ops.clone();
+                        let cancel = cancel.clone();
 
                         tokio::spawn(async move {
-                            let result = ops
-                                .handle(Operation::BindingWorker {
+                            let result = tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => return,
+                                r = ops.handle(Operation::BindingWorker {
                                     binding: binding_name,
                                     request,
-                                })
-                                .await;
+                                }) => r,
+                            };
 
                             match result {
                                 OperationResult::Http(Ok(response)) => {
@@ -299,45 +325,8 @@ pub async fn run_event_loop(
                                                 .write_chunk(stream_id, stream_manager::StreamChunk::Done)
                                                 .await;
                                         }
-                                        ResponseBody::Stream(mut rx) => {
-                                            let mgr = manager.clone();
-
-                                            tokio::spawn(async move {
-                                                while let Some(result) = rx.recv().await {
-                                                    match result {
-                                                        Ok(bytes) => {
-                                                            if mgr
-                                                                .write_chunk(
-                                                                    stream_id,
-                                                                    stream_manager::StreamChunk::Data(
-                                                                        bytes,
-                                                                    ),
-                                                                )
-                                                                .await
-                                                                .is_err()
-                                                            {
-                                                                break;
-                                                            }
-                                                        }
-                                                        Err(e) => {
-                                                            let _ = mgr
-                                                                .write_chunk(
-                                                                    stream_id,
-                                                                    stream_manager::StreamChunk::Error(e),
-                                                                )
-                                                                .await;
-                                                            return;
-                                                        }
-                                                    }
-                                                }
-
-                                                let _ = mgr
-                                                    .write_chunk(
-                                                        stream_id,
-                                                        stream_manager::StreamChunk::Done,
-                                                    )
-                                                    .await;
-                                            });
+                                        ResponseBody::Stream(rx) => {
+                                            spawn_stream_reader(rx, stream_id, manager.clone(), cancel.clone());
                                         }
                                     }
 
@@ -363,12 +352,18 @@ pub async fn run_event_loop(
                     SchedulerMessage::StreamRead(callback_id, stream_id) => {
                         let callback_tx = callback_tx.clone();
                         let manager = stream_manager.clone();
+                        let cancel = cancel.clone();
 
                         tokio::spawn(async move {
-                            let chunk = match manager.read_chunk(stream_id).await {
-                                Ok(chunk) => chunk,
-                                Err(e) => stream_manager::StreamChunk::Error(e),
+                            let chunk = tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => return,
+                                r = manager.read_chunk(stream_id) => match r {
+                                    Ok(chunk) => chunk,
+                                    Err(e) => stream_manager::StreamChunk::Error(e),
+                                },
                             };
+
                             let _ = callback_tx.send(CallbackMessage::StreamChunk(callback_id, chunk));
                         });
                     }
@@ -408,14 +403,57 @@ pub async fn run_event_loop(
     }
 }
 
+/// Spawn a task that reads chunks from a response body stream and writes them
+/// to the stream manager. Cancelled when the request's CancellationToken fires.
+fn spawn_stream_reader(
+    mut rx: mpsc::Receiver<Result<bytes::Bytes, String>>,
+    stream_id: stream_manager::StreamId,
+    manager: Arc<StreamManager>,
+    cancel: CancellationToken,
+) {
+    tokio::spawn(async move {
+        loop {
+            let chunk = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                r = rx.recv() => r,
+            };
+
+            match chunk {
+                Some(Ok(bytes)) => {
+                    if manager
+                        .write_chunk(stream_id, stream_manager::StreamChunk::Data(bytes))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Some(Err(e)) => {
+                    let _ = manager
+                        .write_chunk(stream_id, stream_manager::StreamChunk::Error(e))
+                        .await;
+                    return;
+                }
+                None => break,
+            }
+        }
+
+        let _ = manager
+            .write_chunk(stream_id, stream_manager::StreamChunk::Done)
+            .await;
+    });
+}
+
 /// Execute fetch via OperationsHandler
 async fn execute_fetch_via_ops(
     request: HttpRequest,
     stream_manager: Arc<StreamManager>,
     ops: OperationsHandle,
+    cancel: CancellationToken,
 ) -> Result<(HttpResponseMeta, stream_manager::StreamId), String> {
     let result = ops.handle(Operation::Fetch(request)).await;
-    convert_fetch_result_to_stream(result, stream_manager).await
+    convert_fetch_result_to_stream(result, stream_manager, cancel).await
 }
 
 /// Execute binding fetch via OperationsHandler
@@ -424,6 +462,7 @@ async fn execute_binding_fetch_via_ops(
     request: HttpRequest,
     stream_manager: Arc<StreamManager>,
     ops: OperationsHandle,
+    cancel: CancellationToken,
 ) -> Result<(HttpResponseMeta, stream_manager::StreamId), String> {
     let result = ops
         .handle(Operation::BindingFetch {
@@ -431,13 +470,14 @@ async fn execute_binding_fetch_via_ops(
             request,
         })
         .await;
-    convert_fetch_result_to_stream(result, stream_manager).await
+    convert_fetch_result_to_stream(result, stream_manager, cancel).await
 }
 
 /// Convert OperationResult to (HttpResponseMeta, StreamId)
 async fn convert_fetch_result_to_stream(
     result: OperationResult,
     stream_manager: Arc<StreamManager>,
+    cancel: CancellationToken,
 ) -> Result<(HttpResponseMeta, stream_manager::StreamId), String> {
     let response = match result {
         OperationResult::Http(r) => r?,
@@ -469,34 +509,8 @@ async fn convert_fetch_result_to_stream(
                 .write_chunk(stream_id, stream_manager::StreamChunk::Done)
                 .await;
         }
-        ResponseBody::Stream(mut rx) => {
-            let manager = stream_manager.clone();
-
-            tokio::spawn(async move {
-                while let Some(result) = rx.recv().await {
-                    match result {
-                        Ok(bytes) => {
-                            if manager
-                                .write_chunk(stream_id, stream_manager::StreamChunk::Data(bytes))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            let _ = manager
-                                .write_chunk(stream_id, stream_manager::StreamChunk::Error(e))
-                                .await;
-                            return;
-                        }
-                    }
-                }
-
-                let _ = manager
-                    .write_chunk(stream_id, stream_manager::StreamChunk::Done)
-                    .await;
-            });
+        ResponseBody::Stream(rx) => {
+            spawn_stream_reader(rx, stream_id, stream_manager.clone(), cancel);
         }
     }
 
