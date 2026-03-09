@@ -192,9 +192,12 @@ impl WorkerBuilder {
             bindings::setup_response_stream_ops(scope, stream_manager.clone());
             crypto::setup_crypto(scope);
 
+            // Native text encoding (can't be serialized in snapshot)
+            text_encoding::setup_text_encoding_natives(scope);
+
             // Pure JS APIs (only if no snapshot)
             if !use_snapshot {
-                text_encoding::setup_text_encoding(scope);
+                text_encoding::setup_text_encoding_classes(scope);
                 streams::setup_readable_stream(scope);
                 bindings::setup_blob(scope);
                 bindings::setup_form_data(scope);

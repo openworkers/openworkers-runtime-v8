@@ -95,8 +95,11 @@ pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
         // Modifying these built-ins in the snapshot context corrupts V8's internal state,
         // breaking context bootstrapping. Applied at context creation time instead.
 
-        // Setup TextEncoder/TextDecoder (pre-compiled in snapshot - pure JS)
-        crate::runtime::text_encoding::setup_text_encoding(scope);
+        // Setup TextEncoder/TextDecoder JS class wrappers (pure JS).
+        // Native __text_encode/__text_decode are registered at runtime.
+        let code = v8::String::new(scope, crate::runtime::text_encoding::TEXT_ENCODING_JS).unwrap();
+        let script = v8::Script::compile(scope, code, None).unwrap();
+        script.run(scope);
 
         // Setup ReadableStream API (pre-compiled in snapshot - pure JS)
         crate::runtime::streams::setup_readable_stream(scope);
@@ -194,7 +197,9 @@ pub fn create_worker_snapshot(
 
         // Standalone snapshot — set up all pure JS APIs from scratch
         crate::runtime::bindings::setup_global_aliases(scope);
-        crate::runtime::text_encoding::setup_text_encoding(scope);
+        let code = v8::String::new(scope, crate::runtime::text_encoding::TEXT_ENCODING_JS).unwrap();
+        let script = v8::Script::compile(scope, code, None).unwrap();
+        script.run(scope);
         crate::runtime::streams::setup_readable_stream(scope);
         crate::runtime::bindings::setup_blob(scope);
         crate::runtime::bindings::setup_form_data(scope);

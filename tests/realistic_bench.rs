@@ -342,6 +342,7 @@ async fn bench_pinned_simple() {
                 ops: ops.clone(),
                 task,
                 on_warm_hit: None,
+                env_updated_at: None,
             })
             .await
             .unwrap();
@@ -397,6 +398,7 @@ async fn bench_pinned_with_fetch() {
                 ops: ops.clone(),
                 task,
                 on_warm_hit: None,
+                env_updated_at: None,
             })
             .await
             .unwrap();
@@ -452,6 +454,7 @@ async fn bench_pinned_multi_fetch() {
                 ops: ops.clone(),
                 task,
                 on_warm_hit: None,
+                env_updated_at: None,
             })
             .await
             .unwrap();

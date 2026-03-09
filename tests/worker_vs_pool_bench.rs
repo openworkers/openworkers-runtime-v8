@@ -119,6 +119,7 @@ async fn bench_pinned_cold_start() {
                 ops: ops.clone(),
                 task,
                 on_warm_hit: None,
+                env_updated_at: None,
             })
             .await
             .unwrap();
@@ -169,6 +170,7 @@ async fn bench_pinned_warm_start() {
                 ops: ops.clone(),
                 task,
                 on_warm_hit: None,
+                env_updated_at: None,
             })
             .await
             .unwrap();
@@ -189,6 +191,7 @@ async fn bench_pinned_warm_start() {
                 ops: ops.clone(),
                 task,
                 on_warm_hit: None,
+                env_updated_at: None,
             })
             .await
             .unwrap();

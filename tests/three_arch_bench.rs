@@ -178,6 +178,7 @@ async fn bench_pinned_standard() {
                 ops: ops.clone(),
                 task,
                 on_warm_hit: None,
+                env_updated_at: None,
             })
             .await
             .unwrap();
@@ -235,6 +236,7 @@ async fn bench_pinned_cpu_bound() {
                 ops: ops.clone(),
                 task,
                 on_warm_hit: None,
+                env_updated_at: None,
             })
             .await
             .unwrap();
@@ -282,6 +284,7 @@ async fn bench_pinned_warm_cache() {
                 ops: ops.clone(),
                 task,
                 on_warm_hit: None,
+                env_updated_at: None,
             })
             .await
             .unwrap();
@@ -302,6 +305,7 @@ async fn bench_pinned_warm_cache() {
                 ops: ops.clone(),
                 task,
                 on_warm_hit: None,
+                env_updated_at: None,
             })
             .await
             .unwrap();
