@@ -10,65 +10,72 @@ platform.rs                     ← V8 Platform (singleton, once per process)
     ├── Runtime                 ← Full V8 engine + context + event loop
     │       └── Worker          ← Wrapper, creates isolate per request
     │
-    ├── SharedIsolate           ← Reusable isolate (thread-local, no pool)
-    │       └── ExecutionContext ← Disposable context on shared isolate
-    │
     └── LockerManagedIsolate    ← Reusable isolate (multi-thread safe)
-            ├── IsolatePool     ← Global LRU cache with v8::Locker
-            └── ThreadPinnedPool ← Thread-local pool with warm context reuse
+            └── Pool            ← Thread-local pool with warm context reuse
 ```
 
 ## Core Structures
 
-| Structure                | File                        | Purpose                         | Creates           |
-| ------------------------ | --------------------------- | ------------------------------- | ----------------- |
-| **Runtime**              | `runtime/mod.rs`            | V8 isolate + context + channels | New isolate       |
-| **Worker**               | `worker.rs`                 | High-level API around Runtime   | New isolate/req   |
-| **SharedIsolate**        | `shared_isolate.rs`         | Thread-local reusable isolate   | Once/thread       |
-| **ExecutionContext**     | `execution_context.rs`      | Disposable context              | Tens of µs        |
-| **LockerManagedIsolate** | `locker_managed_isolate.rs` | Pool-compatible isolate         | Once/worker       |
-| **IsolatePool**          | `isolate_pool.rs`           | Global LRU cache                | Manages lifecycle |
-| **ThreadPinnedPool**     | `thread_pinned_pool.rs`     | Thread-local pool + warm cache  | Per thread        |
+| Structure                | File                        | Purpose                              | Creates         |
+| ------------------------ | --------------------------- | ------------------------------------ | --------------- |
+| **Runtime**              | `runtime/mod.rs`            | V8 isolate + context + channels      | New isolate     |
+| **Worker**               | `worker.rs`                 | High-level API around Runtime        | New isolate/req |
+| **ExecutionContext**     | `execution_context.rs`      | Disposable context on pooled isolate | Tens of µs      |
+| **LockerManagedIsolate** | `locker_managed_isolate.rs` | Pool-compatible isolate              | Once/worker     |
+| **Pool**                 | `pool.rs`                   | Thread-local pool + warm cache       | Per thread      |
+| **RequestContext**       | `request_context.rs`        | Per-request V8 context state         | Per request     |
 
 ## Execution Modes
 
-| Mode              | API                | Performance      | Use Case                 |
-| ----------------- | ------------------ | ---------------- | ------------------------ |
-| **Worker**        | `Worker::new()`    | Few ms/req       | Max isolation, tests     |
-| **Shared Pool**   | `execute_pooled()` | Tens of µs/req   | Multi-thread             |
-| **Thread-Pinned** | `execute_pinned()` | Sub-µs (warm)    | Multi-tenant, warm reuse |
+| Mode       | API                | Performance   | Use Case                 |
+| ---------- | ------------------ | ------------- | ------------------------ |
+| **Pool**   | `execute_pinned()` | Sub-µs (warm) | Production, multi-tenant |
+| **Worker** | `Worker::new()`    | Few ms/req    | Max isolation, tests     |
 
 **Code pointers:**
-- `execute_pooled()` → `pooled_execution.rs` (uses `isolate_pool.rs`)
-- `execute_pinned()` → `thread_pinned_pool.rs`
+
+- `execute_pinned()` → `pool.rs`
 - `Worker` → `worker.rs`
 
 See [execution_modes.md](./execution_modes.md) for details.
 
 ## Benchmarks
 
-Multi-threaded benchmark (4 OS threads × 20 requests = 80 total):
+Historical benchmark (4 OS threads x 20 requests = 80 total, three architectures):
 
 ```
 ┌─────────────────┬──────────────┬─────────────────┐
 │ Architecture    │  Throughput  │ vs Worker       │
 ├─────────────────┼──────────────┼─────────────────┤
 │ Worker          │  1,474 req/s │ baseline        │
-│ Shared Pool     │  4,851 req/s │ +229%           │
+│ Shared Pool *   │  4,851 req/s │ +229%           │
 │ Thread-Pinned   │  5,766 req/s │ +291%           │
 └─────────────────┴──────────────┴─────────────────┘
+
+* Shared Pool (cross-thread via global Mutex + v8::Locker) has been removed.
+  It degraded under contention: 9x slower than Worker in extreme cases (8 threads, 1 isolate).
+  Thread-Pinned (now the only pool mode) avoids this entirely with thread-local pools.
 ```
 
-**Key insights:**
+Detailed results (runtime-v8, real workers):
 
-- **Pooling = ~4x faster** than creating new isolates per request
-- **Thread-Pinned** beats Shared Pool by +19% (no mutex contention)
-- Under high contention (8 threads), Thread-Pinned wins by **+167%**
+| Test           | Worker    | Shared Pool \* | Thread-Pinned   |
+| -------------- | --------- | -------------- | --------------- |
+| CPU-bound      | 400 req/s | 578 req/s      | 556 req/s       |
+| Standard (5ms) | 118 req/s | 126 req/s      | 126 req/s       |
+| Warm cache     | N/A       | 1,551 req/s    | **2,077 req/s** |
 
-Run benchmarks with:
+Synthetic results (raw V8, no runtime overhead):
+
+| Test          | Worker | Shared Pool \* | Thread-Pinned |
+| ------------- | ------ | -------------- | ------------- |
+| CPU 8t/4i     | 9,945  | 5,423          | **10,450**    |
+| Extreme 8t/1i | 10,083 | **1,094**      | **19,511**    |
+
+Run current benchmarks with:
 
 ```bash
-cargo test --test multithread_bench -- --nocapture --test-threads=1
+cargo test --test worker_vs_pool_bench -- --nocapture --test-threads=1
 ```
 
 ## Event Loop
@@ -100,7 +107,7 @@ OwnedIsolate              UnenteredIsolate + Locker
 ─────────────             ─────────────────────────
 Auto-enters thread        No auto-enter
 Single-thread only        Any thread can lock
-Used by: Runtime          Used by: IsolatePool, ThreadPinnedPool
+Used by: Runtime          Used by: Pool
 ```
 
 **Why two types?** V8 isolates are single-threaded. `OwnedIsolate` binds to one thread. `UnenteredIsolate` + `v8::Locker` allows any thread to temporarily own the isolate—essential for pooling.
@@ -140,20 +147,22 @@ Used by: Runtime          Used by: IsolatePool, ThreadPinnedPool
 
 ## Key Files
 
-| File                    | Lines  | Purpose                              |
-| ----------------------- | ------ | ------------------------------------ |
-| `runtime/mod.rs`        | ~700   | V8 setup, callback processing        |
-| `runtime/bindings/`     | ~2500  | JS native functions (folder)         |
-| `worker.rs`             | ~1800  | Worker API, event loop               |
-| `execution_context.rs`  | ~1500  | Pooled execution context, warm reuse |
-| `thread_pinned_pool.rs` | ~1100  | Thread-local pool, warm cache        |
-| `execution_helpers.rs`  | ~200   | Shared helpers, EventLoopExit        |
-| `isolate_pool.rs`       | ~450   | Global LRU cache, v8::Locker         |
-| `event_loop.rs`         | ~80    | Shared polling logic (trait)         |
-| `platform.rs`           | ~80    | V8 platform singleton                |
+| File                        | Lines | Purpose                              |
+| --------------------------- | ----- | ------------------------------------ |
+| `runtime/mod.rs`            | ~780  | V8 setup, callback processing        |
+| `runtime/bindings/`         | ~2600 | JS native functions (folder)         |
+| `worker.rs`                 | ~1800 | Worker API, event loop               |
+| `execution_context.rs`      | ~1500 | Pooled execution context, warm reuse |
+| `pool.rs`                   | ~1090 | Thread-local pool, warm cache        |
+| `execution_helpers.rs`      | ~490  | Shared helpers, EventLoopExit        |
+| `async_waiter.rs`           | ~210  | Fair FIFO queue (multiplexing)       |
+| `locker_managed_isolate.rs` | ~200  | UnenteredIsolate + Locker wrapper    |
+| `request_context.rs`        | ~100  | Per-request V8 context state         |
+| `event_loop.rs`             | ~80   | Shared polling logic (trait)         |
+| `platform.rs`               | ~80   | V8 platform singleton                |
 
 ## See Also
 
 - [execution_modes.md](./execution_modes.md) — When to use each mode
-- [isolate_pool.md](./isolate_pool.md) — Pool implementation details
 - [streams.md](./streams.md) — Streaming architecture
+- [testing.md](./testing.md) — V8 testing constraints

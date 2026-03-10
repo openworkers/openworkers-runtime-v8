@@ -6,12 +6,7 @@ V8 has quirks that can cause flaky tests when running in parallel. This document
 
 V8 has a global flag `g_locker_was_ever_used_` (in `v8threads.cc`). Once **any** thread uses `v8::Locker`, V8 expects **ALL** isolate access to use Locker.
 
-This means:
-- `LockerManagedIsolate` tests (use Locker)
-- `SharedIsolate` tests (don't use Locker)
-- Direct `v8::Isolate::new()` tests (don't use Locker)
-
-**Cannot run in parallel** if they actually execute V8 code.
+This means tests using `LockerManagedIsolate` (uses Locker) and tests using direct `v8::Isolate::new()` (no Locker) **cannot run in parallel** if they execute V8 code.
 
 ### Symptoms of Mixing
 
@@ -33,7 +28,7 @@ Random SIGABRT crashes in V8's bundled libc++ = Locker/non-Locker mixing.
 
      #[test]
      #[serial(v8)]
-     fn test_shared_isolate_executes_js() { ... }
+     fn test_executes_js() { ... }
      ```
 
 3. **Quick diagnosis** - if tests are flaky, confirm with:

@@ -5,12 +5,14 @@
     "libc",
     "microtask",
     "microtasks",
+    "mpsc",
     "ntest",
     "oneshot",
     "openworkers",
     "reqwest",
     "rustls",
     "serde",
+    "SIGABRT",
     "usize"
   ]
 }

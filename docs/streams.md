@@ -50,15 +50,15 @@ pub enum StreamChunk {
 }
 ```
 
-| Method                     | Called by | Purpose                            |
-| -------------------------- | --------- | ---------------------------------- |
-| `create_stream(url)`       | Rust      | Create bounded channel, return ID  |
-| `write_chunk(id, chunk)`   | Rust      | Send data (async, backpressure)    |
-| `try_write_chunk(id, chunk)` | Rust    | Send data (sync, fails if full)    |
-| `read_chunk(id).await`     | Scheduler | Receive data for JS callback       |
-| `take_receiver(id)`        | Rust      | Take receiver for HttpBody::Stream |
-| `pump_request_body(rx)`    | Rust      | Bridge mpsc::Receiver to stream    |
-| `close_stream(id)`         | Both      | Cleanup                            |
+| Method                       | Called by | Purpose                            |
+| ---------------------------- | --------- | ---------------------------------- |
+| `create_stream(url)`         | Rust      | Create bounded channel, return ID  |
+| `write_chunk(id, chunk)`     | Rust      | Send data (async, backpressure)    |
+| `try_write_chunk(id, chunk)` | Rust      | Send data (sync, fails if full)    |
+| `read_chunk(id).await`       | Scheduler | Receive data for JS callback       |
+| `take_receiver(id)`          | Rust      | Take receiver for HttpBody::Stream |
+| `pump_request_body(rx)`      | Rust      | Bridge mpsc::Receiver to stream    |
+| `close_stream(id)`           | Both      | Cleanup                            |
 
 ### Messages
 
@@ -77,13 +77,13 @@ CallbackMessage::StreamChunk(callback_id, StreamChunk)
 // Reading streams (fetch response, request body)
 __nativeStreamRead(streamId, callback);
 __nativeStreamCancel(streamId);
-const stream = __createNativeStream(streamId);  // → ReadableStream
+const stream = __createNativeStream(streamId); // → ReadableStream
 
 // Writing streams (streaming response)
 const id = __responseStreamCreate();
-__responseStreamWrite(id, uint8Array);  // → bool (false if full)
+__responseStreamWrite(id, uint8Array); // → bool (false if full)
 __responseStreamEnd(id);
-__responseStreamIsClosed(id);           // → bool
+__responseStreamIsClosed(id); // → bool
 ```
 
 ## Data Flow
@@ -164,8 +164,8 @@ while (true) {
 
 ## Code Pointers
 
-| Component      | File                        | Key functions                          |
-| -------------- | --------------------------- | -------------------------------------- |
-| StreamManager  | `runtime/stream_manager.rs` | `create_stream()`, `write_chunk()`, `read_chunk()` |
-| JS bindings    | `runtime/bindings/streams.rs` | `__nativeStreamRead()`               |
-| Scheduler      | `runtime/scheduler.rs`      | `SchedulerMessage::StreamRead`         |
+| Component     | File                          | Key functions                                      |
+| ------------- | ----------------------------- | -------------------------------------------------- |
+| StreamManager | `runtime/stream_manager.rs`   | `create_stream()`, `write_chunk()`, `read_chunk()` |
+| JS bindings   | `runtime/bindings/streams.rs` | `__nativeStreamRead()`                             |
+| Scheduler     | `runtime/scheduler.rs`        | `SchedulerMessage::StreamRead`                     |

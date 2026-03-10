@@ -28,6 +28,7 @@ execute_pinned(PinnedExecuteRequest {
     ops,
     task: event,
     on_warm_hit: None,
+    env_updated_at: None,
 }).await?;
 ```
 
