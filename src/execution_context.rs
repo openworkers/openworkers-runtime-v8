@@ -126,10 +126,6 @@ impl ExecutionContext {
         let context = {
             use std::pin::pin;
 
-            // SAFETY: IsolateScope and HandleScope both need &mut Isolate from the same source.
-            // This is the same pattern used in evaluate() (line 535).
-            let isolate_ptr = isolate as *mut v8::Isolate;
-            let _isolate_scope = unsafe { v8::IsolateScope::new(&mut *isolate_ptr) };
             let scope = pin!(v8::HandleScope::new(isolate));
             let mut scope = scope.init();
             let context = v8::Context::new(&scope, Default::default());
@@ -322,10 +318,6 @@ impl ExecutionContext {
     ) -> Result<(), TerminationReason> {
         use std::pin::pin;
 
-        // SAFETY: IsolateScope needs &mut Isolate, same source as HandleScope below.
-        let isolate_ptr = isolate as *mut v8::Isolate;
-        let _isolate_scope = unsafe { v8::IsolateScope::new(&mut *isolate_ptr) };
-
         match code {
             WorkerCode::JavaScript(js) => {
                 let scope = pin!(v8::HandleScope::new(isolate));
@@ -457,7 +449,6 @@ impl ExecutionContext {
         match code {
             WorkerCode::JavaScript(js) => unsafe {
                 let isolate = &mut *self.isolate;
-                let _scope = v8::IsolateScope::new(isolate);
                 let scope = pin!(v8::HandleScope::new(isolate));
                 let mut scope = scope.init();
                 let context = v8::Local::new(&scope, &self.request.context);
@@ -481,7 +472,6 @@ impl ExecutionContext {
 
                 unsafe {
                     let isolate = &mut *self.isolate;
-                    let _scope = v8::IsolateScope::new(isolate);
                     let scope = pin!(v8::HandleScope::new(isolate));
                     let mut scope = scope.init();
                     let context = v8::Local::new(&scope, &self.request.context);
@@ -578,7 +568,6 @@ impl ExecutionContext {
         // Now enter V8 scope
         unsafe {
             let isolate = &mut *self.isolate;
-            let _scope = v8::IsolateScope::new(isolate);
             let scope = pin!(v8::HandleScope::new(isolate));
             let mut scope = scope.init();
             let context = v8::Local::new(&scope, &self.request.context);
@@ -741,7 +730,6 @@ impl ExecutionContext {
         // Without this, .then() handlers and async/await continuations never execute.
         unsafe {
             let isolate = &mut *self.isolate;
-            let _scope = v8::IsolateScope::new(isolate);
             let scope = pin!(v8::HandleScope::new(isolate));
             let mut scope = scope.init();
             let context = v8::Local::new(&scope, &self.request.context);
@@ -779,7 +767,6 @@ impl ExecutionContext {
 
         unsafe {
             let isolate = &mut *self.isolate;
-            let _scope = v8::IsolateScope::new(isolate);
             let scope = pin!(v8::HandleScope::new(isolate));
             let mut scope = scope.init();
             let context = v8::Local::new(&scope, &self.request.context);
@@ -1121,7 +1108,6 @@ impl ExecutionContext {
                 use std::pin::pin;
                 let result = unsafe {
                     let isolate = &mut *self.isolate;
-                    let _scope = v8::IsolateScope::new(isolate);
                     let scope = pin!(v8::HandleScope::new(isolate));
                     let mut scope = scope.init();
                     let context = v8::Local::new(&scope, &self.request.context);
@@ -1168,7 +1154,6 @@ impl ExecutionContext {
                 use std::pin::pin;
                 let result = unsafe {
                     let isolate = &mut *self.isolate;
-                    let _scope = v8::IsolateScope::new(isolate);
                     let scope = pin!(v8::HandleScope::new(isolate));
                     let mut scope = scope.init();
                     let context = v8::Local::new(&scope, &self.request.context);
@@ -1240,7 +1225,6 @@ impl ExecutionContext {
                 use std::pin::pin;
                 let result: Result<(), String> = unsafe {
                     let isolate = &mut *self.isolate;
-                    let _scope = v8::IsolateScope::new(isolate);
                     let scope = pin!(v8::HandleScope::new(isolate));
                     let mut scope = scope.init();
                     let context = v8::Local::new(&scope, &self.request.context);
@@ -1349,7 +1333,6 @@ impl ExecutionContext {
                 use std::pin::pin;
                 let result = unsafe {
                     let isolate = &mut *self.isolate;
-                    let _scope = v8::IsolateScope::new(isolate);
                     let scope = pin!(v8::HandleScope::new(isolate));
                     let mut scope = scope.init();
                     let context = v8::Local::new(&scope, &self.request.context);

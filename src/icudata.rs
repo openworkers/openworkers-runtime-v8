@@ -51,7 +51,6 @@ mod tests {
         let mut isolate_wrapper = LockerManagedIsolate::new(limits);
 
         let mut locker = v8::Locker::new(&mut isolate_wrapper.isolate);
-        let _isolate_scope = locker.enter();
         let scope = pin!(v8::HandleScope::new(&mut *locker));
         let mut scope = scope.init();
         let context = v8::Context::new(&scope, Default::default());
@@ -106,7 +105,6 @@ mod tests {
         let mut isolate_wrapper = LockerManagedIsolate::new(limits);
 
         let mut locker = v8::Locker::new(&mut isolate_wrapper.isolate);
-        let _isolate_scope = locker.enter();
         let scope = pin!(v8::HandleScope::new(&mut *locker));
         let mut scope = scope.init();
         let context = v8::Context::new(&scope, Default::default());
