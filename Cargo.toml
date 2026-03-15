@@ -3,7 +3,7 @@ members = ["gc-derive"]
 
 [package]
 name = "openworkers-runtime-v8"
-version = "0.13.12"
+version = "0.13.13"
 edition = "2024"
 license = "MIT"
 
@@ -29,7 +29,7 @@ gc-derive = { package = "openworkers-runtime-v8-gc-derive", path = "gc-derive" }
 openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.13.1" }
 
 # V8 JavaScript engine (fork with UnenteredIsolate + Locker support for pooling)
-v8 = { package = "openworkers-v8", version = "145.0.4" }
+v8 = { package = "openworkers-v8", version = "146.5.1" }
 
 # Async runtime
 tokio = { version = "1.49.0", features = ["full"] }
@@ -44,10 +44,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # V8 serialization (for automatic Rust <-> JS type conversion)
-serde_v8 = { package = "openworkers-serde-v8", version = "145" }
+serde_v8 = { package = "openworkers-serde-v8", version = "146" }
 
 # V8 Glue - binding macros
-glue_v8 = { package = "openworkers-glue-v8", version = "145" }
+glue_v8 = { package = "openworkers-glue-v8", version = "146" }
 
 # HTTP types
 bytes = { version = "1.11", features = ["serde"] }
