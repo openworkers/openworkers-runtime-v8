@@ -594,11 +594,11 @@ pub fn setup_url(scope: &mut v8::PinScope) {
 
                     if (url.startsWith('/')) {
                         // Absolute path - use origin from base
-                        const match = baseUrl.match(/^(https?:\/\/[^\/]+)/);
+                        const match = baseUrl.match(/^([a-z][a-z0-9+\-.]*:\/\/[^\/]+)/i);
                         url = match ? match[1] + url : url;
-                    } else if (!url.match(/^https?:\/\//)) {
+                    } else if (!url.match(/^[a-z][a-z0-9+\-.]*:\/\//i)) {
                         // Relative path - append to base directory
-                        const hasPath = baseUrl.match(/^https?:\/\/[^\/]+\//);
+                        const hasPath = baseUrl.match(/^[a-z][a-z0-9+\-.]*:\/\/[^\/]+\//i);
                         if (hasPath) {
                             url = baseUrl.replace(/\/[^\/]*$/, '/') + url;
                         } else {
@@ -608,20 +608,28 @@ pub fn setup_url(scope: &mut v8::PinScope) {
                 }
 
                 this.href = url;
-                const match = url.match(/^(https?):\/\/([^\/\?#]+)(\/[^\?#]*)?(\?[^#]*)?(#.*)?$/);
+
+                // scheme://[userinfo@]host[:port][/path][?query][#hash]
+                const match = url.match(/^([a-z][a-z0-9+\-.]*):\/\/(?:([^@\/\?#]*)@)?([^:\/?#]*)(?::(\d+))?(\/[^\?#]*)?(\?[^#]*)?(#.*)?$/i);
 
                 if (match) {
                     this.protocol = match[1] + ':';
-                    this.host = match[2];
-                    this.hostname = match[2].split(':')[0];
-                    this.port = match[2].includes(':') ? match[2].split(':')[1] : '';
-                    this.pathname = match[3] || '/';
-                    this.search = match[4] || '';
-                    this.hash = match[5] || '';
+                    const userinfo = match[2] || '';
+                    const colonIdx = userinfo.indexOf(':');
+                    this.username = decodeURIComponent(colonIdx >= 0 ? userinfo.slice(0, colonIdx) : userinfo);
+                    this.password = decodeURIComponent(colonIdx >= 0 ? userinfo.slice(colonIdx + 1) : '');
+                    this.hostname = match[3];
+                    this.port = match[4] || '';
+                    this.host = this.hostname + (this.port ? ':' + this.port : '');
+                    this.pathname = match[5] || '/';
+                    this.search = match[6] || '';
+                    this.hash = match[7] || '';
                     this.origin = this.protocol + '//' + this.host;
                     this.searchParams = new URLSearchParams(this.search);
                 } else {
                     this.protocol = '';
+                    this.username = '';
+                    this.password = '';
                     this.host = '';
                     this.hostname = '';
                     this.port = '';
