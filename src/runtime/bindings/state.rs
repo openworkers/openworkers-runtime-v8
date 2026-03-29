@@ -1,5 +1,5 @@
 use super::super::{CallbackId, SchedulerMessage, stream_manager};
-use openworkers_core::LogLevel;
+use openworkers_core::{LogLevel, WebSocketId};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -46,6 +46,17 @@ pub struct StreamState {
 #[derive(Clone)]
 pub struct ResponseStreamState {
     pub manager: Arc<stream_manager::StreamManager>,
+}
+
+/// State for WebSocket event callbacks (message, close, error dispatchers).
+///
+/// Indexed by WebSocketId (not CallbackId) because these are persistent
+/// for the lifetime of the connection, unlike fetch callbacks which are one-shot.
+///
+/// Connect resolve/reject callbacks reuse FetchState (same CallbackId pattern).
+#[derive(Clone)]
+pub struct WebSocketEventState {
+    pub callbacks: Rc<RefCell<HashMap<WebSocketId, v8::Global<v8::Function>>>>,
 }
 
 /// State for performance.now() timing

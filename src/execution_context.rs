@@ -115,6 +115,7 @@ impl ExecutionContext {
         let fetch_callbacks = Rc::new(RefCell::new(HashMap::new()));
         let fetch_error_callbacks = Rc::new(RefCell::new(HashMap::new()));
         let stream_callbacks = Rc::new(RefCell::new(HashMap::new()));
+        let ws_event_callbacks = Rc::new(RefCell::new(HashMap::new()));
         let next_callback_id = Rc::new(RefCell::new(1));
         let fetch_response_tx = Rc::new(RefCell::new(None));
         let stream_manager = Arc::new(stream_manager::StreamManager::new());
@@ -153,6 +154,7 @@ impl ExecutionContext {
                 next_callback_id.clone(),
             );
             bindings::setup_response_stream_ops(scope, stream_manager.clone());
+            bindings::setup_websocket(scope, ws_event_callbacks.clone());
             crypto::setup_crypto(scope);
 
             // Native text encoding (can't be serialized in snapshot)
@@ -230,6 +232,7 @@ impl ExecutionContext {
             fetch_callbacks,
             fetch_error_callbacks,
             stream_callbacks,
+            ws_event_callbacks,
             next_callback_id,
             fetch_response_tx,
             stream_manager,
@@ -699,6 +702,37 @@ impl ExecutionContext {
                         error_msg,
                         result_value,
                     );
+                }
+                CallbackMessage::WebSocketConnected(callback_id, ws_id) => {
+                    use crate::runtime::dispatch_binding_callbacks;
+
+                    let ws_id_val: v8::Local<v8::Value> =
+                        v8::Number::new(scope, ws_id as f64).into();
+                    dispatch_binding_callbacks(
+                        scope,
+                        callback_id,
+                        &self.request.fetch_callbacks,
+                        &self.request.fetch_error_callbacks,
+                        None,
+                        Some(ws_id_val),
+                    );
+                }
+                CallbackMessage::WebSocketConnectError(callback_id, error_msg) => {
+                    use crate::runtime::dispatch_binding_callbacks;
+
+                    dispatch_binding_callbacks(
+                        scope,
+                        callback_id,
+                        &self.request.fetch_callbacks,
+                        &self.request.fetch_error_callbacks,
+                        Some(&error_msg),
+                        None,
+                    );
+                }
+                CallbackMessage::WebSocketEvent(ws_id, incoming) => {
+                    use crate::runtime::dispatch_ws_event;
+
+                    dispatch_ws_event(scope, &self.request.ws_event_callbacks, ws_id, incoming);
                 }
             }
         }
@@ -1447,6 +1481,7 @@ impl ExecutionContext {
         self.request.fetch_callbacks.borrow_mut().clear();
         self.request.fetch_error_callbacks.borrow_mut().clear();
         self.request.stream_callbacks.borrow_mut().clear();
+        self.request.ws_event_callbacks.borrow_mut().clear();
         *self.request.next_callback_id.borrow_mut() = 1;
 
         Ok(())

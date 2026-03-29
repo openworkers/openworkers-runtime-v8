@@ -18,6 +18,7 @@ use tokio_util::task::AbortOnDropHandle;
 
 use crate::runtime::stream_manager::StreamManager;
 use crate::runtime::{CallbackId, CallbackMessage, SchedulerMessage};
+use openworkers_core::WebSocketId;
 
 /// Per-request execution state.
 ///
@@ -44,6 +45,9 @@ pub struct RequestContext {
 
     /// Stream read callbacks
     pub stream_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+
+    /// WebSocket event dispatcher callbacks (keyed by WebSocketId, persistent)
+    pub ws_event_callbacks: Rc<RefCell<HashMap<WebSocketId, v8::Global<v8::Function>>>>,
 
     /// Monotonic callback ID counter
     pub next_callback_id: Rc<RefCell<CallbackId>>,
@@ -76,6 +80,7 @@ impl RequestContext {
         fetch_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
         fetch_error_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
         stream_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+        ws_event_callbacks: Rc<RefCell<HashMap<WebSocketId, v8::Global<v8::Function>>>>,
         next_callback_id: Rc<RefCell<CallbackId>>,
         fetch_response_tx: Rc<RefCell<Option<tokio::sync::oneshot::Sender<String>>>>,
         stream_manager: Arc<StreamManager>,
@@ -90,6 +95,7 @@ impl RequestContext {
             fetch_callbacks,
             fetch_error_callbacks,
             stream_callbacks,
+            ws_event_callbacks,
             next_callback_id,
             fetch_response_tx,
             stream_manager,

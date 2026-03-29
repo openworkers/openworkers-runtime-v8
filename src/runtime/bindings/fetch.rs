@@ -562,6 +562,22 @@ pub fn setup_fetch(
                 headers['Content-Type'] = contentType;
             }
 
+            // Check for WebSocket upgrade
+            const upgradeKey = Object.keys(headers).find(
+                function(k) { return k.toLowerCase() === 'upgrade'; }
+            );
+
+            if (upgradeKey && headers[upgradeKey].toLowerCase() === 'websocket') {
+                return new Promise(function(resolve, reject) {
+                    __nativeWebSocketConnect(url, headers, function(wsId) {
+                        const ws = new WebSocket(wsId);
+                        const response = new Response(null, { status: 101 });
+                        response.webSocket = ws;
+                        resolve(response);
+                    }, reject);
+                });
+            }
+
             return new Promise((resolve, reject) => {
                 const fetchOptions = { url, method, headers, body };
 

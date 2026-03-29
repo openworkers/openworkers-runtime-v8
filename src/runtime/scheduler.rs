@@ -6,7 +6,7 @@
 //! All spawned I/O tasks observe a CancellationToken so they are cleaned up
 //! when the request ends (timeout, response sent, or context dropped).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +19,8 @@ use tokio_util::sync::CancellationToken;
 use super::stream_manager::{self, StreamManager};
 use openworkers_core::{
     DatabaseOp, DatabaseResult, HttpRequest, HttpResponseMeta, KvOp, KvResult, Operation,
-    OperationResult, OperationsHandle, ResponseBody, StorageOp, StorageResult,
+    OperationResult, OperationsHandle, ResponseBody, StorageOp, StorageResult, WebSocketId,
+    WebSocketIncoming, WebSocketOutgoing,
 };
 
 pub type CallbackId = u64;
@@ -62,6 +63,10 @@ pub enum SchedulerMessage {
     BindingWorker(CallbackId, String, HttpRequest),
     StreamRead(CallbackId, stream_manager::StreamId),
     StreamCancel(stream_manager::StreamId),
+    WebSocketConnect(CallbackId, String, HashMap<String, String>),
+    WebSocketAccept(WebSocketId),
+    WebSocketSend(WebSocketId, WebSocketOutgoing),
+    WebSocketClose(WebSocketId, u16, String),
     Shutdown,
 }
 
@@ -74,6 +79,9 @@ pub enum CallbackMessage {
     StorageResult(CallbackId, StorageResult),
     KvResult(CallbackId, KvResult),
     DatabaseResult(CallbackId, DatabaseResult),
+    WebSocketConnected(CallbackId, WebSocketId),
+    WebSocketConnectError(CallbackId, String),
+    WebSocketEvent(WebSocketId, WebSocketIncoming),
 }
 
 /// Timer entry for FuturesUnordered
@@ -130,6 +138,11 @@ pub async fn run_event_loop(
     let mut timers: FuturesUnordered<Timer> = FuturesUnordered::new();
     let mut cancelled: HashSet<CallbackId> = HashSet::new();
     let mut shutdown = false;
+
+    // WebSocket state: each WS gets a command channel, the spawned task owns the receiver
+    let mut next_ws_id: WebSocketId = 1;
+    let mut ws_commands: HashMap<WebSocketId, mpsc::UnboundedSender<WebSocketCommand>> =
+        HashMap::new();
 
     loop {
         tokio::select! {
@@ -349,6 +362,45 @@ pub async fn run_event_loop(
                         });
                     }
 
+                    SchedulerMessage::WebSocketConnect(callback_id, url, headers) => {
+                        let ws_id = next_ws_id;
+                        next_ws_id += 1;
+
+                        // Create command channel BEFORE spawning so we can store the
+                        // sender synchronously in the event loop's state.
+                        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+                        ws_commands.insert(ws_id, cmd_tx);
+
+                        let callback_tx = callback_tx.clone();
+                        let ops = ops.clone();
+                        let cancel = cancel.clone();
+
+                        tokio::spawn(async move {
+                            run_websocket(
+                                ws_id, callback_id, url, headers,
+                                cmd_rx, callback_tx, ops, cancel,
+                            ).await;
+                        });
+                    }
+
+                    SchedulerMessage::WebSocketAccept(ws_id) => {
+                        if let Some(tx) = ws_commands.get(&ws_id) {
+                            let _ = tx.send(WebSocketCommand::Accept);
+                        }
+                    }
+
+                    SchedulerMessage::WebSocketSend(ws_id, msg) => {
+                        if let Some(tx) = ws_commands.get(&ws_id) {
+                            let _ = tx.send(WebSocketCommand::Send(msg));
+                        }
+                    }
+
+                    SchedulerMessage::WebSocketClose(ws_id, code, reason) => {
+                        if let Some(tx) = ws_commands.remove(&ws_id) {
+                            let _ = tx.send(WebSocketCommand::Close(code, reason));
+                        }
+                    }
+
                     SchedulerMessage::StreamRead(callback_id, stream_id) => {
                         let callback_tx = callback_tx.clone();
                         let manager = stream_manager.clone();
@@ -485,6 +537,7 @@ async fn convert_fetch_result_to_stream(
         OperationResult::Storage(_) => return Err("Unexpected Storage result for fetch".into()),
         OperationResult::Kv(_) => return Err("Unexpected Kv result for fetch".into()),
         OperationResult::Database(_) => return Err("Unexpected Database result for fetch".into()),
+        OperationResult::WebSocket(_) => return Err("Unexpected WebSocket result for fetch".into()),
     };
 
     let meta = HttpResponseMeta {
@@ -515,6 +568,103 @@ async fn convert_fetch_result_to_stream(
     }
 
     Ok((meta, stream_id))
+}
+
+/// Commands sent from the event loop to a WebSocket management task.
+enum WebSocketCommand {
+    /// Start delivering incoming messages as callbacks
+    Accept,
+    /// Send a message on the WebSocket
+    Send(WebSocketOutgoing),
+    /// Close the WebSocket
+    Close(u16, String),
+}
+
+/// Manages a single WebSocket connection lifecycle.
+///
+/// 1. Connects via OperationsHandler
+/// 2. Waits for Accept before pumping incoming messages
+/// 3. Forwards Send/Close commands to the WS
+/// 4. Delivers incoming messages as CallbackMessages
+#[allow(clippy::too_many_arguments)]
+async fn run_websocket(
+    ws_id: WebSocketId,
+    callback_id: CallbackId,
+    url: String,
+    headers: HashMap<String, String>,
+    mut cmd_rx: mpsc::UnboundedReceiver<WebSocketCommand>,
+    callback_tx: CallbackSender,
+    ops: OperationsHandle,
+    cancel: CancellationToken,
+) {
+    // Phase 1: Connect
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return,
+        r = ops.handle(Operation::WebSocketConnect { url, headers }) => r,
+    };
+
+    let conn = match result {
+        OperationResult::WebSocket(Ok(conn)) => {
+            let _ = callback_tx.send(CallbackMessage::WebSocketConnected(callback_id, ws_id));
+            conn
+        }
+        OperationResult::WebSocket(Err(e)) => {
+            let _ = callback_tx.send(CallbackMessage::WebSocketConnectError(callback_id, e));
+            return;
+        }
+        _ => {
+            let _ = callback_tx.send(CallbackMessage::WebSocketConnectError(
+                callback_id,
+                "Unexpected result type for WebSocket connect".into(),
+            ));
+            return;
+        }
+    };
+
+    let send_tx = conn.send_tx;
+    let mut recv_rx = conn.recv_rx;
+    let mut accepted = false;
+
+    // Phase 2: Command loop — handle sends, receives, and accept
+    loop {
+        tokio::select! {
+            biased;
+
+            _ = cancel.cancelled() => break,
+
+            cmd = cmd_rx.recv() => {
+                let Some(cmd) = cmd else { break };
+
+                match cmd {
+                    WebSocketCommand::Accept => {
+                        accepted = true;
+                    }
+                    WebSocketCommand::Send(msg) => {
+                        let _ = send_tx.send(msg);
+                    }
+                    WebSocketCommand::Close(code, reason) => {
+                        let _ = send_tx.send(WebSocketOutgoing::Close { code, reason });
+                        break;
+                    }
+                }
+            }
+
+            msg = recv_rx.recv(), if accepted => {
+                match msg {
+                    Some(incoming) => {
+                        let _ = callback_tx.send(
+                            CallbackMessage::WebSocketEvent(ws_id, incoming),
+                        );
+                    }
+                    None => {
+                        // Runner dropped the sender — connection is done
+                        break;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Get the status text for an HTTP status code

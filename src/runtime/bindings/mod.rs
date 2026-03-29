@@ -7,9 +7,10 @@ mod state;
 mod streams;
 mod timers;
 mod web_api;
+mod websocket;
 
 // Re-export state types
-pub use state::{FetchState, LogCallback, ResponseStreamState, StreamState};
+pub use state::{FetchState, LogCallback, ResponseStreamState, StreamState, WebSocketEventState};
 
 // Re-export setup functions
 pub use console::{log_callback_from_ops, setup_console};
@@ -21,3 +22,4 @@ pub use web_api::{
     setup_global_aliases, setup_headers, setup_performance, setup_request, setup_response,
     setup_security_restrictions, setup_structured_clone, setup_url, setup_url_search_params,
 };
+pub use websocket::setup_websocket;

@@ -19,7 +19,10 @@ use v8;
 use crate::security::CustomAllocator;
 use crate::security::{HeapLimitState, install_heap_limit_callback};
 use bindings::LogCallback;
-use openworkers_core::{DatabaseResult, KvResult, RuntimeLimits, StorageResult, WorkerCode};
+use openworkers_core::{
+    DatabaseResult, KvResult, RuntimeLimits, StorageResult, WebSocketId, WebSocketIncoming,
+    WorkerCode,
+};
 
 // Re-export scheduler types
 pub use scheduler::{
@@ -68,6 +71,62 @@ pub(crate) fn dispatch_binding_callbacks(
     }
 }
 
+/// Dispatch a WebSocket event to the JS dispatcher function.
+///
+/// The dispatcher is a JS callback registered during `ws.accept()`.
+/// It's called with (eventType, arg1, arg2) and handles event construction in JS.
+pub(crate) fn dispatch_ws_event(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    ws_callbacks: &Rc<RefCell<HashMap<WebSocketId, v8::Global<v8::Function>>>>,
+    ws_id: WebSocketId,
+    incoming: WebSocketIncoming,
+) {
+    // For close, remove the callback (connection is done)
+    let remove = matches!(incoming, WebSocketIncoming::Closed { .. });
+
+    let callback_global = if remove {
+        ws_callbacks.borrow_mut().remove(&ws_id)
+    } else {
+        ws_callbacks.borrow().get(&ws_id).cloned()
+    };
+
+    let Some(callback_global) = callback_global else {
+        return;
+    };
+
+    let callback = v8::Local::new(scope, &callback_global);
+    let recv = v8::undefined(scope);
+
+    match incoming {
+        WebSocketIncoming::Text(s) => {
+            let type_val = v8::String::new(scope, "message").unwrap();
+            let data_val = v8::String::new(scope, &s).unwrap();
+            callback.call(scope, recv.into(), &[type_val.into(), data_val.into()]);
+        }
+        WebSocketIncoming::Binary(bytes) => {
+            let type_val = v8::String::new(scope, "message").unwrap();
+            let store = v8::ArrayBuffer::new_backing_store_from_vec(bytes);
+            let ab = v8::ArrayBuffer::with_backing_store(scope, &store.into());
+            callback.call(scope, recv.into(), &[type_val.into(), ab.into()]);
+        }
+        WebSocketIncoming::Closed { code, reason } => {
+            let type_val = v8::String::new(scope, "close").unwrap();
+            let code_val = v8::Number::new(scope, code as f64);
+            let reason_val = v8::String::new(scope, &reason).unwrap();
+            callback.call(
+                scope,
+                recv.into(),
+                &[type_val.into(), code_val.into(), reason_val.into()],
+            );
+        }
+        WebSocketIncoming::Error(e) => {
+            let type_val = v8::String::new(scope, "error").unwrap();
+            let msg_val = v8::String::new(scope, &e).unwrap();
+            callback.call(scope, recv.into(), &[type_val.into(), msg_val.into()]);
+        }
+    };
+}
+
 pub struct Runtime {
     pub isolate: v8::OwnedIsolate,
     pub context: v8::Global<v8::Context>,
@@ -76,6 +135,7 @@ pub struct Runtime {
     pub(crate) fetch_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
     pub(crate) fetch_error_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
     pub(crate) stream_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    pub(crate) ws_event_callbacks: Rc<RefCell<HashMap<WebSocketId, v8::Global<v8::Function>>>>,
     pub(crate) _next_callback_id: Rc<RefCell<CallbackId>>,
     /// Channel for fetch response (set during fetch event execution)
     pub(crate) fetch_response_tx: Rc<RefCell<Option<tokio::sync::oneshot::Sender<String>>>>,
@@ -128,6 +188,8 @@ impl Runtime {
         let fetch_callbacks = Rc::new(RefCell::new(HashMap::new()));
         let fetch_error_callbacks = Rc::new(RefCell::new(HashMap::new()));
         let stream_callbacks = Rc::new(RefCell::new(HashMap::new()));
+        let ws_event_callbacks: Rc<RefCell<HashMap<WebSocketId, v8::Global<v8::Function>>>> =
+            Rc::new(RefCell::new(HashMap::new()));
         let next_callback_id = Rc::new(RefCell::new(1));
         let fetch_response_tx = Rc::new(RefCell::new(None));
         let stream_manager = Arc::new(stream_manager::StreamManager::new());
@@ -237,6 +299,7 @@ impl Runtime {
                     next_callback_id.clone(),
                 );
                 bindings::setup_response_stream_ops(scope, stream_manager.clone());
+                bindings::setup_websocket(scope, ws_event_callbacks.clone());
                 crypto::setup_crypto(scope);
 
                 // Native text encoding functions (must be registered at runtime,
@@ -274,6 +337,7 @@ impl Runtime {
             fetch_callbacks,
             fetch_error_callbacks,
             stream_callbacks,
+            ws_event_callbacks,
             _next_callback_id: next_callback_id,
             fetch_response_tx,
             platform,
@@ -435,6 +499,31 @@ impl Runtime {
                         result_value,
                     );
                 }
+                CallbackMessage::WebSocketConnected(callback_id, ws_id) => {
+                    let ws_id_val: v8::Local<v8::Value> =
+                        v8::Number::new(scope, ws_id as f64).into();
+                    dispatch_binding_callbacks(
+                        scope,
+                        callback_id,
+                        &self.fetch_callbacks,
+                        &self.fetch_error_callbacks,
+                        None,
+                        Some(ws_id_val),
+                    );
+                }
+                CallbackMessage::WebSocketConnectError(callback_id, error_msg) => {
+                    dispatch_binding_callbacks(
+                        scope,
+                        callback_id,
+                        &self.fetch_callbacks,
+                        &self.fetch_error_callbacks,
+                        Some(&error_msg),
+                        None,
+                    );
+                }
+                CallbackMessage::WebSocketEvent(ws_id, incoming) => {
+                    dispatch_ws_event(scope, &self.ws_event_callbacks, ws_id, incoming);
+                }
             }
         }
 
@@ -594,6 +683,30 @@ impl Runtime {
                     error_msg,
                     result_value,
                 );
+            }
+            CallbackMessage::WebSocketConnected(callback_id, ws_id) => {
+                let ws_id_val: v8::Local<v8::Value> = v8::Number::new(scope, ws_id as f64).into();
+                dispatch_binding_callbacks(
+                    scope,
+                    callback_id,
+                    &self.fetch_callbacks,
+                    &self.fetch_error_callbacks,
+                    None,
+                    Some(ws_id_val),
+                );
+            }
+            CallbackMessage::WebSocketConnectError(callback_id, error_msg) => {
+                dispatch_binding_callbacks(
+                    scope,
+                    callback_id,
+                    &self.fetch_callbacks,
+                    &self.fetch_error_callbacks,
+                    Some(&error_msg),
+                    None,
+                );
+            }
+            CallbackMessage::WebSocketEvent(ws_id, incoming) => {
+                dispatch_ws_event(scope, &self.ws_event_callbacks, ws_id, incoming);
             }
         }
     }
