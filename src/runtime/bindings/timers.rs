@@ -63,10 +63,18 @@ pub fn setup_timers(
         globalThis.__nextTimerId = 1;
         globalThis.__intervalIds = new Set();
 
+        // Coerce a delay/timeout to a non-negative integer (ms), per the HTML spec.
+        // The native scheduler args are u64; passing a float, negative, NaN or
+        // non-numeric value would fail serde_v8 conversion and throw.
+        function __coerceDelay(delay) {
+            delay = Number(delay);
+            return Number.isFinite(delay) && delay > 0 ? Math.trunc(delay) : 0;
+        }
+
         globalThis.setTimeout = function(callback, delay, ...args) {
             const id = globalThis.__nextTimerId++;
             globalThis.__timerCallbacks.set(id, args.length > 0 ? () => callback(...args) : callback);
-            __nativeScheduleTimeout(id, delay || 0);
+            __nativeScheduleTimeout(id, __coerceDelay(delay));
             return id;
         };
 
@@ -74,11 +82,18 @@ pub fn setup_timers(
             const id = globalThis.__nextTimerId++;
             globalThis.__timerCallbacks.set(id, args.length > 0 ? () => callback(...args) : callback);
             globalThis.__intervalIds.add(id);
-            __nativeScheduleInterval(id, interval || 0);
+            __nativeScheduleInterval(id, __coerceDelay(interval));
             return id;
         };
 
         globalThis.clearTimeout = function(id) {
+            // Per the HTML spec, clearing an unknown/invalid id is a no-op.
+            // Guard before the native call, whose arg is u64 (undefined/NaN/negative
+            // would otherwise throw a serde_v8 conversion error).
+            id = Number(id);
+            if (!Number.isInteger(id) || id < 0) {
+                return;
+            }
             globalThis.__timerCallbacks.delete(id);
             globalThis.__intervalIds.delete(id);
             __nativeClearTimer(id);
