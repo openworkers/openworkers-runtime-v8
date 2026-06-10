@@ -204,14 +204,96 @@ pub fn setup_websocket(
 
     // JavaScript WebSocket class + fetch integration
     let code = r#"
+        const WS_CONNECTING = 0, WS_OPEN = 1, WS_CLOSING = 2, WS_CLOSED = 3;
+
+        // WHATWG-style WebSocket. `new WebSocket(url)` connects and auto-starts
+        // receiving. The internal fetch(Upgrade) path adopts an already-connected
+        // handle via WebSocket.__adopt(wsId) and keeps the explicit accept() step
+        // (so it can hand back the 101 Response before pumping messages).
         class WebSocket {
-            constructor(wsId) {
-                this._wsId = wsId;
+            constructor(url, protocols) {
+                if (url === undefined) {
+                    throw new TypeError("Failed to construct 'WebSocket': 1 argument required, but only 0 present.");
+                }
+
+                // Validate per spec: scheme must be ws/wss (http/https are normalized),
+                // and the URL must not contain a fragment. Invalid input throws SyntaxError.
+                const parsed = new URL(String(url));
+                if (parsed.hash) {
+                    throw WebSocket.__err('SyntaxError', "Failed to construct 'WebSocket': The URL contains a fragment identifier ('" + parsed.hash + "').");
+                }
+                let target = String(url);
+                if (parsed.protocol === 'http:') {
+                    target = 'ws://' + target.slice(7);
+                } else if (parsed.protocol === 'https:') {
+                    target = 'wss://' + target.slice(8);
+                } else if (parsed.protocol !== 'ws:' && parsed.protocol !== 'wss:') {
+                    throw WebSocket.__err('SyntaxError', "Failed to construct 'WebSocket': The URL's scheme must be either 'ws' or 'wss'.");
+                }
+
+                this._wsId = null;
                 this._accepted = false;
+                this._closing = false;
                 this._listeners = { message: [], close: [], error: [], open: [] };
+                this.url = target;
+                this.binaryType = 'arraybuffer';
+                this.bufferedAmount = 0;
+                this.extensions = '';
+                this.protocol = '';
+                this.readyState = WS_CONNECTING;
+
+                const headers = {};
+                if (protocols !== undefined && protocols !== null) {
+                    headers['Sec-WebSocket-Protocol'] = Array.isArray(protocols) ? protocols.join(', ') : String(protocols);
+                }
+
+                const self = this;
+                __nativeWebSocketConnect(target, headers, function(wsId) {
+                    self._wsId = wsId;
+                    if (self._closing) {
+                        // close() was called while CONNECTING — abort the fresh socket.
+                        __nativeWebSocketClose(wsId, 1000, '');
+                        self.readyState = WS_CLOSED;
+                        self._dispatch('close', { type: 'close', code: 1006, reason: '', wasClean: false });
+                        return;
+                    }
+                    self._startReceiving();
+                    self.readyState = WS_OPEN;
+                    self._dispatch('open', { type: 'open' });
+                }, function(err) {
+                    self.readyState = WS_CLOSED;
+                    const message = err == null ? 'connection failed' : String(err);
+                    self._dispatch('error', { type: 'error', message: message });
+                    self._dispatch('close', { type: 'close', code: 1006, reason: message, wasClean: false });
+                });
             }
 
-            accept() {
+            static __err(name, message) {
+                if (typeof DOMException === 'function') return new DOMException(message, name);
+                const e = new Error(message);
+                e.name = name;
+                return e;
+            }
+
+            // Internal: wrap a handle from the fetch(Upgrade) handshake (already open).
+            static __adopt(wsId) {
+                const ws = Object.create(WebSocket.prototype);
+                ws._wsId = wsId;
+                ws._accepted = false;
+                ws._closing = false;
+                ws._listeners = { message: [], close: [], error: [], open: [] };
+                ws.url = null;
+                ws.binaryType = 'arraybuffer';
+                ws.bufferedAmount = 0;
+                ws.extensions = '';
+                ws.protocol = '';
+                ws.readyState = WS_OPEN;
+                return ws;
+            }
+
+            // Start pumping inbound messages. Auto-called on the standard path;
+            // called explicitly via accept() on the fetch(Upgrade) path.
+            _startReceiving() {
                 if (this._accepted) return;
                 this._accepted = true;
                 const self = this;
@@ -220,6 +302,7 @@ pub fn setup_websocket(
                     if (eventType === 'message') {
                         self._dispatch('message', { type: 'message', data: arg1 });
                     } else if (eventType === 'close') {
+                        self.readyState = WS_CLOSED;
                         self._dispatch('close', { type: 'close', code: arg1, reason: arg2, wasClean: true });
                     } else if (eventType === 'error') {
                         self._dispatch('error', { type: 'error', message: arg1 });
@@ -227,15 +310,36 @@ pub fn setup_websocket(
                 });
             }
 
+            accept() {
+                this._startReceiving();
+            }
+
             send(data) {
-                if (!this._accepted) throw new Error('WebSocket is not accepted');
+                if (this.readyState === WS_CONNECTING) {
+                    throw WebSocket.__err('InvalidStateError', "Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.");
+                }
+                if (this.readyState !== WS_OPEN) {
+                    return; // CLOSING/CLOSED: data is silently discarded per spec
+                }
                 __nativeWebSocketSend(this._wsId, data);
             }
 
             close(code, reason) {
-                if (code === undefined) code = 1000;
-                if (reason === undefined) reason = '';
-                __nativeWebSocketClose(this._wsId, code, reason);
+                if (code !== undefined && code !== 1000 && (code < 3000 || code > 4999)) {
+                    throw WebSocket.__err('InvalidAccessError', "Failed to execute 'close' on 'WebSocket': The code must be 1000 or in the range 3000-4999.");
+                }
+                if (reason !== undefined && new TextEncoder().encode(String(reason)).length > 123) {
+                    throw WebSocket.__err('SyntaxError', "Failed to execute 'close' on 'WebSocket': The close reason must not exceed 123 bytes.");
+                }
+                if (this.readyState === WS_CLOSING || this.readyState === WS_CLOSED) return;
+                if (this.readyState === WS_CONNECTING) {
+                    // Abort once the pending connect resolves (handled in the constructor).
+                    this._closing = true;
+                    this.readyState = WS_CLOSING;
+                    return;
+                }
+                this.readyState = WS_CLOSING;
+                __nativeWebSocketClose(this._wsId, code === undefined ? 1000 : code, reason === undefined ? '' : reason);
             }
 
             addEventListener(type, listener) {
@@ -251,15 +355,28 @@ pub fn setup_websocket(
             }
 
             _dispatch(type, event) {
-                const listeners = this._listeners[type];
+                const handler = this['on' + type];
+                if (typeof handler === 'function') {
+                    try { handler.call(this, event); } catch(e) { console.error('WebSocket on' + type + ' error:', e); }
+                }
 
+                const listeners = this._listeners[type];
                 if (listeners) {
                     for (let i = 0; i < listeners.length; i++) {
-                        try { listeners[i](event); } catch(e) { console.error('WebSocket listener error:', e); }
+                        try { listeners[i].call(this, event); } catch(e) { console.error('WebSocket listener error:', e); }
                     }
                 }
             }
         }
+
+        WebSocket.CONNECTING = WS_CONNECTING;
+        WebSocket.OPEN = WS_OPEN;
+        WebSocket.CLOSING = WS_CLOSING;
+        WebSocket.CLOSED = WS_CLOSED;
+        WebSocket.prototype.CONNECTING = WS_CONNECTING;
+        WebSocket.prototype.OPEN = WS_OPEN;
+        WebSocket.prototype.CLOSING = WS_CLOSING;
+        WebSocket.prototype.CLOSED = WS_CLOSED;
 
         globalThis.WebSocket = WebSocket;
     "#;

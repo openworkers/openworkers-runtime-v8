@@ -183,6 +183,12 @@ impl WorkerBuilder {
                 fetch_error_callbacks.clone(),
                 next_callback_id.clone(),
             );
+            // WebSocket class + native bindings. Defines the global `WebSocket`;
+            // setup_fetch above references WebSocket.__adopt for fetch(Upgrade).
+            bindings::setup_websocket(
+                scope,
+                std::rc::Rc::new(std::cell::RefCell::new(std::collections::HashMap::new())),
+            );
             bindings::setup_stream_ops(
                 scope,
                 scheduler_tx.clone(),

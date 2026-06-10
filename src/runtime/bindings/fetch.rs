@@ -570,7 +570,7 @@ pub fn setup_fetch(
             if (upgradeKey && headers[upgradeKey].toLowerCase() === 'websocket') {
                 return new Promise(function(resolve, reject) {
                     __nativeWebSocketConnect(url, headers, function(wsId) {
-                        const ws = new WebSocket(wsId);
+                        const ws = WebSocket.__adopt(wsId);
                         const response = new Response(null, { status: 101 });
                         response.webSocket = ws;
                         resolve(response);
