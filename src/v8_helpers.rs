@@ -3,6 +3,50 @@
 //! This module provides helper functions that abstract over V8 API differences
 //! between sandbox and non-sandbox modes.
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+
+use openworkers_core::RuntimeLimits;
+
+#[cfg(not(feature = "sandbox"))]
+use crate::security::CustomAllocator;
+
+/// Young generation the semi-spaces are sized from. V8 rounds a semi-space down
+/// to a power of two, so 24 MB buys 8 MB semi-spaces: the GC win of V8's own
+/// 16 MB default at half the hot-worker footprint.
+const MAX_YOUNG_GENERATION: usize = 24 * 1024 * 1024;
+
+/// Isolate creation parameters for a worker heap.
+///
+/// Sizing the young generation off `heap_max_mb` leaves 4 MB semi-spaces, which
+/// costs ~25% wall time on allocation-heavy handlers. Note `heap_max_mb` does
+/// not bound the JS heap today: `platform.rs` sets a process-wide
+/// `--max-old-space-size` that overrides it, so it only caps ArrayBuffers and
+/// feeds the near-heap-limit callback.
+pub fn worker_create_params(
+    limits: &RuntimeLimits,
+    memory_limit_hit: &Arc<AtomicBool>,
+) -> v8::CreateParams {
+    let heap_max = limits.heap_max_mb * 1024 * 1024;
+
+    let params = v8::CreateParams::default()
+        .heap_limits(limits.heap_initial_mb * 1024 * 1024, heap_max)
+        // Never hand a worker more young space than its whole declared heap.
+        .set_max_young_generation_size_in_bytes(MAX_YOUNG_GENERATION.min(heap_max))
+        .allow_atomics_wait(false);
+
+    #[cfg(feature = "sandbox")]
+    let _ = memory_limit_hit;
+
+    // ArrayBuffers live outside the V8 heap, so the cap needs its own allocator.
+    #[cfg(not(feature = "sandbox"))]
+    let params = params.array_buffer_allocator(
+        CustomAllocator::new(heap_max, Arc::clone(memory_limit_hit)).into_v8_allocator(),
+    );
+
+    params
+}
+
 /// Creates a V8 ArrayBuffer from a Vec<u8>.
 ///
 /// In sandbox mode, V8 must allocate memory itself (security restriction),
