@@ -34,6 +34,11 @@ pub fn get_platform() -> &'static v8::SharedRef<v8::Platform> {
         // DateTimeFormat pattern generators use significant memory
         v8::V8::set_flags_from_string("--max-old-space-size=512");
 
+        // Applied last so an operator can override any flag above.
+        if let Ok(flags) = std::env::var("OW_V8_FLAGS") {
+            v8::V8::set_flags_from_string(&flags);
+        }
+
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform.clone());
         v8::V8::initialize();
