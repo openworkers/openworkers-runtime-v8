@@ -260,7 +260,6 @@ fn main() {
         .unwrap();
 
     LocalSet::new().block_on(&rt, async move {
-        // Cold: create a worker, render once, drop it.
         let mut cold = Vec::new();
         let cold_gc = Gc::read();
 
@@ -274,7 +273,6 @@ fn main() {
         let cold_gc = cold_gc.since();
         let (cold_min, cold_med) = quantiles(cold);
 
-        // Warm: one worker, many renders.
         let mut warm_worker = spawn(&cached, limits.clone()).await;
         let bytes = render(&mut warm_worker, &url).await;
 

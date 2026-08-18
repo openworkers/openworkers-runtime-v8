@@ -305,7 +305,7 @@ fn main() {
         .unwrap();
 
     LocalSet::new().block_on(&rt, async move {
-        // Proof leg: render once and dump the HTML, plus the protocol's "/".
+        // Proof leg: correctness of the render, not its cost.
         let mut worker = spawn(&plain, BenchOps::new()).await;
 
         let (root_status, _, root_body) = render(&mut worker, "http://localhost/").await;
@@ -340,7 +340,6 @@ fn main() {
         std::fs::write(&dump, &body).expect("cannot write dump");
         println!("\ndumped    {}", dump);
 
-        // Determinism: a second render on a brand new worker must match byte for byte.
         let mut fresh = spawn(&plain, BenchOps::new()).await;
         let (_, _, again) = render(&mut fresh, &url).await;
         println!(
@@ -353,7 +352,6 @@ fn main() {
         );
         drop(fresh);
 
-        // API surface, on a separately instrumented worker.
         let instrumented =
             WorkerCode::JavaScript(format!("{INSTRUMENT_JS}\n{lowered}\n{REPORT_JS}"));
         let probe_ops = BenchOps::new();
@@ -410,7 +408,6 @@ fn main() {
         row("warm render", samples);
         drop(warm);
 
-        // Density: what one idle worker costs after it has served a request.
         let before = rss_bytes();
         let mut resident = Vec::new();
 
