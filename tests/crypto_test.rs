@@ -458,3 +458,42 @@ async fn test_rsa_sign_verify() {
     })
     .await;
 }
+
+/// A view into part of a buffer must be filled where it points, not at offset 0
+#[tokio::test(flavor = "current_thread")]
+async fn test_get_random_values_honours_byte_offset() {
+    run_in_local(|| async {
+        let code = r#"
+            addEventListener('fetch', (event) => {
+                const buffer = new Uint8Array(16);
+                const window = buffer.subarray(4, 12);
+
+                crypto.getRandomValues(window);
+
+                const untouched = buffer.slice(0, 4).every(b => b === 0)
+                    && buffer.slice(12).every(b => b === 0);
+                const filled = window.some(b => b !== 0);
+
+                event.respondWith(new Response(untouched && filled ? 'OK' : 'FAIL'));
+            });
+        "#;
+
+        let script = Script::new(code);
+        let mut worker = Worker::new(script, None).await.unwrap();
+
+        let req = HttpRequest {
+            method: HttpMethod::Get,
+            url: "http://localhost/".to_string(),
+            headers: HashMap::new(),
+            body: RequestBody::None,
+        };
+
+        let (task, rx) = Event::fetch(req);
+        worker.exec(task).await.unwrap();
+        let response = rx.await.unwrap();
+
+        let body = &response.body.collect().await.unwrap();
+        assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
+    })
+    .await;
+}
