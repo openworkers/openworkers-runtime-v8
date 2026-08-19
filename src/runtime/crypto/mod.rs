@@ -1,3 +1,4 @@
+mod aes;
 mod digest;
 mod ecdsa;
 mod hmac;
@@ -30,11 +31,12 @@ pub fn setup_crypto(scope: &mut v8::PinScope) {
     // crypto.subtle.digest
     digest::setup_digest(scope, subtle_obj);
 
-    // crypto.subtle.sign/verify/importKey — chained: HMAC -> ECDSA -> RSA -> PBKDF2
+    // crypto.subtle.sign/verify/importKey, chained: HMAC -> ECDSA -> RSA -> PBKDF2 -> AES
     hmac::setup_hmac(scope, subtle_obj);
     ecdsa::setup_ecdsa(scope, subtle_obj);
     rsa::setup_rsa(scope, subtle_obj);
     pbkdf2::setup_pbkdf2(scope, subtle_obj);
+    aes::setup_aes(scope, subtle_obj);
 }
 
 /// Define the globalThis crypto classes and a helper to create keys from importKey.

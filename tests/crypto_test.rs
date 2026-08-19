@@ -497,3 +497,108 @@ async fn test_get_random_values_honours_byte_offset() {
     })
     .await;
 }
+
+/// An imported AES-GCM key must decrypt what it encrypted, additional data included
+#[tokio::test(flavor = "current_thread")]
+async fn test_aes_gcm_imported_key_round_trip() {
+    run_in_local(|| async {
+        let code = r#"
+            addEventListener('fetch', async (event) => {
+                const raw = new Uint8Array(32).fill(7);
+                const key = await crypto.subtle.importKey(
+                    'raw', raw, { name: 'AES-GCM' }, true, ['encrypt', 'decrypt']
+                );
+                const algorithm = {
+                    name: 'AES-GCM',
+                    iv: new Uint8Array(12).fill(3),
+                    additionalData: new TextEncoder().encode('header')
+                };
+
+                const cipher = await crypto.subtle.encrypt(
+                    algorithm, key, new TextEncoder().encode('secret')
+                );
+                const plain = await crypto.subtle.decrypt(algorithm, key, cipher);
+
+                const exported = new Uint8Array(await crypto.subtle.exportKey('raw', key));
+                const sameKey = exported.length === 32 && exported.every(b => b === 7);
+
+                // The tag is appended, so the ciphertext is 16 bytes longer than the input
+                const tagged = cipher.byteLength === 6 + 16;
+
+                const decoded = new TextDecoder().decode(plain);
+
+                event.respondWith(new Response(
+                    sameKey && tagged && decoded === 'secret' ? 'OK' : 'FAIL'
+                ));
+            });
+        "#;
+
+        let script = Script::new(code);
+        let mut worker = Worker::new(script, None).await.unwrap();
+
+        let req = HttpRequest {
+            method: HttpMethod::Get,
+            url: "http://localhost/".to_string(),
+            headers: HashMap::new(),
+            body: RequestBody::None,
+        };
+
+        let (task, rx) = Event::fetch(req);
+        worker.exec(task).await.unwrap();
+        let response = rx.await.unwrap();
+
+        let body = &response.body.collect().await.unwrap();
+        assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
+    })
+    .await;
+}
+
+/// Decryption must fail when the additional data does not match
+#[tokio::test(flavor = "current_thread")]
+async fn test_aes_gcm_rejects_wrong_additional_data() {
+    run_in_local(|| async {
+        let code = r#"
+            addEventListener('fetch', async (event) => {
+                const key = await crypto.subtle.generateKey(
+                    { name: 'AES-GCM', length: 128 }, true, ['encrypt', 'decrypt']
+                );
+                const iv = crypto.getRandomValues(new Uint8Array(12));
+                const encode = (text) => new TextEncoder().encode(text);
+
+                const cipher = await crypto.subtle.encrypt(
+                    { name: 'AES-GCM', iv, additionalData: encode('a') }, key, encode('secret')
+                );
+
+                let rejected = false;
+
+                try {
+                    await crypto.subtle.decrypt(
+                        { name: 'AES-GCM', iv, additionalData: encode('b') }, key, cipher
+                    );
+                } catch (e) {
+                    rejected = true;
+                }
+
+                event.respondWith(new Response(rejected ? 'OK' : 'FAIL'));
+            });
+        "#;
+
+        let script = Script::new(code);
+        let mut worker = Worker::new(script, None).await.unwrap();
+
+        let req = HttpRequest {
+            method: HttpMethod::Get,
+            url: "http://localhost/".to_string(),
+            headers: HashMap::new(),
+            body: RequestBody::None,
+        };
+
+        let (task, rx) = Event::fetch(req);
+        worker.exec(task).await.unwrap();
+        let response = rx.await.unwrap();
+
+        let body = &response.body.collect().await.unwrap();
+        assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
+    })
+    .await;
+}
