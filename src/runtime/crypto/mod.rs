@@ -20,8 +20,8 @@ pub fn setup_crypto(scope: &mut v8::PinScope) {
     let subtle_key = v8::String::new(scope, "subtle").unwrap();
     crypto_obj.set(scope, subtle_key.into(), subtle_obj.into());
 
-    // Define CryptoKey class (must be before importKey implementations)
-    setup_crypto_key(scope);
+    // Define the crypto classes (must be before importKey implementations)
+    setup_crypto_classes(scope);
 
     // crypto.getRandomValues + crypto.randomUUID
     random::setup_get_random_values(scope, crypto_obj);
@@ -37,9 +37,26 @@ pub fn setup_crypto(scope: &mut v8::PinScope) {
     pbkdf2::setup_pbkdf2(scope, subtle_obj);
 }
 
-/// Define globalThis.CryptoKey class and a helper to create instances from importKey.
-fn setup_crypto_key(scope: &mut v8::PinScope) {
+/// Define the globalThis crypto classes and a helper to create keys from importKey.
+fn setup_crypto_classes(scope: &mut v8::PinScope) {
     let code = r#"
+        globalThis.Crypto = class Crypto {
+            constructor() {
+                throw new TypeError('Illegal constructor');
+            }
+        };
+
+        globalThis.SubtleCrypto = class SubtleCrypto {
+            constructor() {
+                throw new TypeError('Illegal constructor');
+            }
+        };
+
+        // crypto and crypto.subtle are native plain objects, so instanceof only
+        // answers once they carry the matching prototype.
+        Object.setPrototypeOf(crypto, Crypto.prototype);
+        Object.setPrototypeOf(crypto.subtle, SubtleCrypto.prototype);
+
         globalThis.CryptoKey = class CryptoKey {
             constructor(type, extractable, algorithm, usages, keyData) {
                 this.type = type;
