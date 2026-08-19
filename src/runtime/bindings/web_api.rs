@@ -1063,8 +1063,8 @@ pub fn setup_request(scope: &mut v8::PinScope) {
                         this.body = null;
                     }
                 } else {
-                    // URL string
-                    this.url = String(input);
+                    // Parsed against no base, so a relative url is a TypeError.
+                    this.url = new URL(input).href;
                     this.method = (init.method || 'GET').toUpperCase();
                     this.headers = new Headers(init.headers);
 

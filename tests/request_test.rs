@@ -293,3 +293,46 @@ async fn test_request_from_request() {
     })
     .await;
 }
+
+/// A Request url is parsed against no base, so a relative one cannot resolve
+#[tokio::test(flavor = "current_thread")]
+async fn test_request_rejects_relative_url() {
+    run_in_local(|| async {
+        let code = r#"
+            addEventListener('fetch', (event) => {
+                let thrown = null;
+
+                try {
+                    new Request('/a');
+                } catch (e) {
+                    thrown = e;
+                }
+
+                const normalized = new Request('http://example.com').url;
+
+                event.respondWith(new Response(
+                    thrown instanceof TypeError && normalized === 'http://example.com/'
+                        ? 'OK' : 'FAIL'
+                ));
+            });
+        "#;
+
+        let script = Script::new(code);
+        let mut worker = Worker::new(script, None).await.unwrap();
+
+        let req = HttpRequest {
+            method: HttpMethod::Get,
+            url: "http://localhost/".to_string(),
+            headers: HashMap::new(),
+            body: RequestBody::None,
+        };
+
+        let (task, rx) = Event::fetch(req);
+        worker.exec(task).await.unwrap();
+        let response = rx.await.unwrap();
+
+        let body = &response.body.collect().await.unwrap();
+        assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
+    })
+    .await;
+}
