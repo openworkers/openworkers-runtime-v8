@@ -10,7 +10,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use v8;
 
-use crate::gc::DeferredDestructionQueue;
 use crate::security::{HeapLimitState, install_heap_limit_callback};
 use openworkers_core::RuntimeLimits;
 
@@ -25,12 +24,6 @@ pub struct LockerManagedIsolate {
     pub memory_limit_hit: Arc<AtomicBool>,
     /// Whether a snapshot was used for initialization
     pub use_snapshot: bool,
-    /// Queue for deferred V8 handle destructions
-    ///
-    /// Handles dropped without the lock held are queued here and
-    /// processed on the next lock acquisition. Wrapped in Arc for
-    /// safe sharing during lock acquisition.
-    pub deferred_destruction_queue: Arc<DeferredDestructionQueue>,
     /// Per-isolate pending external memory delta.
     ///
     /// When an `ExternalMemoryGuard` is dropped without the lock held,
@@ -84,24 +77,17 @@ impl LockerManagedIsolate {
             limits,
             memory_limit_hit,
             use_snapshot,
-            deferred_destruction_queue: Arc::new(DeferredDestructionQueue::new()),
             pending_memory_delta: Arc::new(AtomicI64::new(0)),
             _heap_limit_state: heap_limit_state,
         }
     }
 
-    /// Acquire the V8 lock, process deferred destructions, and create a JsLock.
-    ///
-    /// This encapsulates the 3-step lock acquisition pattern:
-    /// 1. `SharedIsolate::lock()`: acquire V8 mutex
-    /// 2. `deferred_destruction_queue.process_all()`: clean up queued handles
-    /// 3. `JsLock::new()`: apply deferred memory deltas + enable GC tracking
+    /// Acquire the V8 lock and create a JsLock.
     ///
     /// Returns both the Locker (RAII mutex) and JsLock (RAII GC tracking).
     /// Both are dropped together when the caller's scope ends.
     pub fn lock(&self) -> (v8::Locker<'_>, crate::gc::JsLock) {
         let mut locker = self.isolate.lock();
-        self.deferred_destruction_queue.process_all();
         let js = crate::gc::JsLock::new(&mut locker, &self.pending_memory_delta);
         (locker, js)
     }

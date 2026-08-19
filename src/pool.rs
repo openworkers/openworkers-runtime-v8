@@ -265,12 +265,10 @@ impl TaggedIsolate {
 
 impl Drop for TaggedIsolate {
     fn drop(&mut self) {
-        // Acquire Locker to safely drop cached V8 contexts and process
-        // deferred destructions. Without this, v8::Global handles in
-        // CachedContext would drop without the V8 lock held.
+        // Drop the cached contexts under the lock so their v8::Global handles
+        // are released now rather than deferred to an isolate that is going away.
         let lmi = self.isolate.get_mut();
         let _locker = lmi.isolate.lock();
-        lmi.deferred_destruction_queue.process_all();
 
         if let Ok(mut inner) = self.inner.try_lock() {
             inner.cached_contexts.clear();
@@ -567,11 +565,8 @@ pub fn get_local_pool_stats() -> Option<LocalPoolStats> {
 // Execution API
 // ============================================================================
 
-/// Drop a value under V8 Locker.
-///
-/// V8 Global handles must be destroyed while the Locker is held.
-/// This helper acquires the Locker, processes deferred destructions,
-/// then drops the value (which may contain V8 globals).
+/// Drop a value under V8 Locker, so any v8::Global it holds is released
+/// immediately instead of waiting for the next lock acquisition.
 fn drop_under_lock<T>(value: T, lmi_ptr: *mut LockerManagedIsolate) {
     if lmi_ptr.is_null() {
         drop(value);
@@ -581,7 +576,6 @@ fn drop_under_lock<T>(value: T, lmi_ptr: *mut LockerManagedIsolate) {
     unsafe {
         let lmi = &*lmi_ptr;
         let _locker = lmi.isolate.lock();
-        lmi.deferred_destruction_queue.process_all();
         drop(value);
     }
 }

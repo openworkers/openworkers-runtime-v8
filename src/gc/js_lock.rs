@@ -69,8 +69,6 @@ impl JsLock {
     /// `pending_delta` is the per-isolate deferred memory accumulator from
     /// `LockerManagedIsolate`.
     ///
-    /// Note: For pooled isolates, call `DeferredDestructionQueue::process_all()`
-    /// BEFORE creating JsLock to ensure deferred handles are cleaned up.
     pub fn new(isolate: &mut v8::Isolate, pending_delta: &Arc<AtomicI64>) -> Self {
         let isolate_ptr = isolate as *mut _;
         let pending_delta = Arc::clone(pending_delta);

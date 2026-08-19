@@ -1,7 +1,7 @@
-//! GC tracking for external memory and deferred destruction.
+//! GC tracking for external memory.
 //!
 //! This module provides utilities for tracking Rust memory allocations
-//! with V8's garbage collector, and safe deferred destruction of V8 handles.
+//! with V8's garbage collector.
 //!
 //! ## Architecture
 //!
@@ -10,16 +10,7 @@
 //! │  JsLock (RAII)                                              │
 //! │  ├── v8::Locker (thread safety)                             │
 //! │  ├── Stored in isolate slot for Lock::current()             │
-//! │  ├── Applies deferred memory updates on construction        │
-//! │  └── Processes deferred handle destructions                 │
-//! └─────────────────────────────────────────────────────────────┘
-//!                              │
-//!                              ▼
-//! ┌─────────────────────────────────────────────────────────────┐
-//! │  DeferredDestructionQueue                                   │
-//! │  ├── Thread-safe queue for V8 Global handles                │
-//! │  ├── Handles queued when dropped without lock               │
-//! │  └── Processed on next lock acquisition                     │
+//! │  └── Applies deferred memory updates on construction        │
 //! └─────────────────────────────────────────────────────────────┘
 //!                              │
 //!                              ▼
@@ -56,12 +47,10 @@
 //! }
 //! ```
 
-mod deferred_destruction;
 mod external_memory;
 mod js_lock;
 mod traceable;
 
-pub use deferred_destruction::DeferredDestructionQueue;
 pub use external_memory::ExternalMemoryGuard;
 pub use js_lock::{JsLock, JsLockRef};
 pub use traceable::{GcTraceable, Tracked, tracked_guard};
