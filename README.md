@@ -1,6 +1,6 @@
 # OpenWorkers Runtime V8
 
-V8-based JavaScript runtime for serverless workers, built on [openworkers-v8](https://crates.io/crates/openworkers-v8) (fork of rusty_v8).
+V8-based JavaScript runtime for serverless workers, built on [rusty_v8](https://crates.io/crates/v8).
 
 ## Quick Start
 
