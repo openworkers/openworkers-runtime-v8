@@ -455,12 +455,19 @@ pub fn setup_url_search_params(scope: &mut v8::PinScope) {
                 if (!init) return;
 
                 if (typeof init === 'string') {
-                    // Parse query string
                     const str = init.startsWith('?') ? init.slice(1) : init;
                     if (str) {
                         for (const pair of str.split('&')) {
-                            const [key, value = ''] = pair.split('=').map(decodeURIComponent);
-                            this._entries.push([key, value]);
+                            if (!pair) continue;
+
+                            const eq = pair.indexOf('=');
+                            const rawKey = eq < 0 ? pair : pair.slice(0, eq);
+                            const rawValue = eq < 0 ? '' : pair.slice(eq + 1);
+
+                            this._entries.push([
+                                URLSearchParams._decode(rawKey),
+                                URLSearchParams._decode(rawValue),
+                            ]);
                         }
                     }
                 } else if (init instanceof URLSearchParams) {
@@ -473,6 +480,32 @@ pub fn setup_url_search_params(scope: &mut v8::PinScope) {
                     for (const key of Object.keys(init)) {
                         this._entries.push([key, String(init[key])]);
                     }
+                }
+            }
+
+            // In urlencoded, '+' is a space. Percent-decoding must not fail, so a
+            // malformed input is decoded byte by byte and left to TextDecoder.
+            static _decode(s) {
+                const plussed = s.replace(/\+/g, ' ');
+
+                try {
+                    return decodeURIComponent(plussed);
+                } catch {
+                    const encoder = new TextEncoder();
+                    const bytes = [];
+
+                    for (let i = 0; i < plussed.length; i++) {
+                        const hex = plussed.slice(i + 1, i + 3);
+
+                        if (plussed[i] === '%' && /^[0-9a-fA-F]{2}$/.test(hex)) {
+                            bytes.push(parseInt(hex, 16));
+                            i += 2;
+                        } else {
+                            bytes.push(...encoder.encode(plussed[i]));
+                        }
+                    }
+
+                    return new TextDecoder().decode(new Uint8Array(bytes));
                 }
             }
 
@@ -538,9 +571,17 @@ pub fn setup_url_search_params(scope: &mut v8::PinScope) {
                 this._update();
             }
 
+            // The urlencoded safe set is narrower than encodeURIComponent's, and
+            // a space serializes as '+'.
+            static _encode(s) {
+                return encodeURIComponent(s)
+                    .replace(/[!'()~]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase())
+                    .replace(/%20/g, '+');
+            }
+
             toString() {
                 return this._entries
-                    .map(([k, v]) => encodeURIComponent(k) + '=' + encodeURIComponent(v))
+                    .map(([k, v]) => URLSearchParams._encode(k) + '=' + URLSearchParams._encode(v))
                     .join('&');
             }
 
