@@ -205,6 +205,7 @@ impl WorkerBuilder {
 
             // Native text encoding (can't be serialized in snapshot)
             text_encoding::setup_text_encoding_natives(scope);
+            bindings::setup_url_natives(scope);
 
             // Pure JS APIs (only if no snapshot)
             if !use_snapshot {
@@ -215,7 +216,6 @@ impl WorkerBuilder {
                 bindings::setup_abort_controller(scope);
                 bindings::setup_structured_clone(scope);
                 bindings::setup_base64(scope);
-                bindings::setup_url_search_params(scope);
                 bindings::setup_url(scope);
                 bindings::setup_headers(scope);
                 bindings::setup_request(scope);

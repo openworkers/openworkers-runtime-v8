@@ -54,6 +54,9 @@ bytes = { version = "1.11", features = ["serde"] }
 # Text encoding (UTF-8, UTF-16, etc.)
 encoding_rs = "0.8"
 
+# WHATWG URL parsing, normalization and IDNA
+url = "2.5"
+
 # Crypto
 ring = "0.17"
 uuid = { version = "1", features = ["v4"] }

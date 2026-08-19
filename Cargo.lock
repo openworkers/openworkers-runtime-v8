@@ -1202,6 +1202,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "url",
  "uuid",
  "v8",
 ]

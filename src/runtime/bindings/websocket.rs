@@ -218,7 +218,12 @@ pub fn setup_websocket(
 
                 // Validate per spec: scheme must be ws/wss (http/https are normalized),
                 // and the URL must not contain a fragment. Invalid input throws SyntaxError.
-                const parsed = new URL(String(url));
+                let parsed;
+                try {
+                    parsed = new URL(String(url));
+                } catch {
+                    throw WebSocket.__err('SyntaxError', "Failed to construct 'WebSocket': The URL '" + String(url) + "' is invalid.");
+                }
                 if (parsed.hash) {
                     throw WebSocket.__err('SyntaxError', "Failed to construct 'WebSocket': The URL contains a fragment identifier ('" + parsed.hash + "').");
                 }

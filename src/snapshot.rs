@@ -119,10 +119,7 @@ pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
         // Setup Base64 (atob/btoa) - pure JS
         crate::runtime::bindings::setup_base64(scope);
 
-        // Setup URLSearchParams (must be before URL)
-        crate::runtime::bindings::setup_url_search_params(scope);
-
-        // Setup URL API (pre-compiled in snapshot - pure JS)
+        // Setup URL/URLSearchParams classes (the native parser is not snapshotted)
         crate::runtime::bindings::setup_url(scope);
 
         // Setup Headers API (pre-compiled in snapshot - pure JS)
@@ -206,7 +203,6 @@ pub fn create_worker_snapshot(
         crate::runtime::bindings::setup_abort_controller(scope);
         crate::runtime::bindings::setup_structured_clone(scope);
         crate::runtime::bindings::setup_base64(scope);
-        crate::runtime::bindings::setup_url_search_params(scope);
         crate::runtime::bindings::setup_url(scope);
         crate::runtime::bindings::setup_headers(scope);
         crate::runtime::bindings::setup_request(scope);

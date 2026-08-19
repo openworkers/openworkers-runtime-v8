@@ -1,6 +1,8 @@
 use super::state::PerformanceState;
+use serde::Serialize;
 use std::rc::Rc;
 use std::time::Instant;
+use url::Url;
 use v8;
 
 /// Native performance.now() - returns elapsed milliseconds since worker start
@@ -445,250 +447,447 @@ pub fn setup_base64(scope: &mut v8::PinScope) {
     script.run(scope).unwrap();
 }
 
-pub fn setup_url_search_params(scope: &mut v8::PinScope) {
-    let code = r#"
-        globalThis.URLSearchParams = class URLSearchParams {
-            constructor(init) {
-                this._entries = [];
-                this._url = null;
-
-                if (!init) return;
-
-                if (typeof init === 'string') {
-                    const str = init.startsWith('?') ? init.slice(1) : init;
-                    if (str) {
-                        for (const pair of str.split('&')) {
-                            if (!pair) continue;
-
-                            const eq = pair.indexOf('=');
-                            const rawKey = eq < 0 ? pair : pair.slice(0, eq);
-                            const rawValue = eq < 0 ? '' : pair.slice(eq + 1);
-
-                            this._entries.push([
-                                URLSearchParams._decode(rawKey),
-                                URLSearchParams._decode(rawValue),
-                            ]);
-                        }
-                    }
-                } else if (init instanceof URLSearchParams) {
-                    this._entries = init._entries.map(e => [...e]);
-                } else if (Array.isArray(init)) {
-                    for (const [key, value] of init) {
-                        this._entries.push([String(key), String(value)]);
-                    }
-                } else if (typeof init === 'object') {
-                    for (const key of Object.keys(init)) {
-                        this._entries.push([key, String(init[key])]);
-                    }
-                }
-            }
-
-            // In urlencoded, '+' is a space. Percent-decoding must not fail, so a
-            // malformed input is decoded byte by byte and left to TextDecoder.
-            static _decode(s) {
-                const plussed = s.replace(/\+/g, ' ');
-
-                try {
-                    return decodeURIComponent(plussed);
-                } catch {
-                    const encoder = new TextEncoder();
-                    const bytes = [];
-
-                    for (let i = 0; i < plussed.length; i++) {
-                        const hex = plussed.slice(i + 1, i + 3);
-
-                        if (plussed[i] === '%' && /^[0-9a-fA-F]{2}$/.test(hex)) {
-                            bytes.push(parseInt(hex, 16));
-                            i += 2;
-                        } else {
-                            bytes.push(...encoder.encode(plussed[i]));
-                        }
-                    }
-
-                    return new TextDecoder().decode(new Uint8Array(bytes));
-                }
-            }
-
-            _update() {
-                if (this._url) {
-                    const qs = this.toString();
-                    this._url.search = qs ? '?' + qs : '';
-                    this._url.href = this._url.origin + this._url.pathname + this._url.search + this._url.hash;
-                }
-            }
-
-            append(name, value) {
-                this._entries.push([String(name), String(value)]);
-                this._update();
-            }
-
-            delete(name) {
-                this._entries = this._entries.filter(([k]) => k !== name);
-                this._update();
-            }
-
-            get(name) {
-                const entry = this._entries.find(([k]) => k === name);
-                return entry ? entry[1] : null;
-            }
-
-            getAll(name) {
-                return this._entries.filter(([k]) => k === name).map(([, v]) => v);
-            }
-
-            has(name) {
-                return this._entries.some(([k]) => k === name);
-            }
-
-            set(name, value) {
-                const strName = String(name);
-                const strValue = String(value);
-                let found = false;
-
-                this._entries = this._entries.filter(([k]) => {
-                    if (k === strName) {
-                        if (!found) {
-                            found = true;
-                            return true;
-                        }
-                        return false;
-                    }
-                    return true;
-                });
-
-                if (found) {
-                    const idx = this._entries.findIndex(([k]) => k === strName);
-                    this._entries[idx][1] = strValue;
-                } else {
-                    this._entries.push([strName, strValue]);
-                }
-
-                this._update();
-            }
-
-            sort() {
-                this._entries.sort((a, b) => a[0].localeCompare(b[0]));
-                this._update();
-            }
-
-            // The urlencoded safe set is narrower than encodeURIComponent's, and
-            // a space serializes as '+'.
-            static _encode(s) {
-                return encodeURIComponent(s)
-                    .replace(/[!'()~]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase())
-                    .replace(/%20/g, '+');
-            }
-
-            toString() {
-                return this._entries
-                    .map(([k, v]) => URLSearchParams._encode(k) + '=' + URLSearchParams._encode(v))
-                    .join('&');
-            }
-
-            *entries() {
-                yield* this._entries;
-            }
-
-            *keys() {
-                for (const [k] of this._entries) yield k;
-            }
-
-            *values() {
-                for (const [, v] of this._entries) yield v;
-            }
-
-            forEach(callback, thisArg) {
-                for (const [key, value] of this._entries) {
-                    callback.call(thisArg, value, key, this);
-                }
-            }
-
-            [Symbol.iterator]() {
-                return this.entries();
-            }
-
-            get size() {
-                return this._entries.length;
-            }
-        };
-    "#;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
+/// The WHATWG components the JS `URL` class reads back from the parser
+#[derive(Serialize)]
+struct UrlParts {
+    href: String,
+    origin: String,
+    protocol: String,
+    username: String,
+    password: String,
+    host: String,
+    hostname: String,
+    port: String,
+    pathname: String,
+    search: String,
+    hash: String,
 }
 
+impl UrlParts {
+    fn of(url: &Url) -> Self {
+        let port = url.port().map(|p| p.to_string()).unwrap_or_default();
+        let hostname = url.host_str().unwrap_or("").to_string();
+
+        let host = if port.is_empty() {
+            hostname.clone()
+        } else {
+            format!("{}:{}", hostname, port)
+        };
+
+        Self {
+            href: url.as_str().to_string(),
+            origin: url.origin().ascii_serialization(),
+            protocol: format!("{}:", url.scheme()),
+            username: url.username().to_string(),
+            password: url.password().unwrap_or("").to_string(),
+            host,
+            hostname,
+            port,
+            pathname: url.path().to_string(),
+            search: match url.query() {
+                Some(query) if !query.is_empty() => format!("?{}", query),
+                _ => String::new(),
+            },
+            hash: match url.fragment() {
+                Some(fragment) if !fragment.is_empty() => format!("#{}", fragment),
+                _ => String::new(),
+            },
+        }
+    }
+}
+
+fn parse_url(input: &str, base: Option<&str>) -> Option<Url> {
+    match base {
+        Some(base) => Url::parse(base).ok()?.join(input).ok(),
+        None => Url::parse(input).ok(),
+    }
+}
+
+/// WHATWG setters ignore a value they cannot apply, so every failure is silent
+fn apply_url_part(url: &mut Url, part: &str, value: &str) {
+    match part {
+        "protocol" => {
+            let _ = url.set_scheme(value.split(':').next().unwrap_or(""));
+        }
+        "username" => {
+            let _ = url.set_username(value);
+        }
+        "password" => {
+            let _ = url.set_password((!value.is_empty()).then_some(value));
+        }
+        "host" => {
+            // An IPv6 literal is bracketed and carries colons of its own
+            let host_end = value.rfind(']').map(|end| end + 1).unwrap_or(0);
+
+            let (hostname, port) = match value[host_end..].find(':') {
+                Some(colon) => (
+                    &value[..host_end + colon],
+                    Some(&value[host_end + colon + 1..]),
+                ),
+                None => (value, None),
+            };
+
+            if url.set_host(Some(hostname)).is_ok()
+                && let Some(port) = port
+                && let Ok(port) = port.parse::<u16>()
+            {
+                let _ = url.set_port(Some(port));
+            }
+        }
+        "hostname" => {
+            let _ = url.set_host(Some(value));
+        }
+        "port" => {
+            if value.is_empty() {
+                let _ = url.set_port(None);
+            } else if let Ok(port) = value.parse::<u16>() {
+                let _ = url.set_port(Some(port));
+            }
+        }
+        "pathname" => {
+            if !url.cannot_be_a_base() {
+                url.set_path(value);
+            }
+        }
+        "search" => {
+            let query = value.strip_prefix('?').unwrap_or(value);
+            url.set_query((!query.is_empty()).then_some(query));
+        }
+        "hash" => {
+            let fragment = value.strip_prefix('#').unwrap_or(value);
+            url.set_fragment((!fragment.is_empty()).then_some(fragment));
+        }
+        _ => {}
+    }
+}
+
+/// Returns the components, or null when the input is not a valid URL
+#[glue_v8::method]
+fn url_parse(input: String, base: Option<String>) -> Option<UrlParts> {
+    parse_url(&input, base.as_deref()).map(|url| UrlParts::of(&url))
+}
+
+#[glue_v8::method]
+fn url_update(href: String, part: String, value: String) -> Option<UrlParts> {
+    let mut url = parse_url(&href, None)?;
+    apply_url_part(&mut url, &part, &value);
+
+    Some(UrlParts::of(&url))
+}
+
+/// Register the parser the `URL` class calls; it cannot live in the snapshot
+pub fn setup_url_natives(scope: &mut v8::PinScope) {
+    let global = scope.get_current_context().global(scope);
+
+    let parse_fn = v8::Function::new(scope, url_parse_v8).unwrap();
+    let key = v8::String::new(scope, "__urlParse").unwrap();
+    global.set(scope, key.into(), parse_fn.into());
+
+    let update_fn = v8::Function::new(scope, url_update_v8).unwrap();
+    let key = v8::String::new(scope, "__urlUpdate").unwrap();
+    global.set(scope, key.into(), update_fn.into());
+}
+
+/// Define `URL` and `URLSearchParams`, both driven by `__urlParse`/`__urlUpdate`
 pub fn setup_url(scope: &mut v8::PinScope) {
     let code = r#"
-        globalThis.URL = class URL {
-            constructor(url, base) {
-                // Handle URL object input - convert to string
-                if (url instanceof URL) {
-                    url = url.href;
+(() => {
+    const STATE = Symbol('urlState');
+    const PARAMS = Symbol('urlSearchParams');
+    const PAIRS = Symbol('pairs');
+    const OWNER = Symbol('owner');
+
+    // In urlencoded, '+' is a space. Percent-decoding must not fail, so a
+    // malformed input is decoded byte by byte and left to TextDecoder.
+    const decode = (input) => {
+        const plussed = input.replace(/\+/g, ' ');
+
+        try {
+            return decodeURIComponent(plussed);
+        } catch {
+            const encoder = new TextEncoder();
+            const bytes = [];
+
+            for (let i = 0; i < plussed.length; i++) {
+                const hex = plussed.slice(i + 1, i + 3);
+
+                if (plussed[i] === '%' && /^[0-9a-fA-F]{2}$/.test(hex)) {
+                    bytes.push(parseInt(hex, 16));
+                    i += 2;
                 } else {
-                    url = String(url);
+                    bytes.push(...encoder.encode(plussed[i]));
                 }
+            }
 
-                if (base) {
-                    // Handle relative URLs
-                    const baseUrl = typeof base === 'string' ? base : base.href;
+            return new TextDecoder().decode(new Uint8Array(bytes));
+        }
+    };
 
-                    if (url.startsWith('/')) {
-                        // Absolute path - use origin from base
-                        const match = baseUrl.match(/^([a-z][a-z0-9+\-.]*:\/\/[^\/]+)/i);
-                        url = match ? match[1] + url : url;
-                    } else if (!url.match(/^[a-z][a-z0-9+\-.]*:\/\//i)) {
-                        // Relative path - append to base directory
-                        const hasPath = baseUrl.match(/^[a-z][a-z0-9+\-.]*:\/\/[^\/]+\//i);
-                        if (hasPath) {
-                            url = baseUrl.replace(/\/[^\/]*$/, '/') + url;
-                        } else {
-                            url = baseUrl + '/' + url;
-                        }
+    // The urlencoded safe set is narrower than encodeURIComponent's, and
+    // a space serializes as '+'.
+    const encode = (input) => encodeURIComponent(input)
+        .replace(/[!'()~]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase())
+        .replace(/%20/g, '+');
+
+    const parsePairs = (input) => {
+        const pairs = [];
+        const query = input.charAt(0) === '?' ? input.slice(1) : input;
+
+        for (const part of query.split('&')) {
+            if (!part) {
+                continue;
+            }
+
+            const eq = part.indexOf('=');
+            const name = eq === -1 ? part : part.slice(0, eq);
+            const value = eq === -1 ? '' : part.slice(eq + 1);
+
+            pairs.push([decode(name), decode(value)]);
+        }
+
+        return pairs;
+    };
+
+    const parseUrl = (input, base) => __urlParse(
+        String(input),
+        base === undefined || base === null ? null : String(base)
+    );
+
+    const setPart = (url, part, value) => {
+        const next = __urlUpdate(url[STATE].href, part, String(value));
+
+        if (next === null) {
+            return;
+        }
+
+        url[STATE] = next;
+
+        if (url[PARAMS]) {
+            url[PARAMS][PAIRS] = parsePairs(next.search);
+        }
+    };
+
+    // Only href has to follow: the pairs are already what we just serialized.
+    const syncOwner = (params) => {
+        const owner = params[OWNER];
+
+        if (!owner) {
+            return;
+        }
+
+        const next = __urlUpdate(owner[STATE].href, 'search', params.toString());
+
+        if (next !== null) {
+            owner[STATE] = next;
+        }
+    };
+
+    class URLSearchParams {
+        constructor(init) {
+            this[PAIRS] = [];
+            this[OWNER] = null;
+
+            if (init === undefined || init === null) {
+                return;
+            }
+
+            if (typeof init === 'string') {
+                this[PAIRS] = parsePairs(init);
+            } else if (init instanceof URLSearchParams) {
+                this[PAIRS] = init[PAIRS].map(([name, value]) => [name, value]);
+            } else if (typeof init[Symbol.iterator] === 'function') {
+                for (const pair of init) {
+                    const entry = Array.from(pair);
+
+                    if (entry.length !== 2) {
+                        throw new TypeError('URLSearchParams init must hold [name, value] pairs');
                     }
+
+                    this[PAIRS].push([String(entry[0]), String(entry[1])]);
                 }
-
-                this.href = url;
-
-                // scheme://[userinfo@]host[:port][/path][?query][#hash]
-                const match = url.match(/^([a-z][a-z0-9+\-.]*):\/\/(?:([^@\/\?#]*)@)?([^:\/?#]*)(?::(\d+))?(\/[^\?#]*)?(\?[^#]*)?(#.*)?$/i);
-
-                if (match) {
-                    this.protocol = match[1] + ':';
-                    const userinfo = match[2] || '';
-                    const colonIdx = userinfo.indexOf(':');
-                    this.username = decodeURIComponent(colonIdx >= 0 ? userinfo.slice(0, colonIdx) : userinfo);
-                    this.password = decodeURIComponent(colonIdx >= 0 ? userinfo.slice(colonIdx + 1) : '');
-                    this.hostname = match[3];
-                    this.port = match[4] || '';
-                    this.host = this.hostname + (this.port ? ':' + this.port : '');
-                    this.pathname = match[5] || '/';
-                    this.search = match[6] || '';
-                    this.hash = match[7] || '';
-                    this.origin = this.protocol + '//' + this.host;
-                    this.searchParams = new URLSearchParams(this.search);
-                } else {
-                    this.protocol = '';
-                    this.username = '';
-                    this.password = '';
-                    this.host = '';
-                    this.hostname = '';
-                    this.port = '';
-                    this.pathname = url;
-                    this.search = '';
-                    this.hash = '';
-                    this.origin = '';
-                    this.searchParams = new URLSearchParams();
+            } else {
+                for (const name of Object.keys(init)) {
+                    this[PAIRS].push([name, String(init[name])]);
                 }
+            }
+        }
 
-                // Link searchParams back to this URL so mutations update href
-                this.searchParams._url = this;
+        get size() {
+            return this[PAIRS].length;
+        }
+
+        append(name, value) {
+            this[PAIRS].push([String(name), String(value)]);
+            syncOwner(this);
+        }
+
+        delete(name, value) {
+            const key = String(name);
+            const target = value === undefined ? undefined : String(value);
+
+            this[PAIRS] = this[PAIRS].filter(([n, v]) => n !== key || (target !== undefined && v !== target));
+            syncOwner(this);
+        }
+
+        get(name) {
+            const key = String(name);
+            const hit = this[PAIRS].find(([n]) => n === key);
+
+            return hit === undefined ? null : hit[1];
+        }
+
+        getAll(name) {
+            const key = String(name);
+
+            return this[PAIRS].filter(([n]) => n === key).map(([, v]) => v);
+        }
+
+        has(name, value) {
+            const key = String(name);
+            const target = value === undefined ? undefined : String(value);
+
+            return this[PAIRS].some(([n, v]) => n === key && (target === undefined || v === target));
+        }
+
+        set(name, value) {
+            const key = String(name);
+            const next = String(value);
+            const index = this[PAIRS].findIndex(([n]) => n === key);
+
+            if (index === -1) {
+                this[PAIRS].push([key, next]);
+            } else {
+                this[PAIRS][index] = [key, next];
+                this[PAIRS] = this[PAIRS].filter(([n], i) => n !== key || i === index);
             }
 
-            toString() {
-                return this.href;
+            syncOwner(this);
+        }
+
+        sort() {
+            this[PAIRS].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+            syncOwner(this);
+        }
+
+        toString() {
+            return this[PAIRS]
+                .map(([name, value]) => encode(name) + '=' + encode(value))
+                .join('&');
+        }
+
+        *entries() {
+            for (const [name, value] of this[PAIRS]) {
+                yield [name, value];
             }
-        };
+        }
+
+        *keys() {
+            for (const [name] of this[PAIRS]) {
+                yield name;
+            }
+        }
+
+        *values() {
+            for (const [, value] of this[PAIRS]) {
+                yield value;
+            }
+        }
+
+        forEach(callback, thisArg) {
+            for (const [name, value] of this[PAIRS]) {
+                callback.call(thisArg, value, name, this);
+            }
+        }
+
+        [Symbol.iterator]() {
+            return this.entries();
+        }
+    }
+
+    class URL {
+        constructor(input, base) {
+            const state = parseUrl(input, base);
+
+            if (state === null) {
+                throw new TypeError(`Invalid URL: ${String(input)}`);
+            }
+
+            this[STATE] = state;
+            this[PARAMS] = null;
+        }
+
+        static canParse(input, base) {
+            return parseUrl(input, base) !== null;
+        }
+
+        static parse(input, base) {
+            const state = parseUrl(input, base);
+
+            return state === null ? null : new URL(state.href);
+        }
+
+        get href() { return this[STATE].href; }
+        set href(value) {
+            const state = parseUrl(value, null);
+
+            if (state === null) {
+                throw new TypeError(`Invalid URL: ${String(value)}`);
+            }
+
+            this[STATE] = state;
+
+            if (this[PARAMS]) {
+                this[PARAMS][PAIRS] = parsePairs(state.search);
+            }
+        }
+
+        get origin() { return this[STATE].origin; }
+
+        get protocol() { return this[STATE].protocol; }
+        set protocol(value) { setPart(this, 'protocol', value); }
+
+        get username() { return this[STATE].username; }
+        set username(value) { setPart(this, 'username', value); }
+
+        get password() { return this[STATE].password; }
+        set password(value) { setPart(this, 'password', value); }
+
+        get host() { return this[STATE].host; }
+        set host(value) { setPart(this, 'host', value); }
+
+        get hostname() { return this[STATE].hostname; }
+        set hostname(value) { setPart(this, 'hostname', value); }
+
+        get port() { return this[STATE].port; }
+        set port(value) { setPart(this, 'port', value); }
+
+        get pathname() { return this[STATE].pathname; }
+        set pathname(value) { setPart(this, 'pathname', value); }
+
+        get search() { return this[STATE].search; }
+        set search(value) { setPart(this, 'search', value); }
+
+        get hash() { return this[STATE].hash; }
+        set hash(value) { setPart(this, 'hash', value); }
+
+        get searchParams() {
+            if (!this[PARAMS]) {
+                const params = new URLSearchParams(this[STATE].search);
+                params[OWNER] = this;
+                this[PARAMS] = params;
+            }
+
+            return this[PARAMS];
+        }
+
+        toString() { return this[STATE].href; }
+
+        toJSON() { return this[STATE].href; }
+    }
+
+    globalThis.URL = URL;
+    globalThis.URLSearchParams = URLSearchParams;
+})();
     "#;
 
     let code_str = v8::String::new(scope, code).unwrap();

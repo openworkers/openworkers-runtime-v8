@@ -287,6 +287,7 @@ impl Runtime {
                 // Native text encoding functions (must be registered at runtime,
                 // not in snapshot — native functions can't be serialized)
                 text_encoding::setup_text_encoding_natives(scope);
+                bindings::setup_url_natives(scope);
 
                 // Only setup pure JS APIs if no snapshot (they're in the snapshot)
                 if !use_snapshot {
@@ -298,7 +299,6 @@ impl Runtime {
                     bindings::setup_abort_controller(scope);
                     bindings::setup_structured_clone(scope);
                     bindings::setup_base64(scope);
-                    bindings::setup_url_search_params(scope);
                     bindings::setup_url(scope);
                     bindings::setup_headers(scope);
                     bindings::setup_request(scope);
