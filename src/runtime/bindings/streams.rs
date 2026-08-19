@@ -60,8 +60,8 @@ pub fn setup_stream_ops(
         next_id: next_callback_id,
     });
 
-    // Store in context slot to keep Rc alive for the context's lifetime
-    scope.get_current_context().set_slot(state.clone());
+    // Keeps the Rc alive for the context; the templates below only borrow it.
+    crate::context_slots::set(scope, state.clone());
 
     let stream_read_fn = native_stream_read_v8_template(scope, &state)
         .get_function(scope)
@@ -164,8 +164,8 @@ pub fn setup_response_stream_ops(
         manager: stream_manager,
     });
 
-    // Store in context slot to keep Rc alive for the context's lifetime
-    scope.get_current_context().set_slot(state.clone());
+    // Keeps the Rc alive for the context; the templates below only borrow it.
+    crate::context_slots::set(scope, state.clone());
 
     let create_fn = response_stream_create_v8_template(scope, &state)
         .get_function(scope)

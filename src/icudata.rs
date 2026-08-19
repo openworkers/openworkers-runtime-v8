@@ -11,7 +11,10 @@
 //! The `icudtl.dat` file comes from Chromium's ICU repository:
 //! <https://chromium.googlesource.com/chromium/deps/icu/+/main/common/icudtl.dat>
 //!
-//! SHA256: `1cf67874b5a87a8363a86fb3f81e3cbbed54d389062dab8fb52308d5cf8c8612`
+//! Its major version must match the `icu::set_common_data_NN` call in
+//! `platform.rs`, which is dictated by the `v8` crate.
+//!
+//! ICU 78, SHA256: `9f48c7f9c7c94d516a14870707e910ab94d75ae640ff6842c4af53276cd26ebe`
 
 /// ICU data must be 16-byte aligned per ICU requirements.
 /// See: https://unicode-org.github.io/icu/userguide/icu_data/
@@ -48,9 +51,9 @@ mod tests {
     #[test]
     fn test_intl_datetimeformat_works() {
         let limits = RuntimeLimits::default();
-        let mut isolate_wrapper = LockerManagedIsolate::new(limits);
+        let isolate_wrapper = LockerManagedIsolate::new(limits);
 
-        let mut locker = v8::Locker::new(&mut isolate_wrapper.isolate);
+        let mut locker = isolate_wrapper.isolate.lock();
         let scope = pin!(v8::HandleScope::new(&mut *locker));
         let mut scope = scope.init();
         let context = v8::Context::new(&scope, Default::default());
@@ -102,9 +105,9 @@ mod tests {
     #[test]
     fn test_intl_numberformat_works() {
         let limits = RuntimeLimits::default();
-        let mut isolate_wrapper = LockerManagedIsolate::new(limits);
+        let isolate_wrapper = LockerManagedIsolate::new(limits);
 
-        let mut locker = v8::Locker::new(&mut isolate_wrapper.isolate);
+        let mut locker = isolate_wrapper.isolate.lock();
         let scope = pin!(v8::HandleScope::new(&mut *locker));
         let mut scope = scope.init();
         let context = v8::Context::new(&scope, Default::default());

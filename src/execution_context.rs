@@ -46,8 +46,9 @@ unsafe fn try_lock_v8(
         return None;
     }
 
-    // SAFETY: caller guarantees lmi_ptr is valid when non-null
-    let lmi = unsafe { &mut *lmi_ptr };
+    // SAFETY: caller guarantees lmi_ptr is valid when non-null and outliving
+    // the guard, so borrowing it for 'static is sound here.
+    let lmi: &'static LockerManagedIsolate = unsafe { &*lmi_ptr };
     Some(lmi.lock())
 }
 
@@ -57,9 +58,11 @@ unsafe fn try_lock_v8(
 /// - Per-isolate state: isolate pointer, platform, limits, memory tracking
 /// - Per-request state (via RequestContext): V8 Context, event loop, callbacks
 pub struct ExecutionContext {
-    /// The shared isolate this context belongs to
-    /// Note: We DON'T own the isolate, just borrow it mutably
-    isolate: *mut v8::OwnedIsolate,
+    /// The pooled isolate this context belongs to. Not owned.
+    ///
+    /// The raw V8 pointer, because `v8::Isolate` is a wrapper around it and the
+    /// cell a `v8::Locker` hands out dies with the guard.
+    isolate: v8::UnsafeRawIsolatePtr,
 
     /// Pointer to the LockerManagedIsolate for on-demand Locker creation.
     /// Non-null for both pool modes (simple and multiplexed).
@@ -123,6 +126,8 @@ impl ExecutionContext {
         // Create log callback that bypasses scheduler (calls ops.handle_log directly)
         let log_callback = bindings::log_callback_from_ops(&ops);
 
+        let slots = Rc::new(crate::context_slots::ContextSlots::default());
+
         // Create NEW context in the pooled isolate
         let context = {
             use std::pin::pin;
@@ -131,6 +136,8 @@ impl ExecutionContext {
             let mut scope = scope.init();
             let context = v8::Context::new(&scope, Default::default());
             let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+            crate::context_slots::attach(scope, &slots);
 
             // Setup global aliases (self, global) for compatibility
             bindings::setup_global_aliases(scope);
@@ -217,15 +224,13 @@ impl ExecutionContext {
             .await;
         });
 
-        // Store raw pointer to isolate (safe because ExecutionContext is dropped before Locker)
-        // We cast &mut v8::Isolate to *mut v8::OwnedIsolate - this is safe because:
-        // 1. The isolate is locked and we have exclusive access
-        // 2. ExecutionContext lifetime is tied to the Locker lifetime
-        // 3. v8::Isolate and v8::OwnedIsolate have same memory layout
-        let isolate_ptr = isolate as *mut v8::Isolate as *mut v8::OwnedIsolate;
+        // SAFETY: the isolate is locked here, and every later use re-acquires
+        // the lock through `lmi_ptr` before rebuilding a `v8::Isolate`.
+        let isolate_ptr = unsafe { isolate.as_raw_isolate_ptr() };
 
         let request = RequestContext::new(
             context,
+            slots,
             scheduler_tx,
             callback_rx,
             callback_notify,
@@ -256,7 +261,7 @@ impl ExecutionContext {
     /// Used by `execute_pinned` to wrap a cached RequestContext with fresh
     /// per-isolate metadata for the next request.
     pub(crate) fn from_cached(
-        isolate: *mut v8::OwnedIsolate,
+        isolate: v8::UnsafeRawIsolatePtr,
         lmi_ptr: *mut LockerManagedIsolate,
         platform: &'static v8::SharedRef<v8::Platform>,
         limits: RuntimeLimits,
@@ -280,8 +285,15 @@ impl ExecutionContext {
     /// Used by `execute_pinned` to save the RequestContext back to the cache
     /// without aborting the event loop. The remaining EC fields (raw pointers,
     /// static refs, Arcs) are dropped normally.
-    pub(crate) fn into_parts(self) -> (RequestContext, *mut v8::OwnedIsolate) {
+    pub(crate) fn into_parts(self) -> (RequestContext, v8::UnsafeRawIsolatePtr) {
         (self.request, self.isolate)
+    }
+
+    /// Rebuild the isolate handle. Only valid while this context's lock is held.
+    fn isolate(&self) -> v8::Isolate {
+        // SAFETY: the pointer comes from a live isolate owned by the pool, and
+        // callers hold its lock.
+        unsafe { v8::Isolate::from_raw_isolate_ptr(self.isolate) }
     }
 
     /// Helper: Setup addEventListener in the context
@@ -446,13 +458,10 @@ impl ExecutionContext {
     pub fn evaluate(&mut self, code: &WorkerCode) -> Result<(), String> {
         use std::pin::pin;
 
-        // SAFETY: We need to access both the isolate and context, which are separate fields.
-        // This is safe because we have exclusive access to self, and the isolate pointer
-        // is valid for the lifetime of this ExecutionContext.
         match code {
-            WorkerCode::JavaScript(js) => unsafe {
-                let isolate = &mut *self.isolate;
-                let scope = pin!(v8::HandleScope::new(isolate));
+            WorkerCode::JavaScript(js) => {
+                let mut isolate = self.isolate();
+                let scope = pin!(v8::HandleScope::new(&mut isolate));
                 let mut scope = scope.init();
                 let context = v8::Local::new(&scope, &self.request.context);
                 let scope = &mut v8::ContextScope::new(&mut scope, context);
@@ -468,14 +477,14 @@ impl ExecutionContext {
                     .ok_or_else(|| "Script execution failed".to_string())?;
 
                 Ok(())
-            },
+            }
             WorkerCode::Snapshot(data) => {
                 let (source, cache_bytes) = crate::snapshot::unpack_code_cache(data)
                     .ok_or("Failed to unpack code cache bundle")?;
 
-                unsafe {
-                    let isolate = &mut *self.isolate;
-                    let scope = pin!(v8::HandleScope::new(isolate));
+                {
+                    let mut isolate = self.isolate();
+                    let scope = pin!(v8::HandleScope::new(&mut isolate));
                     let mut scope = scope.init();
                     let context = v8::Local::new(&scope, &self.request.context);
                     let scope = &mut v8::ContextScope::new(&mut scope, context);
@@ -569,9 +578,9 @@ impl ExecutionContext {
         };
 
         // Now enter V8 scope
-        unsafe {
-            let isolate = &mut *self.isolate;
-            let scope = pin!(v8::HandleScope::new(isolate));
+        {
+            let mut isolate = self.isolate();
+            let scope = pin!(v8::HandleScope::new(&mut isolate));
             let mut scope = scope.init();
             let context = v8::Local::new(&scope, &self.request.context);
             let scope = &mut v8::ContextScope::new(&mut scope, context);
@@ -752,19 +761,19 @@ impl ExecutionContext {
         use std::pin::pin;
 
         // Pump V8 platform message loop (GC, etc.)
-        unsafe {
-            let isolate = &mut *self.isolate;
+        {
+            let isolate = self.isolate();
 
-            while v8::Platform::pump_message_loop(self.platform, isolate, false) {
+            while v8::Platform::pump_message_loop(self.platform, &isolate, false) {
                 // Continue pumping until no more messages
             }
         }
 
         // Process microtasks (Promises, async/await) - CRITICAL for Promise resolution!
         // Without this, .then() handlers and async/await continuations never execute.
-        unsafe {
-            let isolate = &mut *self.isolate;
-            let scope = pin!(v8::HandleScope::new(isolate));
+        {
+            let mut isolate = self.isolate();
+            let scope = pin!(v8::HandleScope::new(&mut isolate));
             let mut scope = scope.init();
             let context = v8::Local::new(&scope, &self.request.context);
             let scope = &mut v8::ContextScope::new(&mut scope, context);
@@ -799,9 +808,9 @@ impl ExecutionContext {
     ) -> bool {
         use std::pin::pin;
 
-        unsafe {
-            let isolate = &mut *self.isolate;
-            let scope = pin!(v8::HandleScope::new(isolate));
+        {
+            let mut isolate = self.isolate();
+            let scope = pin!(v8::HandleScope::new(&mut isolate));
             let mut scope = scope.init();
             let context = v8::Local::new(&scope, &self.request.context);
             let scope = &mut v8::ContextScope::new(&mut scope, context);
@@ -846,7 +855,7 @@ impl ExecutionContext {
         }
 
         // Get isolate handle for security guards
-        let isolate_handle = unsafe { (*self.isolate).thread_safe_handle() };
+        let isolate_handle = self.isolate().thread_safe_handle();
 
         // Setup security guards:
         // 1. Wall-clock timeout (all platforms) - prevents hanging on I/O
@@ -900,7 +909,7 @@ impl ExecutionContext {
     /// Creates its own security guards so background work cannot run forever.
     /// Returns Ok if all background work completed, or an error if it timed out.
     pub async fn drain_waituntil(&mut self) -> Result<(), TerminationReason> {
-        let isolate_handle = unsafe { (*self.isolate).thread_safe_handle() };
+        let isolate_handle = self.isolate().thread_safe_handle();
 
         // Fresh guards for background work — same limits as exec()
         let wall_guard =
@@ -973,8 +982,8 @@ impl ExecutionContext {
         wall_guard: &TimeoutGuard,
         cpu_guard: &Option<CpuEnforcer>,
     ) -> bool {
-        unsafe {
-            (*self.isolate).is_execution_terminating()
+        {
+            self.isolate().is_execution_terminating()
                 || wall_guard.was_triggered()
                 || cpu_guard
                     .as_ref()
@@ -1140,9 +1149,9 @@ impl ExecutionContext {
                 let _lock = unsafe { try_lock_v8(lmi_ptr) };
 
                 use std::pin::pin;
-                let result = unsafe {
-                    let isolate = &mut *self.isolate;
-                    let scope = pin!(v8::HandleScope::new(isolate));
+                let result = {
+                    let mut isolate = self.isolate();
+                    let scope = pin!(v8::HandleScope::new(&mut isolate));
                     let mut scope = scope.init();
                     let context = v8::Local::new(&scope, &self.request.context);
                     let scope = &mut v8::ContextScope::new(&mut scope, context);
@@ -1186,9 +1195,9 @@ impl ExecutionContext {
                 let _lock = unsafe { try_lock_v8(lmi_ptr) };
 
                 use std::pin::pin;
-                let result = unsafe {
-                    let isolate = &mut *self.isolate;
-                    let scope = pin!(v8::HandleScope::new(isolate));
+                let result = {
+                    let mut isolate = self.isolate();
+                    let scope = pin!(v8::HandleScope::new(&mut isolate));
                     let mut scope = scope.init();
                     let context = v8::Local::new(&scope, &self.request.context);
                     let scope = &mut v8::ContextScope::new(&mut scope, context);
@@ -1257,9 +1266,9 @@ impl ExecutionContext {
                 let _lock = unsafe { try_lock_v8(lmi_ptr) };
 
                 use std::pin::pin;
-                let result: Result<(), String> = unsafe {
-                    let isolate = &mut *self.isolate;
-                    let scope = pin!(v8::HandleScope::new(isolate));
+                let result: Result<(), String> = {
+                    let mut isolate = self.isolate();
+                    let scope = pin!(v8::HandleScope::new(&mut isolate));
                     let mut scope = scope.init();
                     let context = v8::Local::new(&scope, &self.request.context);
                     let scope = &mut v8::ContextScope::new(&mut scope, context);
@@ -1365,9 +1374,9 @@ impl ExecutionContext {
                 let _lock = unsafe { try_lock_v8(lmi_ptr) };
 
                 use std::pin::pin;
-                let result = unsafe {
-                    let isolate = &mut *self.isolate;
-                    let scope = pin!(v8::HandleScope::new(isolate));
+                let result = {
+                    let mut isolate = self.isolate();
+                    let scope = pin!(v8::HandleScope::new(&mut isolate));
                     let mut scope = scope.init();
                     let context = v8::Local::new(&scope, &self.request.context);
                     let scope = &mut v8::ContextScope::new(&mut scope, context);
@@ -1447,8 +1456,8 @@ impl ExecutionContext {
 
         // 0. Cancel any lingering terminate_execution flag from a previous timeout/abort.
         // Without this, evaluate() below would fail immediately if the flag is still set.
-        unsafe {
-            (*self.isolate).cancel_terminate_execution();
+        {
+            self.isolate().cancel_terminate_execution();
         }
 
         // 1. Reset JS globals (response, completion, streams, task result, timers)
@@ -1492,7 +1501,7 @@ impl ExecutionContext {
         self.request
             .aborted
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        unsafe { (*self.isolate).terminate_execution() };
+        self.isolate().terminate_execution();
     }
 }
 

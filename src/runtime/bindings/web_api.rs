@@ -29,8 +29,8 @@ pub fn setup_performance(scope: &mut v8::PinScope) {
         start: Instant::now(),
     });
 
-    // Store in context slot to keep Rc alive for the context's lifetime
-    scope.get_current_context().set_slot(state.clone());
+    // Keeps the Rc alive for the context; the templates below only borrow it.
+    crate::context_slots::set(scope, state.clone());
 
     let now_fn = performance_now_v8_template(scope, &state)
         .get_function(scope)

@@ -1,10 +1,10 @@
 //! Isolate managed via v8::Locker (no auto-enter/exit)
 //!
-//! This module provides a wrapper around v8::UnenteredIsolate that is designed
+//! This module provides a wrapper around v8::SharedIsolate that is designed
 //! for use in multi-threaded isolate pools with v8::Locker.
 //!
 //! Unlike Worker's Runtime which uses OwnedIsolate (auto-enter), LockerManagedIsolate
-//! uses UnenteredIsolate and requires explicit locking via v8::Locker.
+//! uses SharedIsolate and requires explicit locking via v8::Locker.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64};
@@ -19,7 +19,7 @@ use openworkers_core::RuntimeLimits;
 /// This represents the V8 engine instance (heap, GC, JIT compiler) without
 /// automatic entry management. It must be locked with v8::Locker before use.
 pub struct LockerManagedIsolate {
-    pub isolate: v8::UnenteredIsolate,
+    pub isolate: v8::SharedIsolate,
     pub platform: &'static v8::SharedRef<v8::Platform>,
     pub limits: RuntimeLimits,
     pub memory_limit_hit: Arc<AtomicBool>,
@@ -65,21 +65,16 @@ impl LockerManagedIsolate {
             params = params.snapshot_blob((*snapshot_data).into());
         }
 
-        tracing::trace!("Creating v8::UnenteredIsolate (before v8::Isolate::new_unentered)");
-        let mut isolate = v8::Isolate::new_unentered(params);
-        tracing::trace!("v8::UnenteredIsolate created successfully");
+        let mut isolate = v8::Isolate::new(params);
 
         // Install heap limit callback to prevent V8 OOM from crashing the process
-        // We need to lock the isolate temporarily to add the callback
-        let heap_limit_state = {
-            tracing::trace!("Creating v8::Locker for heap limit callback (before v8::Locker::new)");
-            let mut locker = v8::Locker::new(&mut isolate);
-            tracing::trace!("v8::Locker created successfully, installing heap limit callback");
-            let state =
-                install_heap_limit_callback(&mut locker, Arc::clone(&memory_limit_hit), heap_max);
-            tracing::trace!("Heap limit callback installed, v8::Locker will be dropped");
-            state
-        };
+        let heap_limit_state =
+            install_heap_limit_callback(&mut isolate, Arc::clone(&memory_limit_hit), heap_max);
+
+        // SAFETY: the embedder state attached to this isolate, here and later
+        // through the lock, is Send: heap limit state, Arcs and atomics.
+        let isolate = unsafe { isolate.try_into_shared() }
+            .unwrap_or_else(|e| panic!("isolate cannot be shared: {e}"));
 
         let use_snapshot = snapshot_ref.is_some();
 
@@ -98,14 +93,14 @@ impl LockerManagedIsolate {
     /// Acquire the V8 lock, process deferred destructions, and create a JsLock.
     ///
     /// This encapsulates the 3-step lock acquisition pattern:
-    /// 1. `v8::Locker::new()` — acquire V8 mutex
-    /// 2. `deferred_destruction_queue.process_all()` — clean up queued handles
-    /// 3. `JsLock::new()` — apply deferred memory deltas + enable GC tracking
+    /// 1. `SharedIsolate::lock()`: acquire V8 mutex
+    /// 2. `deferred_destruction_queue.process_all()`: clean up queued handles
+    /// 3. `JsLock::new()`: apply deferred memory deltas + enable GC tracking
     ///
     /// Returns both the Locker (RAII mutex) and JsLock (RAII GC tracking).
     /// Both are dropped together when the caller's scope ends.
-    pub fn lock(&mut self) -> (v8::Locker<'_>, crate::gc::JsLock) {
-        let mut locker = v8::Locker::new(&mut self.isolate);
+    pub fn lock(&self) -> (v8::Locker<'_>, crate::gc::JsLock) {
+        let mut locker = self.isolate.lock();
         self.deferred_destruction_queue.process_all();
         let js = crate::gc::JsLock::new(&mut locker, &self.pending_memory_delta);
         (locker, js)
@@ -163,10 +158,10 @@ mod tests {
     #[test]
     fn test_with_locker() {
         let limits = RuntimeLimits::default();
-        let mut isolate_wrapper = LockerManagedIsolate::new(limits);
+        let isolate_wrapper = LockerManagedIsolate::new(limits);
 
         // Create Locker - it handles enter/exit automatically via RAII
-        let mut locker = v8::Locker::new(&mut isolate_wrapper.isolate);
+        let mut locker = isolate_wrapper.isolate.lock();
 
         // Now we can use the isolate via DerefMut
         let scope = std::pin::pin!(v8::HandleScope::new(&mut *locker));

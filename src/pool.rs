@@ -161,7 +161,7 @@ fn get_config() -> &'static PinnedPoolConfig {
 struct CachedContext {
     request: RequestContext,
     /// Raw pointer to the isolate (cached from original creation for warm reuse)
-    isolate_ptr: *mut v8::OwnedIsolate,
+    isolate_ptr: v8::UnsafeRawIsolatePtr,
     worker_id: String,
     version: i32,
     reuse_count: u32,
@@ -269,7 +269,7 @@ impl Drop for TaggedIsolate {
         // deferred destructions. Without this, v8::Global handles in
         // CachedContext would drop without the V8 lock held.
         let lmi = self.isolate.get_mut();
-        let _locker = v8::Locker::new(&mut lmi.isolate);
+        let _locker = lmi.isolate.lock();
         lmi.deferred_destruction_queue.process_all();
 
         if let Ok(mut inner) = self.inner.try_lock() {
@@ -579,8 +579,8 @@ fn drop_under_lock<T>(value: T, lmi_ptr: *mut LockerManagedIsolate) {
     }
 
     unsafe {
-        let lmi = &mut *lmi_ptr;
-        let _locker = v8::Locker::new(&mut lmi.isolate);
+        let lmi = &*lmi_ptr;
+        let _locker = lmi.isolate.lock();
         lmi.deferred_destruction_queue.process_all();
         drop(value);
     }
@@ -799,9 +799,9 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
         &worker_id[..8.min(worker_id.len())],
     );
 
-    // Acquire Locker to enter the unentered isolate, create context
+    // Acquire the lock to enter the isolate and create the context
     let ctx_result = {
-        let lmi = unsafe { &mut *lmi_ptr };
+        let lmi = unsafe { &*lmi_ptr };
         let (mut locker, _js_lock) = lmi.lock();
 
         ExecutionContext::new_with_pooled_isolate(

@@ -5,7 +5,7 @@
 //! intra-isolate multiplexing is enabled.
 //!
 //! Binding state isolation is automatic: `store_state!`/`get_state!` macros
-//! use `v8::Context::set_slot()` — each v8::Context gets its own state.
+//! reach the `ContextSlots` this struct owns, one per v8::Context.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -27,6 +27,9 @@ use openworkers_core::WebSocketId;
 pub struct RequestContext {
     /// V8 context for this request (isolated global scope)
     pub context: v8::Global<v8::Context>,
+
+    /// Binding state for `context`; must outlive it.
+    _slots: Rc<crate::context_slots::ContextSlots>,
 
     /// Channel to send messages to this request's event loop
     pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
@@ -74,6 +77,7 @@ impl RequestContext {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         context: v8::Global<v8::Context>,
+        slots: Rc<crate::context_slots::ContextSlots>,
         scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
         callback_rx: mpsc::UnboundedReceiver<CallbackMessage>,
         callback_notify: Arc<Notify>,
@@ -89,6 +93,7 @@ impl RequestContext {
     ) -> Self {
         Self {
             context,
+            _slots: slots,
             scheduler_tx,
             callback_rx,
             callback_notify,

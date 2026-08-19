@@ -28,9 +28,7 @@ macro_rules! register_fn {
 /// ```
 macro_rules! store_state {
     ($scope:expr, $state:expr) => {
-        $scope
-            .get_current_context()
-            .set_slot(std::rc::Rc::new($state))
+        crate::context_slots::set($scope, std::rc::Rc::new($state))
     };
 }
 
@@ -44,7 +42,7 @@ macro_rules! store_state {
 /// ```
 macro_rules! get_state {
     ($scope:expr, $type:ty) => {
-        $scope.get_current_context().get_slot::<$type>()
+        crate::context_slots::get::<$type>($scope)
     };
 }
 

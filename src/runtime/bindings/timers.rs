@@ -37,8 +37,8 @@ pub fn setup_timers(
         scheduler_tx: scheduler_tx.clone(),
     });
 
-    // Store in context slot to keep Rc alive for the context's lifetime
-    scope.get_current_context().set_slot(state.clone());
+    // Keeps the Rc alive for the context; the templates below only borrow it.
+    crate::context_slots::set(scope, state.clone());
 
     // Register native functions using Fast API templates
     let schedule_timeout_fn = native_schedule_timeout_v8_template(scope, &state)

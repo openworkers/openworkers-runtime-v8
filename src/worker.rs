@@ -160,6 +160,9 @@ impl WorkerBuilder {
             std::path::Path::new(RUNTIME_SNAPSHOT_PATH).exists()
         });
 
+        // Outlives `context`, which is dropped at the end of this function.
+        let slots = Rc::new(crate::context_slots::ContextSlots::default());
+
         // Create context with bindings on the borrowed isolate
         let context = {
             use std::pin::pin;
@@ -167,6 +170,8 @@ impl WorkerBuilder {
             let mut scope = scope.init();
             let context = v8::Context::new(&scope, Default::default());
             let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+            crate::context_slots::attach(scope, &slots);
 
             // Setup global aliases (self, global)
             bindings::setup_global_aliases(scope);

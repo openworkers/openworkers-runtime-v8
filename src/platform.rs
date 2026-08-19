@@ -18,7 +18,7 @@ pub fn get_platform() -> &'static v8::SharedRef<v8::Platform> {
         // Initialize ICU data BEFORE V8 initialization
         // This is required for Intl.DateTimeFormat, NumberFormat, etc.
         // Without this, V8/ICU tries to load data at runtime causing OOM
-        v8::icu::set_common_data_77(crate::icudata::ICU_DATA)
+        v8::icu::set_common_data_78(crate::icudata::ICU_DATA)
             .expect("Failed to initialize ICU data");
 
         // Set V8 flags before initialization (following workerd's approach)

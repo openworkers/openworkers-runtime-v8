@@ -140,17 +140,17 @@ mod v8_tests {
         init_v8();
 
         let limits = openworkers_core::RuntimeLimits::default();
-        let mut isolate_wrapper = crate::LockerManagedIsolate::new(limits);
+        let isolate_wrapper = crate::LockerManagedIsolate::new(limits);
 
         // Before lock, try_current returns None
         assert!(JsLock::try_current().is_none());
 
         {
             // First acquire v8::Locker
-            let mut locker = v8::Locker::new(&mut isolate_wrapper.isolate);
+            let mut locker = isolate_wrapper.isolate.lock();
 
             // Then create JsLock with per-isolate pending delta
-            let _gc_lock = JsLock::new(&mut *locker, &isolate_wrapper.pending_memory_delta);
+            let _gc_lock = JsLock::new(&mut locker, &isolate_wrapper.pending_memory_delta);
 
             // With JsLock, try_current returns Some
             assert!(JsLock::try_current().is_some());
@@ -165,11 +165,11 @@ mod v8_tests {
         init_v8();
 
         let limits = openworkers_core::RuntimeLimits::default();
-        let mut isolate_wrapper = crate::LockerManagedIsolate::new(limits);
+        let isolate_wrapper = crate::LockerManagedIsolate::new(limits);
 
         {
-            let mut locker = v8::Locker::new(&mut isolate_wrapper.isolate);
-            let _gc_lock = JsLock::new(&mut *locker, &isolate_wrapper.pending_memory_delta);
+            let mut locker = isolate_wrapper.isolate.lock();
+            let _gc_lock = JsLock::new(&mut locker, &isolate_wrapper.pending_memory_delta);
 
             // Create a guard while holding the lock
             let guard = ExternalMemoryGuard::new(1_000_000);
@@ -185,18 +185,18 @@ mod v8_tests {
         init_v8();
 
         let limits = openworkers_core::RuntimeLimits::default();
-        let mut isolate_wrapper = crate::LockerManagedIsolate::new(limits);
+        let isolate_wrapper = crate::LockerManagedIsolate::new(limits);
 
         // First, ensure a clean state by acquiring and releasing lock
         {
-            let mut locker = v8::Locker::new(&mut isolate_wrapper.isolate);
-            let _gc_lock = JsLock::new(&mut *locker, &isolate_wrapper.pending_memory_delta);
+            let mut locker = isolate_wrapper.isolate.lock();
+            let _gc_lock = JsLock::new(&mut locker, &isolate_wrapper.pending_memory_delta);
         }
 
         // Create a guard UNDER lock, then drop WITHOUT lock
         let guard = {
-            let mut locker = v8::Locker::new(&mut isolate_wrapper.isolate);
-            let _gc_lock = JsLock::new(&mut *locker, &isolate_wrapper.pending_memory_delta);
+            let mut locker = isolate_wrapper.isolate.lock();
+            let _gc_lock = JsLock::new(&mut locker, &isolate_wrapper.pending_memory_delta);
 
             // Guard is created under lock — captures per-isolate pending delta
             ExternalMemoryGuard::new(500_000)
@@ -213,8 +213,8 @@ mod v8_tests {
 
         // Re-acquire lock — pending delta should be applied to this isolate
         {
-            let mut locker = v8::Locker::new(&mut isolate_wrapper.isolate);
-            let _gc_lock = JsLock::new(&mut *locker, &isolate_wrapper.pending_memory_delta);
+            let mut locker = isolate_wrapper.isolate.lock();
+            let _gc_lock = JsLock::new(&mut locker, &isolate_wrapper.pending_memory_delta);
 
             assert_eq!(
                 isolate_wrapper.pending_memory_delta.load(Ordering::SeqCst),
@@ -229,13 +229,13 @@ mod v8_tests {
         init_v8();
 
         let limits = openworkers_core::RuntimeLimits::default();
-        let mut isolate_a = crate::LockerManagedIsolate::new(limits.clone());
-        let mut isolate_b = crate::LockerManagedIsolate::new(limits);
+        let isolate_a = crate::LockerManagedIsolate::new(limits.clone());
+        let isolate_b = crate::LockerManagedIsolate::new(limits);
 
         // Create a guard under isolate A's lock
         let guard_a = {
-            let mut locker = v8::Locker::new(&mut isolate_a.isolate);
-            let _gc_lock = JsLock::new(&mut *locker, &isolate_a.pending_memory_delta);
+            let mut locker = isolate_a.isolate.lock();
+            let _gc_lock = JsLock::new(&mut locker, &isolate_a.pending_memory_delta);
             ExternalMemoryGuard::new(1_000_000)
         };
 
@@ -256,8 +256,8 @@ mod v8_tests {
 
         // Acquiring isolate B's lock should NOT apply A's delta
         {
-            let mut locker = v8::Locker::new(&mut isolate_b.isolate);
-            let _gc_lock = JsLock::new(&mut *locker, &isolate_b.pending_memory_delta);
+            let mut locker = isolate_b.isolate.lock();
+            let _gc_lock = JsLock::new(&mut locker, &isolate_b.pending_memory_delta);
         }
 
         // A's delta should still be pending
@@ -269,8 +269,8 @@ mod v8_tests {
 
         // Now acquire A's lock — delta applied
         {
-            let mut locker = v8::Locker::new(&mut isolate_a.isolate);
-            let _gc_lock = JsLock::new(&mut *locker, &isolate_a.pending_memory_delta);
+            let mut locker = isolate_a.isolate.lock();
+            let _gc_lock = JsLock::new(&mut locker, &isolate_a.pending_memory_delta);
         }
 
         assert_eq!(
@@ -285,15 +285,15 @@ mod v8_tests {
         init_v8();
 
         let limits = openworkers_core::RuntimeLimits::default();
-        let mut isolate_wrapper = crate::LockerManagedIsolate::new(limits);
+        let isolate_wrapper = crate::LockerManagedIsolate::new(limits);
 
         // Create guard WITHOUT lock — no per-isolate accumulator captured
         let mut guard = ExternalMemoryGuard::new(0);
 
         // Now adjust UNDER lock — should capture the per-isolate accumulator
         {
-            let mut locker = v8::Locker::new(&mut isolate_wrapper.isolate);
-            let _gc_lock = JsLock::new(&mut *locker, &isolate_wrapper.pending_memory_delta);
+            let mut locker = isolate_wrapper.isolate.lock();
+            let _gc_lock = JsLock::new(&mut locker, &isolate_wrapper.pending_memory_delta);
             guard.adjust(100_000);
         }
 

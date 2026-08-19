@@ -28,8 +28,7 @@ gc-derive = { package = "openworkers-runtime-v8-gc-derive", path = "gc-derive" }
 # Common types
 openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.14.0" }
 
-# V8 JavaScript engine (fork with UnenteredIsolate + Locker support for pooling)
-v8 = { package = "openworkers-v8", version = "146.8.0" }
+v8 = "152.1.0"
 
 # Async runtime
 tokio = { version = "1.49.0", features = ["full"] }
@@ -44,10 +43,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # V8 serialization (for automatic Rust <-> JS type conversion)
-serde_v8 = { package = "openworkers-serde-v8", version = "146" }
+serde_v8 = { package = "openworkers-serde-v8", version = "152" }
 
 # V8 Glue - binding macros
-glue_v8 = { package = "openworkers-glue-v8", version = "146" }
+glue_v8 = { package = "openworkers-glue-v8", version = "152" }
 
 # HTTP types
 bytes = { version = "1.11", features = ["serde"] }
@@ -77,3 +76,8 @@ rand = "0.9"
 
 # ESM -> classic script lowering for the SSR benchmarks
 openworkers-transform = { git = "https://github.com/openworkers/openworkers-transform", tag = "v0.1.0" }
+
+# Until the 152 alignment is published.
+[patch.crates-io]
+openworkers-serde-v8 = { path = "../serde-v8" }
+openworkers-glue-v8 = { path = "../glue-v8" }

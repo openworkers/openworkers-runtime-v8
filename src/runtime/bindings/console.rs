@@ -43,8 +43,8 @@ pub fn setup_console(scope: &mut v8::PinScope, log_callback: LogCallback) {
     // Create state (passed via FunctionTemplate data)
     let state = Rc::new(ConsoleState { log_callback });
 
-    // Store in context slot to keep Rc alive for the context's lifetime
-    scope.get_current_context().set_slot(state.clone());
+    // Keeps the Rc alive for the context; the templates below only borrow it.
+    crate::context_slots::set(scope, state.clone());
 
     // Register native console_log using generated template
     let console_log_fn = console_log_v8_template(scope, &state)

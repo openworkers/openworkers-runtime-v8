@@ -128,6 +128,8 @@ pub(crate) fn dispatch_ws_event(
 pub struct Runtime {
     pub isolate: v8::OwnedIsolate,
     pub context: v8::Global<v8::Context>,
+    /// Binding state for `context`. Must outlive it.
+    _slots: Rc<crate::context_slots::ContextSlots>,
     pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     pub callback_rx: mpsc::UnboundedReceiver<CallbackMessage>,
     pub(crate) fetch_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
@@ -237,7 +239,7 @@ impl Runtime {
             }
         };
 
-        let (isolate, heap_limit_state, context) = {
+        let (isolate, heap_limit_state, context, slots) = {
             let mut isolate = v8::Isolate::new(params);
 
             // Install heap limit callback to prevent V8 OOM from crashing the process
@@ -246,12 +248,16 @@ impl Runtime {
 
             let use_snapshot = has_snapshot;
 
+            let slots = Rc::new(crate::context_slots::ContextSlots::default());
+
             let context = {
                 use std::pin::pin;
                 let scope = pin!(v8::HandleScope::new(&mut isolate));
                 let mut scope = scope.init();
                 let context = v8::Context::new(&scope, Default::default());
                 let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+                crate::context_slots::attach(scope, &slots);
 
                 // Setup global aliases (self, global) for compatibility
                 bindings::setup_global_aliases(scope);
@@ -302,12 +308,13 @@ impl Runtime {
                 v8::Global::new(scope.as_ref(), context)
             };
 
-            (isolate, heap_limit_state, context)
+            (isolate, heap_limit_state, context, slots)
         };
 
         let runtime = Self {
             isolate,
             context,
+            _slots: slots,
             scheduler_tx,
             callback_rx,
             fetch_callbacks,
