@@ -34,9 +34,9 @@ use openworkers_runtime_v8::{
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 
 // ============================================================================
 // V8 Global State Lock
@@ -45,7 +45,7 @@ use std::time::{Duration, Instant};
 // V8 has global state that conflicts when multiple pool architectures are
 // initialized in the same process. This lock ensures tests run sequentially.
 
-static V8_TEST_LOCK: Mutex<()> = Mutex::new(());
+static V8_TEST_LOCK: Mutex<()> = Mutex::const_new(());
 
 // ============================================================================
 // Mock Operations Handler (simulates real I/O)
@@ -230,7 +230,7 @@ fn make_request() -> HttpRequest {
 
 #[tokio::test(flavor = "current_thread")]
 async fn bench_legacy_simple() {
-    let _lock = V8_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = V8_TEST_LOCK.lock().await;
 
     run_in_local(|| async {
         let iterations = 30u32;
@@ -265,7 +265,7 @@ async fn bench_legacy_simple() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn bench_legacy_with_fetch() {
-    let _lock = V8_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = V8_TEST_LOCK.lock().await;
 
     run_in_local(|| async {
         let iterations = 20u32;
@@ -308,7 +308,7 @@ async fn bench_legacy_with_fetch() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn bench_pinned_simple() {
-    let _lock = V8_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = V8_TEST_LOCK.lock().await;
 
     run_in_local(|| async {
         init_pinned_pool(PinnedPoolConfig {
@@ -360,7 +360,7 @@ async fn bench_pinned_simple() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn bench_pinned_with_fetch() {
-    let _lock = V8_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = V8_TEST_LOCK.lock().await;
 
     run_in_local(|| async {
         init_pinned_pool(PinnedPoolConfig {
@@ -416,7 +416,7 @@ async fn bench_pinned_with_fetch() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn bench_pinned_multi_fetch() {
-    let _lock = V8_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = V8_TEST_LOCK.lock().await;
 
     run_in_local(|| async {
         init_pinned_pool(PinnedPoolConfig {

@@ -164,7 +164,7 @@ async fn bench_pinned_standard() {
 
             execute_pinned(PinnedExecuteRequest {
                 owner_id: worker_id.clone(),
-                worker_id: worker_id,
+                worker_id,
                 version: 1,
                 script,
                 ops: ops.clone(),
@@ -231,7 +231,7 @@ async fn bench_pinned_cpu_bound() {
 
             execute_pinned(PinnedExecuteRequest {
                 owner_id: worker_id.clone(),
-                worker_id: worker_id,
+                worker_id,
                 version: 1,
                 script,
                 ops: ops.clone(),

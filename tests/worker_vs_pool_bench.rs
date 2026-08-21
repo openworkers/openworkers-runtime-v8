@@ -113,7 +113,7 @@ async fn bench_pinned_cold_start() {
 
             execute_pinned(PinnedExecuteRequest {
                 owner_id: worker_id.clone(),
-                worker_id: worker_id,
+                worker_id,
                 version: 1,
                 script,
                 ops: ops.clone(),

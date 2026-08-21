@@ -114,7 +114,7 @@ async fn bench_streaming_forward(iterations: u32) -> Duration {
 
         // Consume the stream
         if let ResponseBody::Stream(mut rx) = response.body {
-            while let Some(_) = rx.recv().await {}
+            while rx.recv().await.is_some() {}
         }
     }
 

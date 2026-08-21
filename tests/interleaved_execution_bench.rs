@@ -169,7 +169,7 @@ async fn bench_concurrent_pool_with_io() {
         }
 
         let elapsed = start.elapsed();
-        let theoretical_io_time = Duration::from_millis(io_delay_ms as u64); // All I/O overlaps!
+        let theoretical_io_time = Duration::from_millis(io_delay_ms); // All I/O overlaps!
 
         println!("\n   Results:");
         println!("   Total time: {:?}", elapsed);

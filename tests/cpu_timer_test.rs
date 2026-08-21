@@ -214,7 +214,7 @@ async fn test_exec_cpu_intensive_uses_more_cpu_time() {
         };
         let timer = CpuTimer::start();
         let (task, _rx) = Event::fetch(req);
-        let _ = worker.exec(task).await.unwrap();
+        worker.exec(task).await.unwrap();
         let light_cpu = timer.elapsed();
 
         // Measure heavy
@@ -228,7 +228,7 @@ async fn test_exec_cpu_intensive_uses_more_cpu_time() {
         };
         let timer = CpuTimer::start();
         let (task, _rx) = Event::fetch(req);
-        let _ = worker.exec(task).await.unwrap();
+        worker.exec(task).await.unwrap();
         let heavy_cpu = timer.elapsed();
 
         println!("Light computation CPU time: {:?}", light_cpu);

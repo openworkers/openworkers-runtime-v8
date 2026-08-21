@@ -155,7 +155,7 @@ async fn test_code_cache_concurrent_same() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_code_cache_concurrent_different() {
-    let workers_code = vec![
+    let workers_code = [
         r#"globalThis.default = { async fetch() { return new Response("worker-A"); } };"#,
         r#"globalThis.default = { async fetch() { return new Response("worker-B"); } };"#,
         r#"
@@ -169,7 +169,7 @@ async fn test_code_cache_concurrent_different() {
         .map(|code| Arc::new(create_test_code_cache(code)))
         .collect();
 
-    let expected = vec!["worker-A", "worker-B", "worker-C-dynamic"];
+    let expected = ["worker-A", "worker-B", "worker-C-dynamic"];
 
     let mut handles = vec![];
 
@@ -224,7 +224,7 @@ async fn test_code_cache_concurrent_different() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_code_cache_concurrent_realistic() {
-    let workers_code = vec![
+    let workers_code = [
         r#"
             const routes = {
                 '/': 'Welcome to the API',
