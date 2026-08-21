@@ -143,6 +143,24 @@ fn response_stream_end(scope: &mut v8::PinScope, state: &Rc<ResponseStreamState>
         .try_write_chunk(stream_id, stream_manager::StreamChunk::Done);
 }
 
+/// Fail a response stream
+///
+/// A guest that errors its own body has produced a truncated response, so the
+/// host has to receive an error rather than the clean end `response_stream_end`
+/// would write.
+#[glue_v8::method(state = Rc<ResponseStreamState>)]
+fn response_stream_error(
+    scope: &mut v8::PinScope,
+    state: &Rc<ResponseStreamState>,
+    stream_id: u64,
+    message: String,
+) {
+    let _ = scope;
+    let _ = state
+        .manager
+        .try_write_chunk(stream_id, stream_manager::StreamChunk::Error(message));
+}
+
 /// Check if a response stream is closed
 #[glue_v8::method(state = Rc<ResponseStreamState>)]
 fn response_stream_is_closed(
@@ -176,6 +194,9 @@ pub fn setup_response_stream_ops(
     let end_fn = response_stream_end_v8_template(scope, &state)
         .get_function(scope)
         .unwrap();
+    let error_fn = response_stream_error_v8_template(scope, &state)
+        .get_function(scope)
+        .unwrap();
     let is_closed_fn = response_stream_is_closed_v8_template(scope, &state)
         .get_function(scope)
         .unwrap();
@@ -183,5 +204,6 @@ pub fn setup_response_stream_ops(
     register_fn!(scope, "__responseStreamCreate", create_fn);
     register_fn!(scope, "__responseStreamWrite", write_fn);
     register_fn!(scope, "__responseStreamEnd", end_fn);
+    register_fn!(scope, "__responseStreamError", error_fn);
     register_fn!(scope, "__responseStreamIsClosed", is_closed_fn);
 }

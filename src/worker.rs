@@ -1408,6 +1408,7 @@ pub(crate) fn setup_event_listener(
             (async () => {
                 let reader = null;
                 let cancelled = false;
+                let failed = false;
 
                 try {
                     reader = response.body.getReader();
@@ -1437,7 +1438,11 @@ pub(crate) fn setup_event_listener(
                         }
                     }
                 } catch (error) {
-                    console.error('[streamResponseBody] Error:', error);
+                    // The body stopped short. Ending the stream here would hand
+                    // the host a truncated response that looks complete, so the
+                    // failure goes on the channel instead.
+                    failed = true;
+                    __responseStreamError(streamId, String(error && error.message ? error.message : error));
                 } finally {
                     // Cancel the reader to trigger the source's cancel() callback
                     if (reader && cancelled) {
@@ -1448,7 +1453,10 @@ pub(crate) fn setup_event_listener(
                         }
                     }
 
-                    __responseStreamEnd(streamId);
+                    if (!failed) {
+                        __responseStreamEnd(streamId);
+                    }
+
                     // Decrement counter when stream is fully consumed
                     globalThis.__activeResponseStreams--;
                 }

@@ -119,3 +119,70 @@ async fn test_response_stream_closes_on_a_full_buffer() {
     })
     .await;
 }
+
+/// `controller.error()` mid-stream is a truncated body, not a complete one, so
+/// the host has to receive an error and not a clean end of channel.
+#[tokio::test(flavor = "current_thread")]
+#[ntest::timeout(30000)] // a stream that never ends would otherwise hang the suite
+async fn test_response_stream_error_reaches_the_host() {
+    run_in_local(|| async {
+        let code = r#"
+            addEventListener('fetch', (event) => {
+                const encoder = new TextEncoder();
+                let sent = 0;
+
+                const stream = new ReadableStream({
+                    pull(controller) {
+                        if (sent >= 2) {
+                            controller.error(new Error('guest gave up'));
+
+                            return;
+                        }
+
+                        controller.enqueue(encoder.encode('chunk' + sent));
+                        sent += 1;
+                    }
+                });
+
+                event.respondWith(new Response(stream));
+            });
+        "#;
+
+        let mut worker = Worker::new(Script::new(code), Some(limits()))
+            .await
+            .unwrap();
+
+        let (task, rx) = Event::fetch(get("/"));
+        let future = worker.exec(task);
+        tokio::pin!(future);
+
+        let mut exec: Exec<'_> = future;
+        let mut done: ExecResult = None;
+
+        let response = while_running(&mut exec, &mut done, rx).await.unwrap();
+        let ResponseBody::Stream(mut body) = response.body else {
+            panic!("the guest stream did not reach the host as a stream");
+        };
+
+        let mut received = Vec::new();
+        let mut error = None;
+
+        while let Some(chunk) = while_running(&mut exec, &mut done, body.recv()).await {
+            match chunk {
+                Ok(bytes) => received.extend_from_slice(&bytes),
+                Err(message) => {
+                    error = Some(message);
+
+                    break;
+                }
+            }
+        }
+
+        assert_eq!(String::from_utf8_lossy(&received), "chunk0chunk1");
+        assert!(
+            error.is_some_and(|message| message.contains("guest gave up")),
+            "the guest error has to reach the host, or a truncated body reads as complete"
+        );
+    })
+    .await;
+}
