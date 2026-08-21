@@ -80,7 +80,3 @@ rand = "0.9"
 # ESM -> classic script lowering for the SSR benchmarks
 openworkers-transform = { git = "https://github.com/openworkers/openworkers-transform", tag = "v0.1.0" }
 
-# Until the 152 alignment is published.
-[patch.crates-io]
-openworkers-serde-v8 = { path = "../serde-v8" }
-openworkers-glue-v8 = { path = "../glue-v8" }

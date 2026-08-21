@@ -489,7 +489,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1172,6 +1172,8 @@ dependencies = [
 [[package]]
 name = "openworkers-glue-v8"
 version = "152.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d464ac710034f741dd0099884e1086ed39e2738501a892cd6fd3e236eedc2e7d"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1220,6 +1222,8 @@ dependencies = [
 [[package]]
 name = "openworkers-serde-v8"
 version = "152.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0d3040092bb6890f54153965cda7c073c73a7cb6ff4afd5307c82f004d5c662"
 dependencies = [
  "bytes",
  "num-bigint",
@@ -2615,7 +2619,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
