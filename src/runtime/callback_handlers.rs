@@ -358,17 +358,26 @@ pub fn populate_database_result(
                 result_obj.set(scope, rows_key.into(), rows_str.into());
             }
         }
-        DatabaseResult::Error(err_msg) => {
-            let success_key = v8::String::new(scope, "success").unwrap();
-            result_obj.set(
-                scope,
-                success_key.into(),
-                v8::Boolean::new(scope, false).into(),
-            );
-
-            let error_key = v8::String::new(scope, "error").unwrap();
-            let error_val = v8::String::new(scope, &err_msg).unwrap();
-            result_obj.set(scope, error_key.into(), error_val.into());
-        }
+        DatabaseResult::Error(err_msg) => set_database_error(scope, result_obj, &err_msg),
+        // Typed rows need a SqlPrimitive to v8 conversion that does not exist yet
+        DatabaseResult::Table { .. } => set_database_error(
+            scope,
+            result_obj,
+            "typed table rows are not supported by this runtime",
+        ),
     }
+}
+
+/// Set { success: false, error } on a database result object.
+fn set_database_error(scope: &mut v8::PinScope, result_obj: v8::Local<v8::Object>, err_msg: &str) {
+    let success_key = v8::String::new(scope, "success").unwrap();
+    result_obj.set(
+        scope,
+        success_key.into(),
+        v8::Boolean::new(scope, false).into(),
+    );
+
+    let error_key = v8::String::new(scope, "error").unwrap();
+    let error_val = v8::String::new(scope, err_msg).unwrap();
+    result_obj.set(scope, error_key.into(), error_val.into());
 }

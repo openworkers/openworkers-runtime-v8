@@ -291,7 +291,7 @@ impl WorkerBuilder {
 
                 // Extract scheduled time if this is a schedule-triggered task
                 let scheduled_time = match &task_init.source {
-                    Some(openworkers_core::TaskSource::Schedule { time }) => Some(*time),
+                    Some(openworkers_core::TaskSource::Schedule { time, .. }) => Some(*time),
                     _ => None,
                 };
 
@@ -920,7 +920,7 @@ impl Worker {
     ) -> Result<(), String> {
         // Extract scheduled time if this is a schedule-triggered task
         let scheduled_time = match &task_init.source {
-            Some(openworkers_core::TaskSource::Schedule { time }) => Some(*time),
+            Some(openworkers_core::TaskSource::Schedule { time, .. }) => Some(*time),
             _ => None,
         };
 
@@ -1289,6 +1289,16 @@ pub(crate) fn setup_env(
                                         }}, reject);
                                     }}).catch(reject);
                                 }});
+                            }}
+                        }}"#,
+                    )
+                }
+                openworkers_core::BindingType::Images => {
+                    // No native handler yet, so the binding exists only to say so
+                    format!(
+                        r#"{name}: {{
+                            input: function() {{
+                                throw new Error("images binding is not supported by this runtime");
                             }}
                         }}"#,
                     )

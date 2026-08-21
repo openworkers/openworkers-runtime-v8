@@ -538,6 +538,7 @@ async fn convert_fetch_result_to_stream(
         OperationResult::Kv(_) => return Err("Unexpected Kv result for fetch".into()),
         OperationResult::Database(_) => return Err("Unexpected Database result for fetch".into()),
         OperationResult::WebSocket(_) => return Err("Unexpected WebSocket result for fetch".into()),
+        OperationResult::Images(_) => return Err("Unexpected Images result for fetch".into()),
     };
 
     let meta = HttpResponseMeta {

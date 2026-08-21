@@ -1246,7 +1246,7 @@ impl ExecutionContext {
         cpu_guard: &Option<CpuEnforcer>,
     ) -> Result<(), String> {
         let scheduled_time = match &task_init.source {
-            Some(openworkers_core::TaskSource::Schedule { time }) => Some(*time),
+            Some(openworkers_core::TaskSource::Schedule { time, .. }) => Some(*time),
             _ => None,
         };
 
