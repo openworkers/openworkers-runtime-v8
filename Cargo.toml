@@ -28,7 +28,7 @@ gc-derive = { package = "openworkers-runtime-v8-gc-derive", path = "gc-derive" }
 # Common types
 openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.14.0" }
 
-v8 = "152.1.0"
+v8 = { package = "openworkers-v8", version = "152.2.0" }
 
 # Async runtime
 tokio = { version = "1.49.0", features = ["full"] }

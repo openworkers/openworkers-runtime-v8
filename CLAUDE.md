@@ -16,8 +16,14 @@ The runner selects one runtime by cargo feature: V8, JSC, QuickJS, Boa or WASM.
 
 `openworkers-core` must be in sibling folder (`../openworkers-core`).
 
-The engine is upstream `v8` (crates.io). `serde_v8` and `glue_v8` are our forks,
-so their crates.io names are patched to the sibling checkouts:
+The engine is `openworkers-v8` (crates.io), renamed to `v8` in Cargo.toml:
+upstream's tag plus the openworkers/rusty-v8 patches. Its prebuilt static
+library and binding download automatically from that repo's GitHub release
+for every variant we build (pointer compression, sandbox, aarch64-linux
+included), so no environment variables are needed.
+
+`serde_v8` and `glue_v8` are our forks, so their crates.io names are patched
+to the sibling checkouts:
 
 ```toml
 [patch.crates-io]
@@ -28,28 +34,12 @@ openworkers-glue-v8 = { path = "../glue-v8" }
 Cargo honours `[patch]` only in the root manifest, so a crate that depends on
 this one has to repeat it.
 
-### Prebuilt V8 binaries
+### Offline builds
 
-Point at a local archive to skip the C++ build:
-
-```bash
-export RUSTY_V8_ARCHIVE=~/rusty-v8-prebuilt/librusty_v8_ptrcomp_release_aarch64-apple-darwin.a
-export RUSTY_V8_SRC_BINDING_PATH=~/rusty-v8-prebuilt/src_binding_ptrcomp_release_aarch64-apple-darwin.rs
-```
-
-Both must match the `v8` version in `Cargo.toml`, or the bindings will not
-describe the library they are linked against.
-
-Upstream publishes pointer-compression builds for aarch64/x86_64 macOS and
-x86_64 linux, and no sandbox build at all. `openworkers/rusty-v8` fills those
-gaps, so CI reads both:
-
-```bash
-export RUSTY_V8_MIRROR=https://github.com/openworkers/rusty-v8/releases/download
-export RUSTY_V8_MIRROR_FALLBACK=1
-```
-
-The fallback flag is what keeps everything else coming from upstream.
+`RUSTY_V8_ARCHIVE` and `RUSTY_V8_SRC_BINDING_PATH` can point at local copies
+of the release assets to skip the download. Both must match the `v8` version
+in `Cargo.toml`, or the bindings will not describe the library they are
+linked against.
 
 ## After editing
 
