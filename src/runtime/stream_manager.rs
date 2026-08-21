@@ -56,8 +56,12 @@ impl StreamManager {
     /// Create a new stream and return its ID
     /// The receiver is stored internally and can be read via `read_chunk`
     /// Uses bounded channel with high_water_mark capacity for backpressure
+    ///
+    /// The channel holds one slot more than the high water mark, reserved for
+    /// the terminal marker: a stream has a single producer, and a `Done` that
+    /// does not fit is a consumer waiting forever for a body that ended.
     pub fn create_stream(&self, url: String) -> StreamId {
-        let (tx, rx) = mpsc::channel(self.high_water_mark);
+        let (tx, rx) = mpsc::channel(self.high_water_mark + 1);
 
         let mut next_id = self.next_id.lock().unwrap();
         let id = *next_id;
@@ -97,10 +101,20 @@ impl StreamManager {
     /// Try to write a chunk without waiting (returns error if buffer is full)
     /// Useful for non-async contexts
     /// When the channel is closed (receiver dropped), removes the sender from the map
+    ///
+    /// Data stops at the high water mark, so the slot beyond it stays free for
+    /// `Done` and `Error`. A caller that cannot wait for the consumer, like the
+    /// JavaScript side of a response body, can always end the stream it wrote.
     pub fn try_write_chunk(&self, stream_id: StreamId, chunk: StreamChunk) -> Result<(), String> {
         let mut senders = self.senders.lock().unwrap();
 
         if let Some(tx) = senders.get(&stream_id) {
+            let terminal = matches!(chunk, StreamChunk::Done | StreamChunk::Error(_));
+
+            if !terminal && tx.capacity() <= 1 {
+                return Err("Stream buffer full (backpressure)".to_string());
+            }
+
             match tx.try_send(chunk) {
                 Ok(()) => Ok(()),
                 Err(mpsc::error::TrySendError::Full(_)) => {
@@ -346,5 +360,62 @@ mod tests {
         // Now try_write should succeed
         let result = manager.try_write_chunk(id, StreamChunk::Data(Bytes::from("3")));
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_stream_ends_on_a_full_buffer() {
+        let manager = StreamManager::with_high_water_mark(2);
+        let id = manager.create_stream("https://example.com".to_string());
+
+        manager
+            .try_write_chunk(id, StreamChunk::Data(Bytes::from("1")))
+            .unwrap();
+        manager
+            .try_write_chunk(id, StreamChunk::Data(Bytes::from("2")))
+            .unwrap();
+
+        // Full for data, still open for the marker that ends the stream.
+        assert!(
+            manager
+                .try_write_chunk(id, StreamChunk::Data(Bytes::from("3")))
+                .is_err()
+        );
+        manager.try_write_chunk(id, StreamChunk::Done).unwrap();
+
+        assert!(matches!(
+            manager.read_chunk(id).await.unwrap(),
+            StreamChunk::Data(_)
+        ));
+        assert!(matches!(
+            manager.read_chunk(id).await.unwrap(),
+            StreamChunk::Data(_)
+        ));
+        assert!(matches!(
+            manager.read_chunk(id).await.unwrap(),
+            StreamChunk::Done
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_stream_errors_on_a_full_buffer() {
+        let manager = StreamManager::with_high_water_mark(1);
+        let id = manager.create_stream("https://example.com".to_string());
+
+        manager
+            .try_write_chunk(id, StreamChunk::Data(Bytes::from("1")))
+            .unwrap();
+        manager
+            .try_write_chunk(id, StreamChunk::Error("boom".to_string()))
+            .unwrap();
+
+        assert!(matches!(
+            manager.read_chunk(id).await.unwrap(),
+            StreamChunk::Data(_)
+        ));
+
+        match manager.read_chunk(id).await.unwrap() {
+            StreamChunk::Error(message) => assert_eq!(message, "boom"),
+            other => panic!("expected an error chunk, got {other:?}"),
+        }
     }
 }
