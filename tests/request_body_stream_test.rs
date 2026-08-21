@@ -48,7 +48,7 @@ async fn test_request_body_stream_text() {
         let response = response_rx.await.unwrap();
         assert_eq!(response.status, 200);
 
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(&body_bytes);
         assert_eq!(body_text, "Got: Hello World");
     })
@@ -101,7 +101,7 @@ async fn test_request_body_stream_reader() {
         let response = response_rx.await.unwrap();
         assert_eq!(response.status, 200);
 
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(&body_bytes);
         assert_eq!(body_text, "Chunks: 3 = chunk1|chunk2|chunk3");
     })
@@ -146,7 +146,7 @@ async fn test_request_body_stream_json() {
         let response = response_rx.await.unwrap();
         assert_eq!(response.status, 200);
 
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(&body_bytes);
         assert_eq!(body_text, "Name: Alice, Age: 30");
     })
@@ -204,7 +204,7 @@ async fn test_request_body_stream_large() {
         let response = response_rx.await.unwrap();
         assert_eq!(response.status, 200);
 
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(&body_bytes);
         let expected = format!("Total bytes: {}", num_chunks * chunk_size);
         assert_eq!(body_text, expected);
@@ -252,7 +252,7 @@ async fn test_request_body_stream_echo() {
         let response = response_rx.await.unwrap();
         assert_eq!(response.status, 200);
 
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(&body_bytes);
         assert_eq!(body_text, "Hello streaming world!");
     })
@@ -471,7 +471,7 @@ async fn test_request_body_stream_empty() {
         assert!(result.is_ok());
 
         let response = response_rx.await.unwrap();
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(&body_bytes);
 
         // Empty stream should result in empty body
@@ -518,7 +518,7 @@ async fn test_request_body_stream_error() {
         assert!(result.is_ok());
 
         let response = response_rx.await.unwrap();
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(&body_bytes);
 
         // Should have received partial data before error
@@ -577,7 +577,7 @@ async fn test_request_body_stream_utf8_boundary() {
         assert!(result.is_ok());
 
         let response = response_rx.await.unwrap();
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(&body_bytes);
 
         // Should correctly reconstruct: "Hi 🎉!" = 5 characters
@@ -634,7 +634,7 @@ async fn test_request_body_stream_binary_nulls() {
         assert!(result.is_ok());
 
         let response = response_rx.await.unwrap();
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(&body_bytes);
 
         // 6 bytes total, 3 null bytes
@@ -683,7 +683,7 @@ async fn test_request_body_stream_double_consume() {
         assert!(result.is_ok());
 
         let response = response_rx.await.unwrap();
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(&body_bytes);
 
         // Should indicate body was already consumed
@@ -744,7 +744,7 @@ async fn test_request_body_stream_never_consumed() {
         let response = response_rx.await.unwrap();
         assert_eq!(response.status, 200);
 
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(&body_bytes);
         assert_eq!(body_text, "Ignored body");
 
@@ -819,7 +819,7 @@ async fn test_request_body_stream_backpressure() {
         let chunks_sent = producer.await.unwrap();
 
         let response = response_rx.await.unwrap();
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(&body_bytes);
 
         // Should have received all 20 chunks
@@ -875,7 +875,7 @@ async fn test_request_body_stream_arraybuffer() {
         assert!(result.is_ok());
 
         let response = response_rx.await.unwrap();
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(&body_bytes);
 
         // 5 bytes, sum = 1+2+3+4+5 = 15
@@ -935,7 +935,7 @@ async fn test_request_body_stream_partial_read() {
         assert!(result.is_ok());
 
         let response = response_rx.await.unwrap();
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(&body_bytes);
 
         // Should have read only first chunk

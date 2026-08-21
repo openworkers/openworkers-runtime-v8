@@ -162,7 +162,7 @@ async fn test_async_response() {
 
         assert_eq!(response.status, 200);
         assert_eq!(
-            String::from_utf8_lossy(&response.body.collect().await.unwrap()),
+            String::from_utf8_lossy(&response.body.collect().await.unwrap().unwrap()),
             "Async response!"
         );
     })
@@ -201,7 +201,7 @@ async fn test_promise_rejection_handling() {
             .unwrap();
 
         assert_eq!(response.status, 500);
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body = String::from_utf8_lossy(&body_bytes);
         assert!(body.contains("Error handled: Test error"));
     })
@@ -246,7 +246,7 @@ async fn test_multiple_async_operations() {
 
         assert_eq!(response.status, 200);
         assert_eq!(
-            String::from_utf8_lossy(&response.body.collect().await.unwrap()),
+            String::from_utf8_lossy(&response.body.collect().await.unwrap().unwrap()),
             "All async ops completed!"
         );
     })

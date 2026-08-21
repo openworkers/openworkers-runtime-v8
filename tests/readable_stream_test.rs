@@ -43,7 +43,7 @@ async fn test_readable_stream_basic() {
 
         assert!(result.is_ok());
         let response = rx.await.unwrap();
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(&body_bytes);
         assert_eq!(body_text, "Stream says: Hello");
     })
@@ -103,7 +103,7 @@ async fn test_readable_stream_multiple_chunks() {
 
         assert!(result.is_ok());
         let response = rx.await.unwrap();
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(&body_bytes);
         assert_eq!(body_text, "Got: Hello");
     })
@@ -138,7 +138,7 @@ async fn test_response_body_is_stream() {
 
         assert!(result.is_ok());
         let response = rx.await.unwrap();
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(&body_bytes);
         assert_eq!(body_text, "Is stream: true");
     })
@@ -186,7 +186,7 @@ async fn test_stream_locked() {
 
         assert!(result.is_ok());
         let response = rx.await.unwrap();
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(&body_bytes);
         assert_eq!(body_text, "Error caught: true");
     })

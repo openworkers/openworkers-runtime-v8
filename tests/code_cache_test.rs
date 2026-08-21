@@ -83,7 +83,7 @@ async fn test_code_cache_sequential_loading() {
             let response = rx.await.unwrap();
 
             assert_eq!(response.status, 200, "request {i} failed");
-            let body = response.body.collect().await.unwrap();
+            let body = response.body.collect().await.unwrap().unwrap();
             assert_eq!(std::str::from_utf8(&body).unwrap(), "code-cache-hello");
         }
     })
@@ -126,7 +126,7 @@ async fn test_code_cache_concurrent_same() {
                         let response = rx.await.unwrap();
 
                         assert_eq!(response.status, 200);
-                        let body = response.body.collect().await.unwrap();
+                        let body = response.body.collect().await.unwrap().unwrap();
                         assert_eq!(
                             std::str::from_utf8(&body).unwrap(),
                             "same-cache",
@@ -198,7 +198,7 @@ async fn test_code_cache_concurrent_different() {
                             let response = rx.await.unwrap();
 
                             assert_eq!(response.status, 200);
-                            let body = response.body.collect().await.unwrap();
+                            let body = response.body.collect().await.unwrap().unwrap();
                             assert_eq!(
                                 std::str::from_utf8(&body).unwrap(),
                                 expected_body,

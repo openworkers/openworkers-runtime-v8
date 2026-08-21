@@ -64,7 +64,7 @@ async fn benchmark_hmac() {
     let (task, rx) = Event::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
-    let body = response.body.collect().await.unwrap();
+    let body = response.body.collect().await.unwrap().unwrap();
     let ops_per_sec: u64 = std::str::from_utf8(&body).unwrap().parse().unwrap();
 
     println!("HMAC-SHA256:  {:>8} ops/sec", ops_per_sec);
@@ -118,7 +118,7 @@ async fn benchmark_ecdsa() {
     let (task, rx) = Event::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
-    let body = response.body.collect().await.unwrap();
+    let body = response.body.collect().await.unwrap().unwrap();
     let parts: Vec<&str> = std::str::from_utf8(&body).unwrap().split(',').collect();
     let sign_ops: u64 = parts[0].parse().unwrap();
     let verify_ops: u64 = parts[1].parse().unwrap();
@@ -157,7 +157,7 @@ async fn benchmark_sha256() {
     let (task, rx) = Event::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
-    let body = response.body.collect().await.unwrap();
+    let body = response.body.collect().await.unwrap().unwrap();
     let ops_per_sec: u64 = std::str::from_utf8(&body).unwrap().parse().unwrap();
 
     println!("SHA-256:      {:>8} ops/sec", ops_per_sec);
@@ -237,7 +237,7 @@ async fn benchmark_rsa() {
     let (task, rx) = Event::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
-    let body = response.body.collect().await.unwrap();
+    let body = response.body.collect().await.unwrap().unwrap();
     let parts: Vec<&str> = std::str::from_utf8(&body).unwrap().split(',').collect();
     let sign_ops: u64 = parts[0].parse().unwrap();
     let verify_ops: u64 = parts[1].parse().unwrap();

@@ -40,7 +40,12 @@ async fn test_env_variables() {
         let response = rx.await.expect("Should receive response");
         assert_eq!(response.status, 200);
 
-        let body = response.body.collect().await.expect("Should have body");
+        let body = response
+            .body
+            .collect()
+            .await
+            .unwrap()
+            .expect("Should have body");
         let body_str = String::from_utf8_lossy(&body);
         assert_eq!(body_str, "API_KEY=secret123, DB_HOST=localhost");
     })
@@ -74,7 +79,12 @@ async fn test_env_empty() {
         worker.exec(task).await.expect("Task should execute");
 
         let response = rx.await.expect("Should receive response");
-        let body = response.body.collect().await.expect("Should have body");
+        let body = response
+            .body
+            .collect()
+            .await
+            .unwrap()
+            .expect("Should have body");
         let body_str = String::from_utf8_lossy(&body);
         assert_eq!(body_str, "env keys: 0");
     })
@@ -117,7 +127,12 @@ async fn test_env_readonly() {
         worker.exec(task).await.expect("Task should execute");
 
         let response = rx.await.expect("Should receive response");
-        let body = response.body.collect().await.expect("Should have body");
+        let body = response
+            .body
+            .collect()
+            .await
+            .unwrap()
+            .expect("Should have body");
         let body_str = String::from_utf8_lossy(&body);
         // Value should still be original (env object properties can be modified,
         // but we froze the reference to env itself)

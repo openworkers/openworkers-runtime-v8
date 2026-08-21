@@ -36,7 +36,7 @@ async fn test_es_modules_fetch() {
         let response = rx.await.unwrap();
 
         assert_eq!(response.status, 200);
-        let body = response.body.collect().await.unwrap();
+        let body = response.body.collect().await.unwrap().unwrap();
         assert_eq!(
             std::str::from_utf8(&body).unwrap(),
             "Hello from ES Modules!"
@@ -79,7 +79,7 @@ async fn test_es_modules_with_env() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = response.body.collect().await.unwrap();
+        let body = response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(&body).unwrap(), "Value: hello");
     })
     .await;
@@ -115,7 +115,7 @@ async fn test_es_modules_priority_over_addeventlistener() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = response.body.collect().await.unwrap();
+        let body = response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(&body).unwrap(), "From ES Modules");
     })
     .await;
@@ -159,7 +159,7 @@ async fn test_es_modules_wait_until() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = response.body.collect().await.unwrap();
+        let body = response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(&body).unwrap(), "Response sent");
 
         // Verify waitUntil completed by checking the global variable
@@ -271,7 +271,7 @@ async fn test_service_worker_wait_until() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = response.body.collect().await.unwrap();
+        let body = response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(&body).unwrap(), "From Service Worker");
 
         // Verify waitUntil completed
@@ -339,7 +339,7 @@ async fn test_es_modules_sse_streaming() {
         let response = rx.await.unwrap();
         assert_eq!(response.status, 200);
 
-        let body = response.body.collect().await.unwrap();
+        let body = response.body.collect().await.unwrap().unwrap();
         let body_str = String::from_utf8_lossy(&body);
 
         // Verify SSE events

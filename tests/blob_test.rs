@@ -37,7 +37,7 @@ async fn test_blob_basic() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -73,7 +73,7 @@ async fn test_blob_array_buffer() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -107,7 +107,7 @@ async fn test_blob_slice() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -154,7 +154,7 @@ async fn test_file() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;

@@ -245,7 +245,7 @@ async fn test_timers_work_with_cancellation() {
 
         assert_eq!(response.status, 200);
         assert_eq!(
-            String::from_utf8_lossy(&response.body.collect().await.unwrap()),
+            String::from_utf8_lossy(&response.body.collect().await.unwrap().unwrap()),
             "Timer completed"
         );
     })

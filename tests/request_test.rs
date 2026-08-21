@@ -43,7 +43,7 @@ async fn test_request_basic() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -81,7 +81,7 @@ async fn test_request_method_url() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -125,7 +125,7 @@ async fn test_request_headers() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -162,7 +162,7 @@ async fn test_request_body_text() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -199,7 +199,7 @@ async fn test_request_body_json() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -243,7 +243,7 @@ async fn test_request_clone() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -288,7 +288,7 @@ async fn test_request_from_request() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -331,7 +331,7 @@ async fn test_request_rejects_relative_url() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;

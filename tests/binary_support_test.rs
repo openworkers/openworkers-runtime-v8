@@ -33,7 +33,7 @@ async fn test_binary_response() {
         let response = rx.await.unwrap();
         assert_eq!(response.status, 200);
 
-        let body_bytes = &response.body.collect().await.unwrap();
+        let body_bytes = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(body_bytes.as_ref(), b"Hello");
     })
     .await;
@@ -70,7 +70,7 @@ async fn test_text_method_with_binary() {
 
         assert!(result.is_ok());
         let response = rx.await.unwrap();
-        let body_bytes = &response.body.collect().await.unwrap();
+        let body_bytes = &response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(body_bytes.as_ref());
         assert_eq!(body_text, "Got: Hello");
     })
@@ -114,7 +114,7 @@ async fn test_array_buffer_method() {
 
         assert!(result.is_ok());
         let response = rx.await.unwrap();
-        let body_bytes = &response.body.collect().await.unwrap();
+        let body_bytes = &response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(body_bytes.as_ref());
         assert_eq!(body_text, "Sum: 15");
     })
@@ -145,7 +145,7 @@ async fn test_string_still_works() {
 
         assert!(result.is_ok());
         let response = rx.await.unwrap();
-        let body_bytes = &response.body.collect().await.unwrap();
+        let body_bytes = &response.body.collect().await.unwrap().unwrap();
         let body_text = String::from_utf8_lossy(body_bytes.as_ref());
         assert_eq!(body_text, "Plain text response");
     })

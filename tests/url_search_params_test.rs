@@ -37,7 +37,7 @@ async fn test_url_search_params_basic() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -95,7 +95,7 @@ async fn test_url_search_params_methods() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -139,7 +139,7 @@ async fn test_url_search_params_iteration() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -181,7 +181,7 @@ async fn test_url_with_search_params() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -203,7 +203,7 @@ async fn run_url_test(code: &'static str) -> String {
         let (task, rx) = Event::fetch(make_req());
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         std::str::from_utf8(body).unwrap().to_string()
     })
     .await

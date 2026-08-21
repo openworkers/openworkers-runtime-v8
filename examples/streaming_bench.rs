@@ -49,7 +49,7 @@ async fn bench_local_stream(chunk_count: usize, chunk_size: usize) -> (Duration,
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
 
-    let bytes = response.body.collect().await.unwrap();
+    let bytes = response.body.collect().await.unwrap().unwrap();
     let total_bytes = bytes.len();
 
     let elapsed = start.elapsed();
@@ -81,7 +81,7 @@ async fn bench_buffered_response(iterations: u32) -> Duration {
         let response = rx.await.unwrap();
 
         // Consume the body (whether buffered or stream)
-        let _ = response.body.collect().await;
+        let _ = response.body.collect().await.expect("body stream failed");
     }
 
     start.elapsed()

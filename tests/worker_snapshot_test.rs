@@ -57,7 +57,7 @@ async fn test_worker_snapshot() {
         let response = rx.await.unwrap();
 
         assert_eq!(response.status, 200);
-        let body = response.body.collect().await.unwrap();
+        let body = response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(&body).unwrap(), "Hello from snapshot!");
 
         // --- Test 3: top-level console.log doesn't crash during snapshotting ---
@@ -78,7 +78,7 @@ async fn test_worker_snapshot() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = response.body.collect().await.unwrap();
+        let body = response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(&body).unwrap(), "after console.log");
 
         // --- Test 4: env vars are available during snapshotting ---
@@ -102,7 +102,7 @@ async fn test_worker_snapshot() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = response.body.collect().await.unwrap();
+        let body = response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(&body).unwrap(), "key=test-secret-123");
 
         // --- Test 5: code that throws returns Err (no panic) ---

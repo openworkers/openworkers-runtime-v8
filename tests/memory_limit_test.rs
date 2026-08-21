@@ -215,7 +215,7 @@ async fn test_memory_within_limit() {
         // Also verify the response is correct
         let response = rx.await.unwrap();
         assert_eq!(response.status, 200);
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body = String::from_utf8_lossy(&body_bytes);
         assert!(
             body.contains("Allocated 1MB successfully"),

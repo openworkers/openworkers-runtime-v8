@@ -41,7 +41,7 @@ async fn test_abort_controller_basic() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -80,7 +80,7 @@ async fn test_abort_signal_listener() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -113,7 +113,7 @@ async fn test_abort_signal_reason() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -145,7 +145,7 @@ async fn test_abort_signal_static_abort() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;

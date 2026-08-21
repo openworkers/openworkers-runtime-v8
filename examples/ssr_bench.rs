@@ -185,7 +185,12 @@ async fn render(worker: &mut Worker, url: &str) -> (u16, Vec<(String, String)>, 
     worker.exec(task).await.expect("exec failed");
     let res = rx.await.expect("no response");
     let headers = res.headers;
-    let body = res.body.collect().await.unwrap_or_default();
+    let body = res
+        .body
+        .collect()
+        .await
+        .expect("body stream failed")
+        .unwrap_or_default();
 
     (res.status, headers, body.to_vec())
 }

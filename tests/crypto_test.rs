@@ -35,7 +35,7 @@ async fn test_get_random_values() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -77,7 +77,7 @@ async fn test_digest_sha256() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -113,7 +113,7 @@ async fn test_digest_sha512() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -165,7 +165,7 @@ async fn test_hmac_sign_verify() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -221,7 +221,7 @@ async fn test_hmac_different_algorithms() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -287,7 +287,7 @@ async fn test_ecdsa_sign_verify() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -340,7 +340,7 @@ async fn test_ecdsa_verify_with_private_key() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -453,7 +453,7 @@ async fn test_rsa_sign_verify() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -492,7 +492,7 @@ async fn test_get_random_values_honours_byte_offset() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -547,7 +547,7 @@ async fn test_aes_gcm_imported_key_round_trip() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
@@ -597,7 +597,7 @@ async fn test_aes_gcm_rejects_wrong_additional_data() {
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
-        let body = &response.body.collect().await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;

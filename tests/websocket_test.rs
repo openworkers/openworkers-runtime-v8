@@ -79,7 +79,7 @@ async fn websocket_client_api_conformance() {
         .await
         .expect("worker should complete quickly (no network in this test)");
 
-        let body = response.body.collect().await.unwrap();
+        let body = response.body.collect().await.unwrap().unwrap();
         let body_str = String::from_utf8_lossy(&body);
 
         assert_eq!(

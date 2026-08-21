@@ -180,7 +180,12 @@ async fn render(worker: &mut Worker, url: &str) -> usize {
     worker.exec(task).await.expect("exec failed");
     let res = rx.await.expect("no response");
 
-    res.body.collect().await.unwrap_or_default().len()
+    res.body
+        .collect()
+        .await
+        .expect("body stream failed")
+        .unwrap_or_default()
+        .len()
 }
 
 fn quantiles(mut samples: Vec<Duration>) -> (f64, f64) {

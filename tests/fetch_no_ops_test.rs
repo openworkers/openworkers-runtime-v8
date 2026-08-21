@@ -54,7 +54,7 @@ async fn fetch_without_ops_should_reject_not_hang() {
         // Should get error response (500) with "Fetch not available" message
         assert_eq!(response.status, 500);
 
-        let body = response.body.collect().await.unwrap();
+        let body = response.body.collect().await.unwrap().unwrap();
         let body_str = String::from_utf8_lossy(&body);
         assert!(
             body_str.contains("Fetch not available"),

@@ -156,7 +156,7 @@ async fn test_fast_execution_no_timeout() {
         // Verify response
         let response = rx.await.unwrap();
         assert_eq!(response.status, 200);
-        let body_bytes = response.body.collect().await.unwrap();
+        let body_bytes = response.body.collect().await.unwrap().unwrap();
         let body = String::from_utf8_lossy(&body_bytes);
         assert!(body.contains("Sum: 499500"), "Got: {}", body);
     })

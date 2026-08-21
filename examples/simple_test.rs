@@ -31,7 +31,7 @@ async fn main() {
             let response = rx.await.unwrap();
             println!("Status: {}", response.status);
 
-            if let Some(body) = response.body.collect().await {
+            if let Some(body) = response.body.collect().await.expect("body stream failed") {
                 println!("Body: {}", String::from_utf8_lossy(&body));
             }
         })

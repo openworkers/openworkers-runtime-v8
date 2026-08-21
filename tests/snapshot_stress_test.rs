@@ -99,7 +99,7 @@ async fn test_snapshot_sequential_loading() {
             let response = rx.await.unwrap();
 
             assert_eq!(response.status, 200, "request {i} failed");
-            let body = response.body.collect().await.unwrap();
+            let body = response.body.collect().await.unwrap().unwrap();
             assert_eq!(std::str::from_utf8(&body).unwrap(), "Hello, World!");
         }
     })
@@ -138,7 +138,7 @@ async fn test_snapshot_concurrent_loading_threads() {
                         let response = rx.await.unwrap();
 
                         assert_eq!(response.status, 200, "thread {i} failed");
-                        let body = response.body.collect().await.unwrap();
+                        let body = response.body.collect().await.unwrap().unwrap();
                         assert_eq!(
                             std::str::from_utf8(&body).unwrap(),
                             "v1.2.3-snapshot-test",
@@ -227,7 +227,7 @@ async fn test_multiple_snapshots_sequential_loading() {
                 let response = rx.await.unwrap();
 
                 assert_eq!(response.status, 200);
-                let body = response.body.collect().await.unwrap();
+                let body = response.body.collect().await.unwrap().unwrap();
                 assert_eq!(
                     std::str::from_utf8(&body).unwrap(),
                     expected[idx],
@@ -298,7 +298,7 @@ async fn test_multiple_snapshots_concurrent() {
                             let response = rx.await.unwrap();
 
                             assert_eq!(response.status, 200);
-                            let body = response.body.collect().await.unwrap();
+                            let body = response.body.collect().await.unwrap().unwrap();
                             assert_eq!(
                                 std::str::from_utf8(&body).unwrap(),
                                 expected_body,
@@ -363,7 +363,7 @@ async fn test_two_snapshots_load_first_only() {
                         let response = rx.await.unwrap();
 
                         assert_eq!(response.status, 200);
-                        let body = response.body.collect().await.unwrap();
+                        let body = response.body.collect().await.unwrap().unwrap();
                         assert_eq!(std::str::from_utf8(&body).unwrap(), "snap1", "thread {i}");
                     })
                     .await;
@@ -426,7 +426,7 @@ async fn test_multiple_snapshots_spawn_blocking_sequential() {
                         let response = rx.await.unwrap();
 
                         assert_eq!(response.status, 200);
-                        let body = response.body.collect().await.unwrap();
+                        let body = response.body.collect().await.unwrap().unwrap();
                         assert_eq!(std::str::from_utf8(&body).unwrap(), exp);
                     })
                     .await;
@@ -480,7 +480,7 @@ async fn test_snapshot_with_env_concurrent() {
                         let response = rx.await.unwrap();
 
                         assert_eq!(response.status, 200);
-                        let body = response.body.collect().await.unwrap();
+                        let body = response.body.collect().await.unwrap().unwrap();
                         assert_eq!(
                             std::str::from_utf8(&body).unwrap(),
                             "secret=hunter2",
