@@ -9,6 +9,8 @@ mod common;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
+use std::time::Instant;
 
 use common::run_in_local;
 use openworkers_core::Event;
@@ -183,6 +185,118 @@ async fn test_response_stream_error_reaches_the_host() {
             error.is_some_and(|message| message.contains("guest gave up")),
             "the guest error has to reach the host, or a truncated body reads as complete"
         );
+    })
+    .await;
+}
+
+/// A client that hangs up mid-stream has to leave the worker usable: `exec`
+/// returns without waiting out the wall clock, and the next fetch is served.
+#[tokio::test(flavor = "current_thread")]
+#[ntest::timeout(30000)] // a worker that never comes back would otherwise hang the suite
+async fn test_worker_survives_a_client_hanging_up() {
+    run_in_local(|| async {
+        let code = r#"
+            addEventListener('fetch', (event) => {
+                if (event.request.url.endsWith('/short')) {
+                    event.respondWith(new Response('served after the hang up'));
+
+                    return;
+                }
+
+                const encoder = new TextEncoder();
+                let sent = 0;
+
+                const stream = new ReadableStream({
+                    start(controller) {
+                        function step() {
+                            if (sent >= 200) {
+                                controller.close();
+
+                                return;
+                            }
+
+                            try {
+                                controller.enqueue(encoder.encode('chunk' + sent + '\n'));
+                            } catch (e) {
+                                return;
+                            }
+
+                            sent += 1;
+                            setTimeout(step, 10);
+                        }
+
+                        setTimeout(step, 10);
+                    }
+                });
+
+                event.respondWith(new Response(stream));
+            });
+        "#;
+
+        let mut worker = Worker::new(Script::new(code), Some(limits()))
+            .await
+            .unwrap();
+
+        let hung_up = {
+            let (task, rx) = Event::fetch(get("/"));
+            let future = worker.exec(task);
+            tokio::pin!(future);
+
+            let mut exec: Exec<'_> = future;
+            let mut done: ExecResult = None;
+
+            let response = while_running(&mut exec, &mut done, rx).await.unwrap();
+            let ResponseBody::Stream(mut body) = response.body else {
+                panic!("the guest stream did not reach the host as a stream");
+            };
+
+            let mut taken = 0;
+
+            while taken < 3 {
+                match while_running(&mut exec, &mut done, body.recv()).await {
+                    Some(Ok(_)) => taken += 1,
+                    _ => break,
+                }
+            }
+
+            assert_eq!(taken, 3);
+
+            drop(body);
+
+            let hung_up = Instant::now();
+
+            if done.is_none() {
+                let result = tokio::time::timeout(Duration::from_secs(5), exec.as_mut())
+                    .await
+                    .expect("exec kept the worker busy for a client that had already left");
+
+                done = Some(result);
+            }
+
+            done.unwrap().unwrap();
+
+            hung_up.elapsed()
+        };
+
+        assert!(
+            hung_up < Duration::from_secs(1),
+            "exec took {hung_up:?} to notice the client had left"
+        );
+
+        // The point of the test: the worker has to survive its client leaving.
+        let (task, rx) = Event::fetch(get("/short"));
+
+        tokio::time::timeout(Duration::from_secs(5), worker.exec(task))
+            .await
+            .expect("the follow-up fetch never returned")
+            .unwrap();
+
+        let response = tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .expect("the follow-up fetch sent no response")
+            .unwrap();
+
+        assert_eq!(response.status, 200);
     })
     .await;
 }

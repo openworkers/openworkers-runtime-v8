@@ -619,11 +619,50 @@ impl Worker {
         self.runtime.isolate.terminate_execution();
     }
 
+    /// Clear what the previous request left behind.
+    ///
+    /// A Worker keeps its isolate for its whole life, so a second `exec` would
+    /// otherwise answer with the previous response, and wait forever on a
+    /// stream counter that a client who hung up never brought back to zero.
+    /// The pooled path does the same in `ExecutionContext::reset`.
+    fn reset_request_state(&mut self) -> Result<(), String> {
+        self.evaluate(
+            r#"
+            globalThis.__lastResponse = undefined;
+            globalThis.__requestComplete = false;
+            globalThis.__lastResponseStreamId = undefined;
+            globalThis.__activeResponseStreams = 0;
+            globalThis.__taskResult = undefined;
+            globalThis.__timerCallbacks.clear();
+            globalThis.__intervalIds.clear();
+            "#,
+        )?;
+
+        // Drops the senders of any stream the previous request abandoned, so a
+        // host still holding one sees the body end instead of waiting on it.
+        self.runtime.stream_manager.clear();
+
+        // Callbacks the previous request queued belong to a response nobody
+        // will read.
+        while self.runtime.callback_rx.try_recv().is_ok() {}
+
+        self.runtime.fetch_callbacks.borrow_mut().clear();
+        self.runtime.fetch_error_callbacks.borrow_mut().clear();
+        self.runtime.stream_callbacks.borrow_mut().clear();
+        self.runtime.ws_event_callbacks.borrow_mut().clear();
+        *self.runtime.fetch_response_tx.borrow_mut() = None;
+
+        Ok(())
+    }
+
     pub async fn exec(&mut self, mut task: Event) -> Result<(), TerminationReason> {
         // Check if aborted before starting
         if self.aborted.load(Ordering::SeqCst) {
             return Err(TerminationReason::Aborted);
         }
+
+        self.reset_request_state()
+            .map_err(TerminationReason::Other)?;
 
         // Get limits from runtime
         let limits = &self.runtime.limits;
@@ -755,6 +794,10 @@ impl Worker {
         let mut pending_callbacks: Vec<CallbackMessage> = Vec::with_capacity(16);
 
         std::future::poll_fn(|cx| {
+            // 0. A client that hangs up is seen by the task pumping the body,
+            //    which wakes this loop through the stream manager.
+            self.runtime.stream_manager.register_waker(cx.waker());
+
             // 1. Check termination (CPU/wall-clock guards)
             if self.is_terminated(wall_guard, cpu_guard) {
                 return Poll::Ready(Err("Execution terminated".to_string()));
@@ -1338,12 +1381,23 @@ pub(crate) fn setup_event_listener(
         // Signal client disconnect to abort response streams
         // Called from Rust when consumer disconnects
         globalThis.__signalClientDisconnect = function() {
-            const resp = globalThis.__lastResponse;
-            if (resp?.body?._controller?._abortController) {
-                const ctrl = resp.body._controller;
-                if (!ctrl.signal.aborted) {
-                    ctrl._abortController.abort('Client disconnected');
-                }
+            const body = globalThis.__lastResponse?.body;
+
+            if (!body) {
+                return;
+            }
+
+            const ctrl = body._controller;
+
+            if (ctrl?._abortController && !ctrl.signal.aborted) {
+                ctrl._abortController.abort('Client disconnected');
+            }
+
+            // Aborting only tells a guest that watches the signal. Cancelling
+            // ends the read the response pump is waiting on, which is what
+            // releases the worker for the next request.
+            if (typeof body.cancel === 'function') {
+                body.cancel('Client disconnected');
             }
         };
 

@@ -61,6 +61,10 @@ impl Future for WorkerFuture<'_> {
 
         let this = self.get_mut();
 
+        // 0. A consumer that hangs up wakes this loop through the stream
+        //    manager, which is the only side that hears about it.
+        this.ctx.request.stream_manager.register_waker(cx.waker());
+
         // 1. Check termination (CPU/wall-clock guards)
         if this.ctx.is_terminated(this.wall_guard, this.cpu_guard) {
             return Poll::Ready(Err("Execution terminated".to_string()));

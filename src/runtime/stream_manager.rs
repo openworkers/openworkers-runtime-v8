@@ -1,6 +1,8 @@
 use bytes::Bytes;
+use futures::task::AtomicWaker;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::task::Waker;
 use tokio::sync::mpsc;
 
 pub type StreamId = u64;
@@ -35,6 +37,10 @@ pub struct StreamManager {
     next_id: Arc<Mutex<StreamId>>,
     /// High water mark for new streams
     high_water_mark: usize,
+    /// Waker of the event loop that owns these streams. A consumer leaving is
+    /// seen here and nowhere else, and the loop it has to reach is otherwise
+    /// waiting on a channel that no one will write to again.
+    waker: Arc<AtomicWaker>,
 }
 
 impl StreamManager {
@@ -50,7 +56,14 @@ impl StreamManager {
             metadata: Arc::new(Mutex::new(HashMap::new())),
             next_id: Arc::new(Mutex::new(1)),
             high_water_mark,
+            waker: Arc::new(AtomicWaker::new()),
         }
+    }
+
+    /// Register the event loop that runs the guests writing these streams.
+    /// Must happen on every poll: a waker only belongs to the poll it came from.
+    pub fn register_waker(&self, waker: &Waker) {
+        self.waker.register(waker);
     }
 
     /// Create a new stream and return its ID
@@ -172,10 +185,15 @@ impl StreamManager {
     }
 
     /// Close and remove a stream
+    ///
+    /// Wakes the event loop, because this is how a guest still writing to the
+    /// stream learns that nobody is reading it any more.
     pub fn close_stream(&self, stream_id: StreamId) {
         self.senders.lock().unwrap().remove(&stream_id);
         self.receivers.lock().unwrap().remove(&stream_id);
         self.metadata.lock().unwrap().remove(&stream_id);
+
+        self.waker.wake();
     }
 
     /// Get information about a stream (for debugging)

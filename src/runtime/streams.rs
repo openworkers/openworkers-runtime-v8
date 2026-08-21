@@ -49,8 +49,16 @@ pub fn setup_readable_stream(scope: &mut v8::PinScope) {
                     this._controller._abortController.abort(reason || 'Stream cancelled');
                 }
 
-                // Clear reader
+                // Cancelling drops what was queued.
+                if (this._controller) {
+                    this._controller._queue = [];
+                }
+
+                // Clear reader. A read that is already waiting has to be
+                // settled here: nothing will enqueue for it any more, and a
+                // pump awaiting that promise would never come back.
                 if (this._reader) {
+                    this._reader._processQueue();
                     this._reader._closePending();
                     this._reader = null;
                 }

@@ -1022,6 +1022,10 @@ impl ExecutionContext {
         let async_waiter = self.async_waiter.clone(); // Clone Rc (cheap) to avoid borrow on self
 
         std::future::poll_fn(|cx| {
+            // A client that hangs up is seen by the task pumping the body,
+            // which wakes this loop through the stream manager.
+            self.request.stream_manager.register_waker(cx.waker());
+
             // -- Fair queue gate (if multiplexing enabled) --
             // When multiple requests share an isolate, only one can hold the
             // V8 Locker at a time. Others wait in FIFO order.
