@@ -7,7 +7,7 @@
 //! passes it to be populated. This avoids lifetime issues with returning `Local<T>`.
 
 use super::stream_manager;
-use openworkers_core::{DatabaseResult, HttpResponseMeta, KvResult, StorageResult};
+use openworkers_core::{DatabaseResult, HttpResponseMeta, KvResult, SqlPrimitive, StorageResult};
 
 /// Populate metadata object for FetchStreamingSuccess callback.
 ///
@@ -359,12 +359,61 @@ pub fn populate_database_result(
             }
         }
         DatabaseResult::Error(err_msg) => set_database_error(scope, result_obj, &err_msg),
-        // Typed rows need a SqlPrimitive to v8 conversion that does not exist yet
-        DatabaseResult::Table { .. } => set_database_error(
-            scope,
-            result_obj,
-            "typed table rows are not supported by this runtime",
-        ),
+        DatabaseResult::Table { columns, rows } => {
+            let success_key = v8::String::new(scope, "success").unwrap();
+            result_obj.set(
+                scope,
+                success_key.into(),
+                v8::Boolean::new(scope, true).into(),
+            );
+
+            let rows_array = v8::Array::new(scope, rows.len().try_into().unwrap());
+
+            for (index, row) in rows.iter().enumerate() {
+                let row_obj = v8::Object::new(scope);
+
+                for (column, value) in columns.iter().zip(row) {
+                    let key = v8::String::new(scope, column).unwrap();
+                    let value = sql_primitive_to_v8(scope, value);
+
+                    row_obj.set(scope, key.into(), value);
+                }
+
+                rows_array.set_index(scope, index as u32, row_obj.into());
+            }
+
+            let rows_key = v8::String::new(scope, "rows").unwrap();
+            result_obj.set(scope, rows_key.into(), rows_array.into());
+        }
+    }
+}
+
+/// One SQL value as the guest sees it.
+///
+/// Both integer kinds become a JavaScript number, like the JSON the `Rows`
+/// shape parses to, and a blob becomes an array of byte values, which is what
+/// D1 hands a worker for a BLOB column.
+fn sql_primitive_to_v8<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: &SqlPrimitive,
+) -> v8::Local<'s, v8::Value> {
+    match value {
+        SqlPrimitive::Null => v8::null(scope).into(),
+        SqlPrimitive::Bool(value) => v8::Boolean::new(scope, *value).into(),
+        SqlPrimitive::Int(value) => v8::Number::new(scope, *value as f64).into(),
+        SqlPrimitive::Float(value) => v8::Number::new(scope, *value).into(),
+        SqlPrimitive::String(value) => v8::String::new(scope, value).unwrap().into(),
+        SqlPrimitive::Bytes(value) => {
+            let array = v8::Array::new(scope, value.len().try_into().unwrap());
+
+            for (index, byte) in value.iter().enumerate() {
+                let byte_val = v8::Integer::new_from_unsigned(scope, u32::from(*byte));
+
+                array.set_index(scope, index as u32, byte_val.into());
+            }
+
+            array.into()
+        }
     }
 }
 
