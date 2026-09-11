@@ -101,7 +101,13 @@ pub fn setup_timers(
 
         globalThis.clearInterval = globalThis.clearTimeout;
 
-        globalThis.queueMicrotask = function(callback) {
+        globalThis.queueMicrotask = function queueMicrotask(callback) {
+            // then() ignores an argument it cannot call, so the refusal has to
+            // happen here or it never happens at all.
+            if (typeof callback !== 'function') {
+                throw new TypeError('queueMicrotask expects a function');
+            }
+
             Promise.resolve().then(callback);
         };
 
