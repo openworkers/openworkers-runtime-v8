@@ -32,6 +32,9 @@ openworkers-core = { git = "https://github.com/openworkers/openworkers-core", ta
 # cannot build a path dependency.
 openworkers-wintertc = { path = "../openworkers-wintertc" }
 
+# The URLPattern grammar, so the surface does not carry a parser of its own.
+urlpattern = "0.3"
+
 v8 = { package = "openworkers-v8", version = "152.2.0" }
 
 # Async runtime

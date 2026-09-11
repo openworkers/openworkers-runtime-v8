@@ -65,6 +65,15 @@ pub fn setup_form_data(scope: &mut v8::PinScope) {
     script.run(scope).unwrap();
 }
 
+/// `URLPattern`, matching over the components its host compiled.
+pub fn setup_url_pattern(scope: &mut v8::PinScope) {
+    let code = openworkers_wintertc::URL_PATTERN.source;
+
+    let code_str = v8::String::new(scope, code).unwrap();
+    let script = v8::Script::compile(scope, code_str, None).unwrap();
+    script.run(scope).unwrap();
+}
+
 /// The second tier of streams, which stands on the host's `ReadableStream`.
 pub fn setup_streams(scope: &mut v8::PinScope) {
     let code = openworkers_wintertc::STREAMS.source;

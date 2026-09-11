@@ -288,6 +288,7 @@ impl Runtime {
                 // not in snapshot — native functions can't be serialized)
                 text_encoding::setup_text_encoding_natives(scope);
                 bindings::setup_url_natives(scope);
+                bindings::setup_url_pattern_natives(scope);
 
                 bindings::seal_native_namespace(scope);
 
@@ -304,6 +305,7 @@ impl Runtime {
                     bindings::setup_structured_clone(scope);
                     bindings::setup_base64(scope);
                     bindings::setup_url(scope);
+                    bindings::setup_url_pattern(scope);
                     bindings::setup_headers(scope);
                     bindings::setup_request(scope);
                     bindings::setup_response(scope);
