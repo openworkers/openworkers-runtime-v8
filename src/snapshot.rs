@@ -113,6 +113,7 @@ pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
         // Setup AbortController/AbortSignal - pure JS
         crate::runtime::bindings::setup_events(scope);
         crate::runtime::bindings::setup_abort_controller(scope);
+        crate::runtime::bindings::setup_streams(scope);
 
         // Setup structuredClone - pure JS
         crate::runtime::bindings::setup_structured_clone(scope);
@@ -203,6 +204,7 @@ pub fn create_worker_snapshot(
         crate::runtime::bindings::setup_form_data(scope);
         crate::runtime::bindings::setup_events(scope);
         crate::runtime::bindings::setup_abort_controller(scope);
+        crate::runtime::bindings::setup_streams(scope);
         crate::runtime::bindings::setup_structured_clone(scope);
         crate::runtime::bindings::setup_base64(scope);
         crate::runtime::bindings::setup_url(scope);

@@ -207,6 +207,15 @@ pub fn setup_form_data(scope: &mut v8::PinScope) {
     script.run(scope).unwrap();
 }
 
+/// The second tier of streams, which stands on the host's `ReadableStream`.
+pub fn setup_streams(scope: &mut v8::PinScope) {
+    let code = openworkers_wintertc::STREAMS.source;
+
+    let code_str = v8::String::new(scope, code).unwrap();
+    let script = v8::Script::compile(scope, code_str, None).unwrap();
+    script.run(scope).unwrap();
+}
+
 /// The event core `AbortSignal` and `MessagePort` are built on.
 pub fn setup_events(scope: &mut v8::PinScope) {
     let code = openworkers_wintertc::EVENTS.source;
