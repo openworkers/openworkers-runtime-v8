@@ -97,7 +97,7 @@ pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
 
         // Setup TextEncoder/TextDecoder JS class wrappers (pure JS).
         // Native __text_encode/__text_decode are registered at runtime.
-        let code = v8::String::new(scope, crate::runtime::text_encoding::TEXT_ENCODING_JS).unwrap();
+        let code = v8::String::new(scope, openworkers_wintertc::TEXT_ENCODING.source).unwrap();
         let script = v8::Script::compile(scope, code, None).unwrap();
         script.run(scope);
 
