@@ -298,6 +298,7 @@ impl Runtime {
                     streams::setup_readable_stream(scope);
                     bindings::setup_blob(scope);
                     bindings::setup_form_data(scope);
+                    bindings::setup_events(scope);
                     bindings::setup_abort_controller(scope);
                     bindings::setup_structured_clone(scope);
                     bindings::setup_base64(scope);

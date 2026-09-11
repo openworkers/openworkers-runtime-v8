@@ -20,8 +20,9 @@ pub use native::seal as seal_native_namespace;
 pub use streams::{setup_response_stream_ops, setup_stream_ops};
 pub use timers::setup_timers;
 pub use web_api::{
-    setup_abort_controller, setup_base64, setup_blob, setup_fetch_helpers, setup_form_data,
-    setup_global_aliases, setup_headers, setup_performance, setup_request, setup_response,
-    setup_security_restrictions, setup_structured_clone, setup_url, setup_url_natives,
+    setup_abort_controller, setup_base64, setup_blob, setup_events, setup_fetch_helpers,
+    setup_form_data, setup_global_aliases, setup_headers, setup_performance, setup_request,
+    setup_response, setup_security_restrictions, setup_structured_clone, setup_url,
+    setup_url_natives,
 };
 pub use websocket::setup_websocket;

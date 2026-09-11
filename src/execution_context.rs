@@ -168,12 +168,15 @@ impl ExecutionContext {
             text_encoding::setup_text_encoding_natives(scope);
             bindings::setup_url_natives(scope);
 
+            bindings::seal_native_namespace(scope);
+
             // Only setup pure JS APIs if no snapshot (they're in the snapshot)
             if !use_snapshot {
                 text_encoding::setup_text_encoding_classes(scope);
                 streams::setup_readable_stream(scope);
                 bindings::setup_blob(scope);
                 bindings::setup_form_data(scope);
+                bindings::setup_events(scope);
                 bindings::setup_abort_controller(scope);
                 bindings::setup_structured_clone(scope);
                 bindings::setup_base64(scope);
