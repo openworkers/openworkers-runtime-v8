@@ -2,12 +2,13 @@
 
 use openworkers_wintertc::NATIVE_NAMESPACE;
 
-/// Puts `func` on the namespace, creating it on the first op.
-pub fn register_op(scope: &mut v8::PinScope, name: &str, func: v8::Local<v8::Function>) {
+/// Puts `value` on the namespace, creating it on the first op. Most ops are
+/// functions; a few are what the host knows and the surface cannot.
+pub fn register_op(scope: &mut v8::PinScope, name: &str, value: v8::Local<v8::Value>) {
     let namespace = namespace(scope);
     let key = v8::String::new(scope, name).unwrap();
 
-    namespace.set(scope, key.into(), func.into());
+    namespace.set(scope, key.into(), value);
 }
 
 /// Freezes the namespace, once every op is registered, so a guest cannot answer

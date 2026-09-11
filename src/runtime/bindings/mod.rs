@@ -24,8 +24,8 @@ pub use timers::setup_timers;
 pub use url_pattern::setup_url_pattern_natives;
 pub use web_api::{
     setup_abort_controller, setup_base64, setup_blob, setup_events, setup_fetch_helpers,
-    setup_form_data, setup_global_aliases, setup_headers, setup_performance, setup_request,
-    setup_response, setup_security_restrictions, setup_streams, setup_structured_clone, setup_url,
-    setup_url_natives, setup_url_pattern,
+    setup_form_data, setup_global_aliases, setup_headers, setup_navigator, setup_navigator_natives,
+    setup_performance, setup_request, setup_response, setup_security_restrictions, setup_streams,
+    setup_structured_clone, setup_url, setup_url_natives, setup_url_pattern,
 };
 pub use websocket::setup_websocket;

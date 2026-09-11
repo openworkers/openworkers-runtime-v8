@@ -127,10 +127,10 @@ fn text_decode(
 /// can't be serialized by the V8 snapshot creator.
 pub fn setup_text_encoding_natives(scope: &mut v8::PinScope) {
     let encode_fn = v8::Function::new(scope, text_encode).unwrap();
-    crate::runtime::bindings::register_op(scope, "textEncode", encode_fn);
+    crate::runtime::bindings::register_op(scope, "textEncode", encode_fn.into());
 
     let decode_fn = v8::Function::new(scope, text_decode).unwrap();
-    crate::runtime::bindings::register_op(scope, "textDecode", decode_fn);
+    crate::runtime::bindings::register_op(scope, "textDecode", decode_fn.into());
 }
 
 /// Setup TextEncoder and TextDecoder JS class wrappers.

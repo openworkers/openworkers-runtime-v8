@@ -26,6 +26,15 @@ pub fn setup_global_aliases(scope: &mut v8::PinScope) {
     script.run(scope).unwrap();
 }
 
+/// What `navigator.userAgent` reports. `Product/Version (comment)` is the HTTP
+/// grammar, so a reader splitting on the slash still finds the version.
+pub fn setup_navigator_natives(scope: &mut v8::PinScope) {
+    let agent = format!("OpenWorkers/{} (v8)", env!("CARGO_PKG_VERSION"));
+    let agent = v8::String::new(scope, &agent).unwrap();
+
+    super::native::register_op(scope, "userAgent", agent.into());
+}
+
 pub fn setup_performance(scope: &mut v8::PinScope) {
     let state = Rc::new(PerformanceState {
         start: Instant::now(),
@@ -68,6 +77,15 @@ pub fn setup_blob(scope: &mut v8::PinScope) {
 
 pub fn setup_form_data(scope: &mut v8::PinScope) {
     let code = openworkers_wintertc::FORM_DATA.source;
+
+    let code_str = v8::String::new(scope, code).unwrap();
+    let script = v8::Script::compile(scope, code_str, None).unwrap();
+    script.run(scope).unwrap();
+}
+
+/// `navigator`, whose user agent the host declares.
+pub fn setup_navigator(scope: &mut v8::PinScope) {
+    let code = openworkers_wintertc::NAVIGATOR.source;
 
     let code_str = v8::String::new(scope, code).unwrap();
     let script = v8::Script::compile(scope, code_str, None).unwrap();
@@ -256,10 +274,10 @@ fn url_update(href: String, part: String, value: String) -> Option<UrlParts> {
 /// Register the parser the `URL` class calls; it cannot live in the snapshot
 pub fn setup_url_natives(scope: &mut v8::PinScope) {
     let parse_fn = v8::Function::new(scope, url_parse_v8).unwrap();
-    super::native::register_op(scope, "urlParse", parse_fn);
+    super::native::register_op(scope, "urlParse", parse_fn.into());
 
     let update_fn = v8::Function::new(scope, url_update_v8).unwrap();
-    super::native::register_op(scope, "urlUpdate", update_fn);
+    super::native::register_op(scope, "urlUpdate", update_fn.into());
 }
 
 /// Define `URL` and `URLSearchParams`, both driven by the host's url ops

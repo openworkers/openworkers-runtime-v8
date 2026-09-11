@@ -30,8 +30,8 @@ fn url_pattern_process_input(
 /// Register the ops the `URLPattern` class calls.
 pub fn setup_url_pattern_natives(scope: &mut v8::PinScope) {
     let parse_fn = v8::Function::new(scope, url_pattern_parse_v8).unwrap();
-    super::native::register_op(scope, "urlPatternParse", parse_fn);
+    super::native::register_op(scope, "urlPatternParse", parse_fn.into());
 
     let input_fn = v8::Function::new(scope, url_pattern_process_input_v8).unwrap();
-    super::native::register_op(scope, "urlPatternProcessInput", input_fn);
+    super::native::register_op(scope, "urlPatternProcessInput", input_fn.into());
 }
