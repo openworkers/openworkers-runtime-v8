@@ -3,7 +3,7 @@ members = ["gc-derive"]
 
 [package]
 name = "openworkers-runtime-v8"
-version = "0.15.0"
+version = "0.15.1"
 edition = "2024"
 license = "MIT"
 
@@ -28,9 +28,8 @@ gc-derive = { package = "openworkers-runtime-v8-gc-derive", path = "gc-derive" }
 # Common types
 openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.15.0" }
 
-# Path only until the repo is pushed: a consumer resolving this crate by tag
-# cannot build a path dependency.
-openworkers-wintertc = { path = "../openworkers-wintertc" }
+# The shared web surface
+openworkers-wintertc = { git = "https://github.com/openworkers/openworkers-wintertc", tag = "v0.1.0" }
 
 # The URLPattern grammar, so the surface does not carry a parser of its own.
 urlpattern = "0.3"
