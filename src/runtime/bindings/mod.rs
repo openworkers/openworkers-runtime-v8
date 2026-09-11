@@ -16,6 +16,7 @@ pub use state::{FetchState, LogCallback, ResponseStreamState, StreamState, WebSo
 // Re-export setup functions
 pub use console::{log_callback_from_ops, setup_console};
 pub use fetch::setup_fetch;
+pub use native::register_op;
 pub use native::seal as seal_native_namespace;
 pub use streams::{setup_response_stream_ops, setup_stream_ops};
 pub use timers::setup_timers;

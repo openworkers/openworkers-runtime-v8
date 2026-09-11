@@ -121,20 +121,16 @@ fn text_decode(
     rv.set(v8_str.into());
 }
 
-/// Register native __text_encode and __text_decode functions on globalThis.
+/// Register the encoding ops.
 ///
 /// Must be called at runtime (not in snapshot) because native functions
 /// can't be serialized by the V8 snapshot creator.
 pub fn setup_text_encoding_natives(scope: &mut v8::PinScope) {
-    let global = scope.get_current_context().global(scope);
-
     let encode_fn = v8::Function::new(scope, text_encode).unwrap();
-    let key = v8::String::new(scope, "__text_encode").unwrap();
-    global.set(scope, key.into(), encode_fn.into());
+    crate::runtime::bindings::register_op(scope, "textEncode", encode_fn);
 
     let decode_fn = v8::Function::new(scope, text_decode).unwrap();
-    let key = v8::String::new(scope, "__text_decode").unwrap();
-    global.set(scope, key.into(), decode_fn.into());
+    crate::runtime::bindings::register_op(scope, "textDecode", decode_fn);
 }
 
 /// Setup TextEncoder and TextDecoder JS class wrappers.
