@@ -207,6 +207,8 @@ impl WorkerBuilder {
             text_encoding::setup_text_encoding_natives(scope);
             bindings::setup_url_natives(scope);
 
+            bindings::seal_native_namespace(scope);
+
             // Pure JS APIs (only if no snapshot)
             if !use_snapshot {
                 text_encoding::setup_text_encoding_classes(scope);

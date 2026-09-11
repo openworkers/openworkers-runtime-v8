@@ -577,18 +577,14 @@ fn url_update(href: String, part: String, value: String) -> Option<UrlParts> {
 
 /// Register the parser the `URL` class calls; it cannot live in the snapshot
 pub fn setup_url_natives(scope: &mut v8::PinScope) {
-    let global = scope.get_current_context().global(scope);
-
     let parse_fn = v8::Function::new(scope, url_parse_v8).unwrap();
-    let key = v8::String::new(scope, "__urlParse").unwrap();
-    global.set(scope, key.into(), parse_fn.into());
+    super::native::register_op(scope, "urlParse", parse_fn);
 
     let update_fn = v8::Function::new(scope, url_update_v8).unwrap();
-    let key = v8::String::new(scope, "__urlUpdate").unwrap();
-    global.set(scope, key.into(), update_fn.into());
+    super::native::register_op(scope, "urlUpdate", update_fn);
 }
 
-/// Define `URL` and `URLSearchParams`, both driven by `__urlParse`/`__urlUpdate`
+/// Define `URL` and `URLSearchParams`, both driven by the host's url ops
 pub fn setup_url(scope: &mut v8::PinScope) {
     let code = openworkers_wintertc::URL.source;
 

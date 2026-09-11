@@ -289,6 +289,8 @@ impl Runtime {
                 text_encoding::setup_text_encoding_natives(scope);
                 bindings::setup_url_natives(scope);
 
+                bindings::seal_native_namespace(scope);
+
                 // Only setup pure JS APIs if no snapshot (they're in the snapshot)
                 if !use_snapshot {
                     // JS class wrappers (natives already registered above)
