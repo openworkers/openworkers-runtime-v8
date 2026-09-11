@@ -283,6 +283,12 @@ pub fn trigger_fetch_handler(
         let method_val = v8::String::new(scope, method).unwrap();
         init_obj.set(scope, method_key.into(), method_val.into());
 
+        // A client may put a body on a GET; the standard's refusal is for guest
+        // code, not for what arrived on the wire.
+        let from_host_key = v8::String::new(scope, "_fromHost").unwrap();
+        let from_host_val = v8::Boolean::new(scope, true);
+        init_obj.set(scope, from_host_key.into(), from_host_val.into());
+
         // Create headers object for init
         let headers_obj = v8::Object::new(scope);
 
