@@ -213,21 +213,8 @@ impl WorkerBuilder {
 
             // Pure JS APIs (only if no snapshot)
             if !use_snapshot {
-                text_encoding::setup_text_encoding_classes(scope);
                 streams::setup_readable_stream(scope);
-                bindings::setup_blob(scope);
-                bindings::setup_form_data(scope);
-                bindings::setup_events(scope);
-                bindings::setup_abort_controller(scope);
-                bindings::setup_streams(scope);
-                bindings::setup_structured_clone(scope);
-                bindings::setup_base64(scope);
-                bindings::setup_url(scope);
-                bindings::setup_url_pattern(scope);
-                bindings::setup_navigator(scope);
-                bindings::setup_headers(scope);
-                bindings::setup_request(scope);
-                bindings::setup_response(scope);
+                bindings::setup_surface(scope);
             }
 
             v8::Global::new(scope.as_ref(), context)

@@ -95,47 +95,10 @@ pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
         // Modifying these built-ins in the snapshot context corrupts V8's internal state,
         // breaking context bootstrapping. Applied at context creation time instead.
 
-        // Setup TextEncoder/TextDecoder JS class wrappers (pure JS).
-        // Native __text_encode/__text_decode are registered at runtime.
-        let code = v8::String::new(scope, openworkers_wintertc::TEXT_ENCODING.source).unwrap();
-        let script = v8::Script::compile(scope, code, None).unwrap();
-        script.run(scope);
-
-        // Setup ReadableStream API (pre-compiled in snapshot - pure JS)
+        // The whole shared surface, in one script: the snapshot pays the same
+        // compile the runtime would, and fourteen of them cost more than one.
         crate::runtime::streams::setup_readable_stream(scope);
-
-        // Setup Blob/File - pure JS
-        crate::runtime::bindings::setup_blob(scope);
-
-        // Setup FormData - pure JS (must be after Blob)
-        crate::runtime::bindings::setup_form_data(scope);
-
-        // Setup AbortController/AbortSignal - pure JS
-        crate::runtime::bindings::setup_events(scope);
-        crate::runtime::bindings::setup_abort_controller(scope);
-        crate::runtime::bindings::setup_streams(scope);
-
-        // Setup structuredClone - pure JS
-        crate::runtime::bindings::setup_structured_clone(scope);
-
-        // Setup Base64 (atob/btoa) - pure JS
-        crate::runtime::bindings::setup_base64(scope);
-
-        // Setup URL/URLSearchParams classes (the native parser is not snapshotted)
-        crate::runtime::bindings::setup_url(scope);
-        crate::runtime::bindings::setup_url_pattern(scope);
-        crate::runtime::bindings::setup_navigator(scope);
-
-        // Setup Headers API (pre-compiled in snapshot - pure JS)
-        crate::runtime::bindings::setup_headers(scope);
-
-        // Setup Request class (pre-compiled in snapshot - pure JS)
-        // Note: Request depends on Headers, so Headers must be setup first
-        crate::runtime::bindings::setup_request(scope);
-
-        // Setup Response constructor (pre-compiled in snapshot - pure JS)
-        // Note: Response depends on Headers, so Headers must be setup first
-        crate::runtime::bindings::setup_response(scope);
+        crate::runtime::bindings::setup_surface(scope);
 
         // Setup fetch helpers (__normalizeFetchInput, __bufferBody)
         // Note: depends on Request, Headers, URL for instanceof checks
@@ -198,23 +161,8 @@ pub fn create_worker_snapshot(
 
         // Standalone snapshot — set up all pure JS APIs from scratch
         crate::runtime::bindings::setup_global_aliases(scope);
-        let code = v8::String::new(scope, crate::runtime::text_encoding::TEXT_ENCODING_JS).unwrap();
-        let script = v8::Script::compile(scope, code, None).unwrap();
-        script.run(scope);
         crate::runtime::streams::setup_readable_stream(scope);
-        crate::runtime::bindings::setup_blob(scope);
-        crate::runtime::bindings::setup_form_data(scope);
-        crate::runtime::bindings::setup_events(scope);
-        crate::runtime::bindings::setup_abort_controller(scope);
-        crate::runtime::bindings::setup_streams(scope);
-        crate::runtime::bindings::setup_structured_clone(scope);
-        crate::runtime::bindings::setup_base64(scope);
-        crate::runtime::bindings::setup_url(scope);
-        crate::runtime::bindings::setup_url_pattern(scope);
-        crate::runtime::bindings::setup_navigator(scope);
-        crate::runtime::bindings::setup_headers(scope);
-        crate::runtime::bindings::setup_request(scope);
-        crate::runtime::bindings::setup_response(scope);
+        crate::runtime::bindings::setup_surface(scope);
         crate::runtime::bindings::setup_fetch_helpers(scope);
 
         // Install no-op console stubs so top-level console.log() doesn't crash

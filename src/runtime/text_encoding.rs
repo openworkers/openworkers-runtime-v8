@@ -132,13 +132,3 @@ pub fn setup_text_encoding_natives(scope: &mut v8::PinScope) {
     let decode_fn = v8::Function::new(scope, text_decode).unwrap();
     crate::runtime::bindings::register_op(scope, "textDecode", decode_fn.into());
 }
-
-/// Setup TextEncoder and TextDecoder JS class wrappers.
-///
-/// Executes the JS source that defines the classes.
-/// Natives must be registered separately via `setup_text_encoding_natives`.
-pub fn setup_text_encoding_classes(scope: &mut v8::PinScope) {
-    let code = v8::String::new(scope, openworkers_wintertc::TEXT_ENCODING.source).unwrap();
-    let script = v8::Script::compile(scope, code, None).unwrap();
-    script.run(scope);
-}

@@ -67,82 +67,6 @@ pub fn setup_performance(scope: &mut v8::PinScope) {
     global.set(scope, perf_key.into(), perf_obj.into());
 }
 
-pub fn setup_blob(scope: &mut v8::PinScope) {
-    let code = openworkers_wintertc::BLOB.source;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
-}
-
-pub fn setup_form_data(scope: &mut v8::PinScope) {
-    let code = openworkers_wintertc::FORM_DATA.source;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
-}
-
-/// `navigator`, whose user agent the host declares.
-pub fn setup_navigator(scope: &mut v8::PinScope) {
-    let code = openworkers_wintertc::NAVIGATOR.source;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
-}
-
-/// `URLPattern`, matching over the components its host compiled.
-pub fn setup_url_pattern(scope: &mut v8::PinScope) {
-    let code = openworkers_wintertc::URL_PATTERN.source;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
-}
-
-/// The second tier of streams, which stands on the host's `ReadableStream`.
-pub fn setup_streams(scope: &mut v8::PinScope) {
-    let code = openworkers_wintertc::STREAMS.source;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
-}
-
-/// The event core `AbortSignal` and `MessagePort` are built on.
-pub fn setup_events(scope: &mut v8::PinScope) {
-    let code = openworkers_wintertc::EVENTS.source;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
-}
-
-pub fn setup_abort_controller(scope: &mut v8::PinScope) {
-    let code = openworkers_wintertc::ABORT.source;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
-}
-
-pub fn setup_structured_clone(scope: &mut v8::PinScope) {
-    let code = openworkers_wintertc::STRUCTURED_CLONE.source;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
-}
-
-pub fn setup_base64(scope: &mut v8::PinScope) {
-    let code = openworkers_wintertc::BASE64.source;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
-}
-
 /// The WHATWG components the JS `URL` class reads back from the parser
 #[derive(Serialize)]
 struct UrlParts {
@@ -278,39 +202,6 @@ pub fn setup_url_natives(scope: &mut v8::PinScope) {
 
     let update_fn = v8::Function::new(scope, url_update_v8).unwrap();
     super::native::register_op(scope, "urlUpdate", update_fn.into());
-}
-
-/// Define `URL` and `URLSearchParams`, both driven by the host's url ops
-pub fn setup_url(scope: &mut v8::PinScope) {
-    let code = openworkers_wintertc::URL.source;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
-}
-
-pub fn setup_headers(scope: &mut v8::PinScope) {
-    let code = openworkers_wintertc::HEADERS.source;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
-}
-
-pub fn setup_request(scope: &mut v8::PinScope) {
-    let code = openworkers_wintertc::REQUEST.source;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
-}
-
-pub fn setup_response(scope: &mut v8::PinScope) {
-    let code = openworkers_wintertc::RESPONSE.source;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
 }
 
 /// Setup fetch input normalization helper

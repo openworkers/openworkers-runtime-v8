@@ -23,9 +23,27 @@ pub use streams::{setup_response_stream_ops, setup_stream_ops};
 pub use timers::setup_timers;
 pub use url_pattern::setup_url_pattern_natives;
 pub use web_api::{
-    setup_abort_controller, setup_base64, setup_blob, setup_events, setup_fetch_helpers,
-    setup_form_data, setup_global_aliases, setup_headers, setup_navigator, setup_navigator_natives,
-    setup_performance, setup_request, setup_response, setup_security_restrictions, setup_streams,
-    setup_structured_clone, setup_url, setup_url_natives, setup_url_pattern,
+    setup_fetch_helpers, setup_global_aliases, setup_navigator_natives, setup_performance,
+    setup_security_restrictions, setup_url_natives,
 };
 pub use websocket::setup_websocket;
+
+/// Evaluates the whole shared surface as one script.
+///
+/// Fourteen separate compiles cost more than one: every context a cold request
+/// stands up pays that, and the surface is the same text every time.
+pub fn setup_surface(scope: &mut v8::PinScope) {
+    use std::sync::LazyLock;
+
+    static SOURCE: LazyLock<String> = LazyLock::new(|| {
+        openworkers_wintertc::SURFACE
+            .iter()
+            .map(|module| module.source)
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+
+    let code = v8::String::new(scope, &SOURCE).unwrap();
+    let script = v8::Script::compile(scope, code, None).unwrap();
+    script.run(scope).unwrap();
+}
