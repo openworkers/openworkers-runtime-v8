@@ -1196,6 +1196,7 @@ dependencies = [
  "openworkers-serde-v8",
  "openworkers-transform",
  "openworkers-v8",
+ "openworkers-wintertc",
  "rand 0.9.2",
  "ring",
  "serde",
@@ -1263,6 +1264,10 @@ dependencies = [
  "temporal_capi",
  "which",
 ]
+
+[[package]]
+name = "openworkers-wintertc"
+version = "0.1.0"
 
 [[package]]
 name = "page_size"
