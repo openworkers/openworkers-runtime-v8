@@ -103,8 +103,7 @@ pub(crate) fn dispatch_ws_event(
         }
         WebSocketIncoming::Binary(bytes) => {
             let type_val = v8::String::new(scope, "message").unwrap();
-            let store = v8::ArrayBuffer::new_backing_store_from_vec(bytes);
-            let ab = v8::ArrayBuffer::with_backing_store(scope, &store.into());
+            let ab = crate::v8_helpers::create_array_buffer_from_vec(scope, bytes);
             callback.call(scope, recv.into(), &[type_val.into(), ab.into()]);
         }
         WebSocketIncoming::Closed { code, reason } => {

@@ -15,10 +15,9 @@ fn text_encode(
         String::new()
     };
 
-    let bytes = input.as_bytes();
+    let bytes = input.into_bytes();
     let len = bytes.len();
-    let backing_store = v8::ArrayBuffer::new_backing_store_from_vec(bytes.to_vec());
-    let buffer = v8::ArrayBuffer::with_backing_store(scope, &backing_store.into());
+    let buffer = crate::v8_helpers::create_array_buffer_from_vec(scope, bytes);
     let array = v8::Uint8Array::new(scope, buffer, 0, len).unwrap();
 
     rv.set(array.into());
