@@ -538,208 +538,25 @@ impl ExecutionContext {
     /// This is the core callback processing logic, extracted to be called
     /// from both process_callbacks() and WorkerFuture::poll().
     pub fn process_single_callback(&mut self, msg: crate::runtime::CallbackMessage) {
-        use crate::runtime::CallbackMessage;
+        use crate::runtime::dispatch;
         use std::pin::pin;
 
-        // Get callback data before entering V8 scope
-        let (fetch_callback, fetch_error_callback) = match &msg {
-            CallbackMessage::FetchError(callback_id, _) => {
-                let cb1 = self
-                    .request
-                    .fetch_callbacks
-                    .borrow_mut()
-                    .remove(callback_id);
-                let cb2 = self
-                    .request
-                    .fetch_error_callbacks
-                    .borrow_mut()
-                    .remove(callback_id);
-                (cb1, cb2)
-            }
-            CallbackMessage::FetchStreamingSuccess(callback_id, _, _) => {
-                let cb1 = self
-                    .request
-                    .fetch_callbacks
-                    .borrow_mut()
-                    .remove(callback_id);
-                let cb2 = self
-                    .request
-                    .fetch_error_callbacks
-                    .borrow_mut()
-                    .remove(callback_id);
-                (cb1, cb2)
-            }
-            _ => (None, None),
+        let tables = dispatch::Tables {
+            fetch: &self.request.fetch_callbacks,
+            fetch_error: &self.request.fetch_error_callbacks,
+            stream: &self.request.stream_callbacks,
+            ws_event: &self.request.ws_event_callbacks,
+            stream_manager: &self.request.stream_manager,
         };
 
-        // Now enter V8 scope
-        {
-            let mut isolate = self.isolate();
-            let scope = pin!(v8::HandleScope::new(&mut isolate));
-            let mut scope = scope.init();
-            let context = v8::Local::new(&scope, &self.request.context);
-            let scope = &mut v8::ContextScope::new(&mut scope, context);
+        let mut isolate = self.isolate();
+        let scope = pin!(v8::HandleScope::new(&mut isolate));
+        let mut scope = scope.init();
+        let context = v8::Local::new(&scope, &self.request.context);
+        let scope = &mut v8::ContextScope::new(&mut scope, context);
 
-            match msg {
-                CallbackMessage::ExecuteTimeout(callback_id)
-                | CallbackMessage::ExecuteInterval(callback_id) => {
-                    let global = context.global(scope);
-                    let execute_timer_key = v8::String::new(scope, "__executeTimer").unwrap();
+        dispatch::dispatch(scope, &tables, msg);
 
-                    if let Some(execute_fn_val) = global.get(scope, execute_timer_key.into())
-                        && execute_fn_val.is_function()
-                    {
-                        let execute_fn: v8::Local<v8::Function> =
-                            execute_fn_val.try_into().unwrap();
-                        let id_val = v8::Number::new(scope, callback_id as f64);
-                        execute_fn.call(scope, global.into(), &[id_val.into()]);
-                    }
-                }
-                CallbackMessage::FetchError(_, error_msg) => {
-                    if let Some(callback_global) = fetch_error_callback {
-                        let error_msg_val = v8::String::new(scope, &error_msg).unwrap();
-                        let error = v8::Exception::error(scope, error_msg_val);
-                        let callback: v8::Local<v8::Function> =
-                            v8::Local::new(scope, &callback_global);
-                        let recv = v8::undefined(scope);
-                        callback.call(scope, recv.into(), &[error]);
-                    }
-                }
-                CallbackMessage::FetchStreamingSuccess(_, meta, stream_id) => {
-                    use crate::runtime::callback_handlers;
-
-                    if let Some(callback_global) = fetch_callback {
-                        let meta_obj = v8::Object::new(scope);
-                        callback_handlers::populate_fetch_meta(scope, meta_obj, &meta, stream_id);
-                        let callback: v8::Local<v8::Function> =
-                            v8::Local::new(scope, &callback_global);
-                        let recv = v8::undefined(scope);
-                        callback.call(scope, recv.into(), &[meta_obj.into()]);
-                    }
-                }
-                CallbackMessage::StreamChunk(callback_id, chunk) => {
-                    use crate::runtime::callback_handlers;
-
-                    let callback_opt = {
-                        let mut cbs = self.request.stream_callbacks.borrow_mut();
-                        cbs.remove(&callback_id)
-                    };
-
-                    if let Some(callback_global) = callback_opt {
-                        let result_obj = v8::Object::new(scope);
-                        callback_handlers::populate_stream_chunk_result(scope, result_obj, chunk);
-                        let callback = v8::Local::new(scope, &callback_global);
-                        let recv = v8::undefined(scope);
-                        callback.call(scope, recv.into(), &[result_obj.into()]);
-                    }
-                }
-                CallbackMessage::StorageResult(callback_id, storage_result) => {
-                    use crate::runtime::{callback_handlers, dispatch_binding_callbacks};
-                    use openworkers_core::StorageResult;
-
-                    let (error_msg, result_value) =
-                        if let StorageResult::Error(err) = &storage_result {
-                            (Some(err.as_str()), None)
-                        } else {
-                            let result_obj = v8::Object::new(scope);
-                            callback_handlers::populate_storage_result(
-                                scope,
-                                result_obj,
-                                storage_result,
-                                &self.request.stream_manager,
-                            );
-                            (None, Some(result_obj.into()))
-                        };
-
-                    dispatch_binding_callbacks(
-                        scope,
-                        callback_id,
-                        &self.request.fetch_callbacks,
-                        &self.request.fetch_error_callbacks,
-                        error_msg,
-                        result_value,
-                    );
-                }
-                CallbackMessage::KvResult(callback_id, kv_result) => {
-                    use crate::runtime::{callback_handlers, dispatch_binding_callbacks};
-                    use openworkers_core::KvResult;
-
-                    let (error_msg, result_value) = if let KvResult::Error(err) = &kv_result {
-                        (Some(err.as_str()), None)
-                    } else {
-                        let result_obj = v8::Object::new(scope);
-                        callback_handlers::populate_kv_result(scope, result_obj, kv_result);
-                        (None, Some(result_obj.into()))
-                    };
-
-                    dispatch_binding_callbacks(
-                        scope,
-                        callback_id,
-                        &self.request.fetch_callbacks,
-                        &self.request.fetch_error_callbacks,
-                        error_msg,
-                        result_value,
-                    );
-                }
-                CallbackMessage::DatabaseResult(callback_id, database_result) => {
-                    use crate::runtime::{callback_handlers, dispatch_binding_callbacks};
-                    use openworkers_core::DatabaseResult;
-
-                    let (error_msg, result_value) =
-                        if let DatabaseResult::Error(err) = &database_result {
-                            (Some(err.as_str()), None)
-                        } else {
-                            let result_obj = v8::Object::new(scope);
-                            callback_handlers::populate_database_result(
-                                scope,
-                                result_obj,
-                                database_result,
-                            );
-                            (None, Some(result_obj.into()))
-                        };
-
-                    dispatch_binding_callbacks(
-                        scope,
-                        callback_id,
-                        &self.request.fetch_callbacks,
-                        &self.request.fetch_error_callbacks,
-                        error_msg,
-                        result_value,
-                    );
-                }
-                CallbackMessage::WebSocketConnected(callback_id, ws_id) => {
-                    use crate::runtime::dispatch_binding_callbacks;
-
-                    let ws_id_val: v8::Local<v8::Value> =
-                        v8::Number::new(scope, ws_id as f64).into();
-                    dispatch_binding_callbacks(
-                        scope,
-                        callback_id,
-                        &self.request.fetch_callbacks,
-                        &self.request.fetch_error_callbacks,
-                        None,
-                        Some(ws_id_val),
-                    );
-                }
-                CallbackMessage::WebSocketConnectError(callback_id, error_msg) => {
-                    use crate::runtime::dispatch_binding_callbacks;
-
-                    dispatch_binding_callbacks(
-                        scope,
-                        callback_id,
-                        &self.request.fetch_callbacks,
-                        &self.request.fetch_error_callbacks,
-                        Some(&error_msg),
-                        None,
-                    );
-                }
-                CallbackMessage::WebSocketEvent(ws_id, incoming) => {
-                    use crate::runtime::dispatch_ws_event;
-
-                    dispatch_ws_event(scope, &self.request.ws_event_callbacks, ws_id, incoming);
-                }
-            }
-        }
         // Note: Microtask checkpoint is NOT done here anymore.
         // It's done in pump_and_checkpoint() which is called after processing
         // all callbacks in a batch. This is more efficient.

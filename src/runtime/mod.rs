@@ -1,6 +1,7 @@
 pub mod bindings;
 pub mod callback_handlers;
 pub mod crypto;
+pub(crate) mod dispatch;
 pub mod scheduler;
 pub mod stream_manager;
 pub mod text_encoding;
@@ -16,10 +17,7 @@ use v8;
 
 use crate::security::{HeapLimitState, install_heap_limit_callback};
 use bindings::LogCallback;
-use openworkers_core::{
-    DatabaseResult, KvResult, RuntimeLimits, StorageResult, WebSocketId, WebSocketIncoming,
-    WorkerCode,
-};
+use openworkers_core::{RuntimeLimits, WebSocketId, WebSocketIncoming, WorkerCode};
 
 // Re-export scheduler types
 pub use scheduler::{
@@ -342,165 +340,15 @@ impl Runtime {
 
         // 2. Process our custom callbacks (timers, fetch, etc.)
         while let Ok(msg) = self.callback_rx.try_recv() {
-            match msg {
-                CallbackMessage::ExecuteTimeout(callback_id)
-                | CallbackMessage::ExecuteInterval(callback_id) => {
-                    // Call the JavaScript __executeTimer function
-                    let global = context.global(scope);
-                    let execute_timer_key = v8::String::new(scope, "__executeTimer").unwrap();
+            let tables = dispatch::Tables {
+                fetch: &self.fetch_callbacks,
+                fetch_error: &self.fetch_error_callbacks,
+                stream: &self.stream_callbacks,
+                ws_event: &self.ws_event_callbacks,
+                stream_manager: &self.stream_manager,
+            };
 
-                    if let Some(execute_fn_val) = global.get(scope, execute_timer_key.into())
-                        && execute_fn_val.is_function()
-                    {
-                        let execute_fn: v8::Local<v8::Function> =
-                            execute_fn_val.try_into().unwrap();
-                        let id_val = v8::Number::new(scope, callback_id as f64);
-                        execute_fn.call(scope, global.into(), &[id_val.into()]);
-                    }
-                }
-                CallbackMessage::FetchError(callback_id, error_msg) => {
-                    // Remove from success callbacks (cleanup)
-                    {
-                        let mut cbs = self.fetch_callbacks.borrow_mut();
-                        cbs.remove(&callback_id);
-                    }
-
-                    // Get error callback and call it
-                    let error_callback_opt = {
-                        let mut cbs = self.fetch_error_callbacks.borrow_mut();
-                        cbs.remove(&callback_id)
-                    };
-
-                    if let Some(callback_global) = error_callback_opt {
-                        let error_msg_val = v8::String::new(scope, &error_msg).unwrap();
-                        let error = v8::Exception::error(scope, error_msg_val);
-                        let callback = v8::Local::new(scope, &callback_global);
-                        let recv = v8::undefined(scope);
-                        callback.call(scope, recv.into(), &[error]);
-                    }
-                }
-                CallbackMessage::FetchStreamingSuccess(callback_id, meta, stream_id) => {
-                    let callback_opt = {
-                        let mut cbs = self.fetch_callbacks.borrow_mut();
-                        cbs.remove(&callback_id)
-                    };
-
-                    // Cleanup error callback
-                    {
-                        let mut cbs = self.fetch_error_callbacks.borrow_mut();
-                        cbs.remove(&callback_id);
-                    }
-
-                    if let Some(callback_global) = callback_opt {
-                        let meta_obj = v8::Object::new(scope);
-                        callback_handlers::populate_fetch_meta(scope, meta_obj, &meta, stream_id);
-                        let callback = v8::Local::new(scope, &callback_global);
-                        let recv = v8::undefined(scope);
-                        callback.call(scope, recv.into(), &[meta_obj.into()]);
-                    }
-                }
-                CallbackMessage::StreamChunk(callback_id, chunk) => {
-                    let callback_opt = {
-                        let mut cbs = self.stream_callbacks.borrow_mut();
-                        cbs.remove(&callback_id)
-                    };
-
-                    if let Some(callback_global) = callback_opt {
-                        let result_obj = v8::Object::new(scope);
-                        callback_handlers::populate_stream_chunk_result(scope, result_obj, chunk);
-                        let callback = v8::Local::new(scope, &callback_global);
-                        let recv = v8::undefined(scope);
-                        callback.call(scope, recv.into(), &[result_obj.into()]);
-                    }
-                }
-                CallbackMessage::StorageResult(callback_id, storage_result) => {
-                    let (error_msg, result_value) =
-                        if let StorageResult::Error(err) = &storage_result {
-                            (Some(err.as_str()), None)
-                        } else {
-                            let result_obj = v8::Object::new(scope);
-                            callback_handlers::populate_storage_result(
-                                scope,
-                                result_obj,
-                                storage_result,
-                                &self.stream_manager,
-                            );
-                            (None, Some(result_obj.into()))
-                        };
-                    dispatch_binding_callbacks(
-                        scope,
-                        callback_id,
-                        &self.fetch_callbacks,
-                        &self.fetch_error_callbacks,
-                        error_msg,
-                        result_value,
-                    );
-                }
-                CallbackMessage::KvResult(callback_id, kv_result) => {
-                    let (error_msg, result_value) = if let KvResult::Error(err) = &kv_result {
-                        (Some(err.as_str()), None)
-                    } else {
-                        let result_obj = v8::Object::new(scope);
-                        callback_handlers::populate_kv_result(scope, result_obj, kv_result);
-                        (None, Some(result_obj.into()))
-                    };
-                    dispatch_binding_callbacks(
-                        scope,
-                        callback_id,
-                        &self.fetch_callbacks,
-                        &self.fetch_error_callbacks,
-                        error_msg,
-                        result_value,
-                    );
-                }
-                CallbackMessage::DatabaseResult(callback_id, database_result) => {
-                    let (error_msg, result_value) =
-                        if let DatabaseResult::Error(err) = &database_result {
-                            (Some(err.as_str()), None)
-                        } else {
-                            let result_obj = v8::Object::new(scope);
-                            callback_handlers::populate_database_result(
-                                scope,
-                                result_obj,
-                                database_result,
-                            );
-                            (None, Some(result_obj.into()))
-                        };
-                    dispatch_binding_callbacks(
-                        scope,
-                        callback_id,
-                        &self.fetch_callbacks,
-                        &self.fetch_error_callbacks,
-                        error_msg,
-                        result_value,
-                    );
-                }
-                CallbackMessage::WebSocketConnected(callback_id, ws_id) => {
-                    let ws_id_val: v8::Local<v8::Value> =
-                        v8::Number::new(scope, ws_id as f64).into();
-                    dispatch_binding_callbacks(
-                        scope,
-                        callback_id,
-                        &self.fetch_callbacks,
-                        &self.fetch_error_callbacks,
-                        None,
-                        Some(ws_id_val),
-                    );
-                }
-                CallbackMessage::WebSocketConnectError(callback_id, error_msg) => {
-                    dispatch_binding_callbacks(
-                        scope,
-                        callback_id,
-                        &self.fetch_callbacks,
-                        &self.fetch_error_callbacks,
-                        Some(&error_msg),
-                        None,
-                    );
-                }
-                CallbackMessage::WebSocketEvent(ws_id, incoming) => {
-                    dispatch_ws_event(scope, &self.ws_event_callbacks, ws_id, incoming);
-                }
-            }
+            dispatch::dispatch(scope, &tables, msg);
         }
 
         // 3. Process microtasks (Promises, async/await) - like deno_core
@@ -534,157 +382,15 @@ impl Runtime {
         let context = v8::Local::new(&scope, &self.context);
         let scope = &mut v8::ContextScope::new(&mut scope, context);
 
-        match msg {
-            CallbackMessage::ExecuteTimeout(callback_id)
-            | CallbackMessage::ExecuteInterval(callback_id) => {
-                let global = context.global(scope);
-                let execute_timer_key = v8::String::new(scope, "__executeTimer").unwrap();
+        let tables = dispatch::Tables {
+            fetch: &self.fetch_callbacks,
+            fetch_error: &self.fetch_error_callbacks,
+            stream: &self.stream_callbacks,
+            ws_event: &self.ws_event_callbacks,
+            stream_manager: &self.stream_manager,
+        };
 
-                if let Some(execute_fn_val) = global.get(scope, execute_timer_key.into())
-                    && execute_fn_val.is_function()
-                {
-                    let execute_fn: v8::Local<v8::Function> = execute_fn_val.try_into().unwrap();
-                    let id_val = v8::Number::new(scope, callback_id as f64);
-                    execute_fn.call(scope, global.into(), &[id_val.into()]);
-                }
-            }
-            CallbackMessage::FetchError(callback_id, error_msg) => {
-                // Remove from success callbacks (cleanup)
-                {
-                    let mut cbs = self.fetch_callbacks.borrow_mut();
-                    cbs.remove(&callback_id);
-                }
-
-                // Get error callback and call it
-                let error_callback_opt = {
-                    let mut cbs = self.fetch_error_callbacks.borrow_mut();
-                    cbs.remove(&callback_id)
-                };
-
-                if let Some(callback_global) = error_callback_opt {
-                    let error_msg_val = v8::String::new(scope, &error_msg).unwrap();
-                    let error = v8::Exception::error(scope, error_msg_val);
-                    let callback = v8::Local::new(scope, &callback_global);
-                    let recv = v8::undefined(scope);
-                    callback.call(scope, recv.into(), &[error]);
-                }
-            }
-            CallbackMessage::FetchStreamingSuccess(callback_id, meta, stream_id) => {
-                let callback_opt = {
-                    let mut cbs = self.fetch_callbacks.borrow_mut();
-                    cbs.remove(&callback_id)
-                };
-
-                // Cleanup error callback
-                {
-                    let mut cbs = self.fetch_error_callbacks.borrow_mut();
-                    cbs.remove(&callback_id);
-                }
-
-                if let Some(callback_global) = callback_opt {
-                    let meta_obj = v8::Object::new(scope);
-                    callback_handlers::populate_fetch_meta(scope, meta_obj, &meta, stream_id);
-                    let callback = v8::Local::new(scope, &callback_global);
-                    let recv = v8::undefined(scope);
-                    callback.call(scope, recv.into(), &[meta_obj.into()]);
-                }
-            }
-            CallbackMessage::StreamChunk(callback_id, chunk) => {
-                let callback_opt = {
-                    let mut cbs = self.stream_callbacks.borrow_mut();
-                    cbs.remove(&callback_id)
-                };
-
-                if let Some(callback_global) = callback_opt {
-                    let result_obj = v8::Object::new(scope);
-                    callback_handlers::populate_stream_chunk_result(scope, result_obj, chunk);
-                    let callback = v8::Local::new(scope, &callback_global);
-                    let recv = v8::undefined(scope);
-                    callback.call(scope, recv.into(), &[result_obj.into()]);
-                }
-            }
-            CallbackMessage::StorageResult(callback_id, storage_result) => {
-                let (error_msg, result_value) = if let StorageResult::Error(err) = &storage_result {
-                    (Some(err.as_str()), None)
-                } else {
-                    let result_obj = v8::Object::new(scope);
-                    callback_handlers::populate_storage_result(
-                        scope,
-                        result_obj,
-                        storage_result,
-                        &self.stream_manager,
-                    );
-                    (None, Some(result_obj.into()))
-                };
-                dispatch_binding_callbacks(
-                    scope,
-                    callback_id,
-                    &self.fetch_callbacks,
-                    &self.fetch_error_callbacks,
-                    error_msg,
-                    result_value,
-                );
-            }
-            CallbackMessage::KvResult(callback_id, kv_result) => {
-                let (error_msg, result_value) = if let KvResult::Error(err) = &kv_result {
-                    (Some(err.as_str()), None)
-                } else {
-                    let result_obj = v8::Object::new(scope);
-                    callback_handlers::populate_kv_result(scope, result_obj, kv_result);
-                    (None, Some(result_obj.into()))
-                };
-                dispatch_binding_callbacks(
-                    scope,
-                    callback_id,
-                    &self.fetch_callbacks,
-                    &self.fetch_error_callbacks,
-                    error_msg,
-                    result_value,
-                );
-            }
-            CallbackMessage::DatabaseResult(callback_id, database_result) => {
-                let (error_msg, result_value) = if let DatabaseResult::Error(err) = &database_result
-                {
-                    (Some(err.as_str()), None)
-                } else {
-                    let result_obj = v8::Object::new(scope);
-                    callback_handlers::populate_database_result(scope, result_obj, database_result);
-                    (None, Some(result_obj.into()))
-                };
-                dispatch_binding_callbacks(
-                    scope,
-                    callback_id,
-                    &self.fetch_callbacks,
-                    &self.fetch_error_callbacks,
-                    error_msg,
-                    result_value,
-                );
-            }
-            CallbackMessage::WebSocketConnected(callback_id, ws_id) => {
-                let ws_id_val: v8::Local<v8::Value> = v8::Number::new(scope, ws_id as f64).into();
-                dispatch_binding_callbacks(
-                    scope,
-                    callback_id,
-                    &self.fetch_callbacks,
-                    &self.fetch_error_callbacks,
-                    None,
-                    Some(ws_id_val),
-                );
-            }
-            CallbackMessage::WebSocketConnectError(callback_id, error_msg) => {
-                dispatch_binding_callbacks(
-                    scope,
-                    callback_id,
-                    &self.fetch_callbacks,
-                    &self.fetch_error_callbacks,
-                    Some(&error_msg),
-                    None,
-                );
-            }
-            CallbackMessage::WebSocketEvent(ws_id, incoming) => {
-                dispatch_ws_event(scope, &self.ws_event_callbacks, ws_id, incoming);
-            }
-        }
+        dispatch::dispatch(scope, &tables, msg);
     }
 
     /// Pump V8 platform messages and perform microtask checkpoint.
