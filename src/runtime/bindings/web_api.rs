@@ -46,25 +46,15 @@ pub fn setup_performance(scope: &mut v8::PinScope) {
     let now_fn = performance_now_v8_template(scope, &state)
         .get_function(scope)
         .unwrap();
-
-    let context = scope.get_current_context();
-    let global = context.global(scope);
-
-    let perf_obj = v8::Object::new(scope);
-    let now_key = v8::String::new(scope, "now").unwrap();
-    perf_obj.set(scope, now_key.into(), now_fn.into());
+    super::native::register_op(scope, "performanceNow", now_fn.into());
 
     // The wall clock when this worker started, which is what `now` counts from.
     let origin = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
-    let origin_key = v8::String::new(scope, "timeOrigin").unwrap();
-    let origin_val = v8::Number::new(scope, origin);
-    perf_obj.set(scope, origin_key.into(), origin_val.into());
-
-    let perf_key = v8::String::new(scope, "performance").unwrap();
-    global.set(scope, perf_key.into(), perf_obj.into());
+    let origin = v8::Number::new(scope, origin);
+    super::native::register_op(scope, "timeOrigin", origin.into());
 }
 
 /// The WHATWG components the JS `URL` class reads back from the parser

@@ -1,6 +1,7 @@
 #[macro_use]
 mod macros;
 
+mod compression;
 mod console;
 mod fetch;
 mod native;
@@ -15,6 +16,7 @@ mod websocket;
 pub use state::{FetchState, LogCallback, ResponseStreamState, StreamState, WebSocketEventState};
 
 // Re-export setup functions
+pub use compression::setup_compression_natives;
 pub use console::{log_callback_from_ops, setup_console};
 pub use fetch::setup_fetch;
 pub use native::register_op;
