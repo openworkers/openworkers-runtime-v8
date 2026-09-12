@@ -1182,7 +1182,7 @@ dependencies = [
 
 [[package]]
 name = "openworkers-runtime-v8"
-version = "0.15.2"
+version = "0.15.3"
 dependencies = [
  "bytes",
  "criterion",
@@ -1268,8 +1268,8 @@ dependencies = [
 
 [[package]]
 name = "openworkers-wintertc"
-version = "0.1.0"
-source = "git+https://github.com/openworkers/openworkers-wintertc?tag=v0.1.0#a3803d5d43ba28af426055023b927053aaf379c3"
+version = "0.1.1"
+source = "git+https://github.com/openworkers/openworkers-wintertc?tag=v0.1.1#09a243867bcc0444bafb54b9c2141cb98c8f0f4b"
 
 [[package]]
 name = "page_size"

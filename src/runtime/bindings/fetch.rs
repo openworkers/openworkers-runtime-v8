@@ -571,9 +571,7 @@ pub fn setup_fetch(
                 return new Promise(function(resolve, reject) {
                     __nativeWebSocketConnect(url, headers, function(wsId) {
                         const ws = WebSocket.__adopt(wsId);
-                        const response = new Response(null, { status: 101 });
-                        response.webSocket = ws;
-                        resolve(response);
+                        resolve(new Response(null, { status: 101, webSocket: ws }));
                     }, reject);
                 });
             }
