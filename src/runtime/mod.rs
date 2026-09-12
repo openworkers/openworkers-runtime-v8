@@ -3,7 +3,6 @@ pub mod callback_handlers;
 pub mod crypto;
 pub mod scheduler;
 pub mod stream_manager;
-pub mod streams;
 pub mod text_encoding;
 
 use std::cell::RefCell;
@@ -296,7 +295,6 @@ impl Runtime {
                 // Only setup pure JS APIs if no snapshot (they're in the snapshot)
                 if !use_snapshot {
                     // JS class wrappers (natives already registered above)
-                    streams::setup_readable_stream(scope);
                     bindings::setup_surface(scope);
                 }
 

@@ -23,7 +23,7 @@ use crate::execution_helpers::{
 };
 use crate::request_context::RequestContext;
 use crate::runtime::stream_manager;
-use crate::runtime::{bindings, crypto, streams, text_encoding};
+use crate::runtime::{bindings, crypto, text_encoding};
 use crate::security::{CpuEnforcer, TimeoutGuard};
 use openworkers_core::{
     Event, HttpResponse, OperationsHandle, RequestBody, ResponseBody, RuntimeLimits, Script,
@@ -175,7 +175,6 @@ impl ExecutionContext {
 
             // Only setup pure JS APIs if no snapshot (they're in the snapshot)
             if !use_snapshot {
-                streams::setup_readable_stream(scope);
                 bindings::setup_surface(scope);
             }
 

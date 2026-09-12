@@ -97,7 +97,6 @@ pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
 
         // The whole shared surface, in one script: the snapshot pays the same
         // compile the runtime would, and fourteen of them cost more than one.
-        crate::runtime::streams::setup_readable_stream(scope);
         crate::runtime::bindings::setup_surface(scope);
 
         // Setup fetch helpers (__normalizeFetchInput, __bufferBody)
@@ -161,7 +160,6 @@ pub fn create_worker_snapshot(
 
         // Standalone snapshot — set up all pure JS APIs from scratch
         crate::runtime::bindings::setup_global_aliases(scope);
-        crate::runtime::streams::setup_readable_stream(scope);
         crate::runtime::bindings::setup_surface(scope);
         crate::runtime::bindings::setup_fetch_helpers(scope);
 

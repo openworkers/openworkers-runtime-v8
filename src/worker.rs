@@ -122,7 +122,7 @@ impl WorkerBuilder {
         task: Event,
     ) -> Result<(), TerminationReason> {
         use crate::runtime::stream_manager::StreamManager;
-        use crate::runtime::{bindings, crypto, run_event_loop, streams, text_encoding};
+        use crate::runtime::{bindings, crypto, run_event_loop, text_encoding};
         use std::cell::RefCell;
         use std::collections::HashMap;
         use std::rc::Rc;
@@ -214,7 +214,6 @@ impl WorkerBuilder {
 
             // Pure JS APIs (only if no snapshot)
             if !use_snapshot {
-                streams::setup_readable_stream(scope);
                 bindings::setup_surface(scope);
             }
 
