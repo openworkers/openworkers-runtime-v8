@@ -79,6 +79,7 @@ pub fn setup_stream_ops(
         r#"
         globalThis.__createNativeStream = function(streamId) {
             const stream = new ReadableStream({
+                type: 'bytes',
                 async pull(controller) {
                     return new Promise((resolve) => {
                         __nativeStreamRead(streamId, (result) => {
