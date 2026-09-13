@@ -32,7 +32,7 @@ openworkers-core = { git = "https://github.com/openworkers/openworkers-core", ta
 openworkers-wintertc = { git = "https://github.com/openworkers/openworkers-wintertc", tag = "v0.1.4" }
 
 # The URLPattern grammar, so the surface does not carry a parser of its own.
-urlpattern = "0.3"
+urlpattern = "0.6"
 
 # The codecs behind CompressionStream, on the pure Rust backend
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

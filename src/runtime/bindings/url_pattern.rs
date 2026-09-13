@@ -12,7 +12,9 @@ use urlpattern::quirks::StringOrInit;
 fn url_pattern_parse(input: StringOrInit, base: Option<String>) -> Option<quirks::UrlPattern> {
     let init = quirks::process_construct_pattern_input(input, base.as_deref()).ok()?;
 
-    quirks::parse_pattern(init, Default::default()).ok()
+    // EcmaRegexp rather than the regex crate: what crosses is the pattern's
+    // source, and the surface matches with the engine's own RegExp.
+    quirks::parse_pattern::<quirks::EcmaRegexp>(init, Default::default()).ok()
 }
 
 /// Canonicalises what a pattern is matched against, or null when the input is
