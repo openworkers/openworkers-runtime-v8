@@ -4,7 +4,7 @@ use bytes::Bytes;
 use common::run_in_local;
 use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, ResponseBody, Script};
 use openworkers_runtime_v8::Worker;
-use rand::Rng;
+use rand::RngExt;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};

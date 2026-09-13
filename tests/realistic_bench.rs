@@ -31,7 +31,7 @@ use openworkers_core::{
 use openworkers_runtime_v8::{
     PinnedExecuteRequest, PinnedPoolConfig, Worker, execute_pinned, init_pinned_pool,
 };
-use rand::Rng;
+use rand::RngExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

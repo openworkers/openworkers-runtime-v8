@@ -84,7 +84,7 @@ tokio-stream = "0.1"
 [dev-dependencies]
 ntest = "0.9.5"
 criterion = { version = "0.8", features = ["async_tokio"] }
-rand = "0.9"
+rand = "0.10"
 
 # ESM -> classic script lowering for the SSR benchmarks
 openworkers-transform = { git = "https://github.com/openworkers/openworkers-transform", tag = "v0.1.0" }
