@@ -113,10 +113,23 @@ async fn test_scheduler_cancellation_stops_spawned_tasks() {
         "Cancelled ops should not complete"
     );
 
-    // No callback messages should have been sent (tasks returned early)
+    // Each cancelled op answers with an error: a promise nothing settles parks
+    // the guest's event loop for the life of the context.
+    for _ in 0..3 {
+        match callback_rx.try_recv() {
+            Ok(openworkers_runtime_v8::runtime::CallbackMessage::StorageResult(
+                _,
+                StorageResult::Error(err),
+            )) => {
+                assert!(err.contains("cancelled"), "unexpected error: {err}");
+            }
+            _ => panic!("expected a cancellation error per op"),
+        }
+    }
+
     assert!(
         callback_rx.try_recv().is_err(),
-        "No callbacks expected after cancel"
+        "one answer per op, no more"
     );
 
     // Cleanup

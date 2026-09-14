@@ -582,14 +582,7 @@ pub fn setup_fetch(
                 // Use streaming fetch
                 __nativeFetchStreaming(fetchOptions, (meta) => {
                     // meta = {status, statusText, headers, streamId}
-                    const stream = __createNativeStream(meta.streamId);
-                    const response = new Response(stream, {
-                        status: meta.status,
-                        headers: meta.headers
-                    });
-                    response.ok = meta.status >= 200 && meta.status < 300;
-                    response.statusText = meta.statusText;
-                    resolve(response);
+                    resolve(__responseFromMeta(meta));
                 }, reject);
             });
         };

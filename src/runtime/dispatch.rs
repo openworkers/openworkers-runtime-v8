@@ -6,6 +6,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -71,14 +72,41 @@ pub(crate) fn dispatch(
 
         CallbackMessage::FetchStreamingSuccess(callback_id, meta, stream_id) => {
             let callback = tables.fetch.borrow_mut().remove(&callback_id);
-            tables.fetch_error.borrow_mut().remove(&callback_id);
+            let on_error = tables.fetch_error.borrow_mut().remove(&callback_id);
 
             if let Some(callback) = callback {
                 let meta_obj = v8::Object::new(scope);
                 callback_handlers::populate_fetch_meta(scope, meta_obj, &meta, stream_id);
                 let callback = v8::Local::new(scope, &callback);
-                let recv = v8::undefined(scope);
-                callback.call(scope, recv.into(), &[meta_obj.into()]);
+
+                // Resolving is guest code and can throw, building the Response
+                // among other things. An exception that escapes here settles
+                // nothing, and the promise stays pending for the life of the
+                // request, so hand it to the other half of the pair instead.
+                let thrown = {
+                    let tc = pin!(v8::TryCatch::new(scope));
+                    let tc = tc.init();
+                    let recv = v8::undefined(&tc);
+                    callback.call(&tc, recv.into(), &[meta_obj.into()]);
+
+                    tc.exception()
+                        .map(|exception| v8::Global::new(&tc, exception))
+                };
+
+                if let Some(thrown) = thrown {
+                    let message = v8::Local::new(scope, &thrown)
+                        .to_string(scope)
+                        .map(|s| s.to_rust_string_lossy(scope))
+                        .unwrap_or_else(|| "unknown exception".to_string());
+                    tracing::warn!("fetch callback threw, rejecting the promise: {message}");
+
+                    if let Some(on_error) = on_error {
+                        let on_error = v8::Local::new(scope, &on_error);
+                        let exception = v8::Local::new(scope, &thrown);
+                        let recv = v8::undefined(scope);
+                        on_error.call(scope, recv.into(), &[exception]);
+                    }
+                }
             }
         }
 

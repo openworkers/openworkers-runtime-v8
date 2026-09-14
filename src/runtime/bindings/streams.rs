@@ -102,6 +102,31 @@ pub fn setup_stream_ops(
             stream._nativeStreamId = streamId;
             return stream;
         };
+
+        // https://fetch.spec.whatwg.org/#null-body-status: Response refuses a body
+        // on these, and a constructor that throws inside a native callback leaves
+        // the fetch promise pending for the life of the request.
+        globalThis.__responseFromMeta = function(meta) {
+            const nullBody = [101, 103, 204, 205, 304].includes(meta.status);
+            const hasStream = meta.streamId !== undefined && meta.streamId !== null;
+            let body = null;
+
+            if (nullBody) {
+                if (hasStream) {
+                    __nativeStreamCancel(meta.streamId);
+                }
+            } else if (hasStream) {
+                body = __createNativeStream(meta.streamId);
+            } else if (meta.body !== undefined) {
+                body = meta.body;
+            }
+
+            return new Response(body, {
+                status: meta.status,
+                statusText: meta.statusText,
+                headers: meta.headers
+            });
+        };
     "#
     );
 }
