@@ -47,6 +47,8 @@ pub struct PinnedExecuteRequest {
     pub on_warm_hit: Option<WarmHitCallback>,
     /// Environment timestamp for cache invalidation (None = don't check)
     pub env_updated_at: Option<i64>,
+    /// Cancelled by the caller to stop this request's ops, on client disconnect.
+    pub abort: Option<tokio_util::sync::CancellationToken>,
 }
 
 /// Thread-local pool statistics.

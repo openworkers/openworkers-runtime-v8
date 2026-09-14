@@ -343,6 +343,7 @@ async fn bench_pinned_simple() {
                 task,
                 on_warm_hit: None,
                 env_updated_at: None,
+                abort: None,
             })
             .await
             .unwrap();
@@ -399,6 +400,7 @@ async fn bench_pinned_with_fetch() {
                 task,
                 on_warm_hit: None,
                 env_updated_at: None,
+                abort: None,
             })
             .await
             .unwrap();
@@ -455,6 +457,7 @@ async fn bench_pinned_multi_fetch() {
                 task,
                 on_warm_hit: None,
                 env_updated_at: None,
+                abort: None,
             })
             .await
             .unwrap();

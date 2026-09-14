@@ -126,6 +126,7 @@ fn bench_pinned_pool(config: &BenchConfig) -> BenchResult {
                                     task,
                                     on_warm_hit: None,
                                     env_updated_at: None,
+                                    abort: None,
                                 })
                                 .await
                                 .unwrap();

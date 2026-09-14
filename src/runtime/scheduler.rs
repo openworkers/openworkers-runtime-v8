@@ -71,6 +71,9 @@ pub enum SchedulerMessage {
     WebSocketAccept(WebSocketId),
     WebSocketSend(WebSocketId, WebSocketOutgoing),
     WebSocketClose(WebSocketId, u16, String),
+    /// Open a cancellation scope for a new request, optionally linked to a
+    /// caller-side token such as a client disconnect.
+    BeginRequest(Option<CancellationToken>),
     Shutdown,
 }
 
@@ -143,6 +146,10 @@ pub async fn run_event_loop(
     let mut cancelled: HashSet<CallbackId> = HashSet::new();
     let mut shutdown = false;
 
+    // Ops are cancelled per request, not per context: a cancelled child leaves the
+    // event loop running for the next request on a reused context.
+    let mut request_cancel = cancel.child_token();
+
     // WebSocket state: each WS gets a command channel, the spawned task owns the receiver
     let mut next_ws_id: WebSocketId = 1;
     let mut ws_commands: HashMap<WebSocketId, mpsc::UnboundedSender<WebSocketCommand>> =
@@ -175,7 +182,7 @@ pub async fn run_event_loop(
                         let callback_tx = callback_tx.clone();
                         let manager = stream_manager.clone();
                         let ops = ops.clone();
-                        let cancel = cancel.clone();
+                        let cancel = request_cancel.clone();
 
                         tokio::spawn(async move {
                             let result = tokio::select! {
@@ -204,7 +211,7 @@ pub async fn run_event_loop(
                         let callback_tx = callback_tx.clone();
                         let manager = stream_manager.clone();
                         let ops = ops.clone();
-                        let cancel = cancel.clone();
+                        let cancel = request_cancel.clone();
 
                         tokio::spawn(async move {
                             let result = tokio::select! {
@@ -232,7 +239,7 @@ pub async fn run_event_loop(
                     SchedulerMessage::BindingStorage(callback_id, binding_name, storage_op) => {
                         let callback_tx = callback_tx.clone();
                         let ops = ops.clone();
-                        let cancel = cancel.clone();
+                        let cancel = request_cancel.clone();
 
                         tokio::spawn(async move {
                             let result = tokio::select! {
@@ -260,7 +267,7 @@ pub async fn run_event_loop(
                     SchedulerMessage::BindingKv(callback_id, binding_name, kv_op) => {
                         let callback_tx = callback_tx.clone();
                         let ops = ops.clone();
-                        let cancel = cancel.clone();
+                        let cancel = request_cancel.clone();
 
                         tokio::spawn(async move {
                             let result = tokio::select! {
@@ -287,7 +294,7 @@ pub async fn run_event_loop(
                     SchedulerMessage::BindingDatabase(callback_id, binding_name, database_op) => {
                         let callback_tx = callback_tx.clone();
                         let ops = ops.clone();
-                        let cancel = cancel.clone();
+                        let cancel = request_cancel.clone();
 
                         tokio::spawn(async move {
                             let result = tokio::select! {
@@ -318,7 +325,7 @@ pub async fn run_event_loop(
                         let callback_tx = callback_tx.clone();
                         let manager = stream_manager.clone();
                         let ops = ops.clone();
-                        let cancel = cancel.clone();
+                        let cancel = request_cancel.clone();
 
                         tokio::spawn(async move {
                             let result = tokio::select! {
@@ -395,7 +402,7 @@ pub async fn run_event_loop(
 
                         let callback_tx = callback_tx.clone();
                         let ops = ops.clone();
-                        let cancel = cancel.clone();
+                        let cancel = request_cancel.clone();
 
                         tokio::spawn(async move {
                             run_websocket(
@@ -426,7 +433,7 @@ pub async fn run_event_loop(
                     SchedulerMessage::StreamRead(callback_id, stream_id) => {
                         let callback_tx = callback_tx.clone();
                         let manager = stream_manager.clone();
-                        let cancel = cancel.clone();
+                        let cancel = request_cancel.clone();
 
                         tokio::spawn(async move {
                             let chunk = tokio::select! {
@@ -447,6 +454,22 @@ pub async fn run_event_loop(
 
                     SchedulerMessage::StreamCancel(stream_id) => {
                         stream_manager.close_stream(stream_id);
+                    }
+
+                    SchedulerMessage::BeginRequest(abort) => {
+                        request_cancel.cancel();
+                        request_cancel = cancel.child_token();
+
+                        if let Some(abort) = abort {
+                            let scope = request_cancel.clone();
+
+                            tokio::spawn(async move {
+                                tokio::select! {
+                                    _ = abort.cancelled() => scope.cancel(),
+                                    _ = scope.cancelled() => {}
+                                }
+                            });
+                        }
                     }
 
                     SchedulerMessage::Shutdown => {

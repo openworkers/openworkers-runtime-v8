@@ -659,6 +659,16 @@ impl ExecutionContext {
         }
     }
 
+    /// Open a cancellation scope for the task about to run. Cancelling `abort`
+    /// then stops this request's in-flight ops without touching the event loop
+    /// that a reused context shares with later requests.
+    pub fn begin_request(&self, abort: Option<CancellationToken>) {
+        let _ = self
+            .request
+            .scheduler_tx
+            .send(crate::runtime::SchedulerMessage::BeginRequest(abort));
+    }
+
     /// Execute a task in this context
     pub async fn exec(&mut self, mut task: Event) -> Result<(), TerminationReason> {
         // Check if aborted before starting

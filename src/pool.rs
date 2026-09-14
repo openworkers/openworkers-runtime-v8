@@ -605,6 +605,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
         task,
         on_warm_hit,
         env_updated_at,
+        abort,
     } = req;
     TOTAL_REQUESTS.fetch_add(1, Ordering::Relaxed);
 
@@ -716,6 +717,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
         // reset() acquires its own V8 lock internally
         match ec.reset() {
             Ok(()) => {
+                ec.begin_request(abort);
                 let result = ec.exec(task).await;
 
                 let save_to_cache = if result.is_err() {
@@ -815,6 +817,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
     let (result, new_cached_context) = match ctx_result {
         Ok(mut ctx) => {
             ctx.async_waiter = async_waiter;
+            ctx.begin_request(abort);
             let result = ctx.exec(task).await;
 
             if result.is_ok() {
