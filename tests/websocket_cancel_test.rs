@@ -118,11 +118,11 @@ async fn cancelling_the_request_closes_the_socket_the_guest_awaits() {
         let response = rx.await.unwrap();
         let body = response.body.collect().await.unwrap().unwrap();
 
-        // 1001 is the loop's own close on cancellation; 1006 would mean the
-        // connect itself failed, which is not the path under test.
+        // A failed connect also reports 1006, with an empty reason or the
+        // connect error; the reason is what tells the cancellation apart.
         assert_eq!(
             String::from_utf8_lossy(&body),
-            "closed:1001:Operation cancelled"
+            "closed:1006:Operation cancelled"
         );
     })
     .await;

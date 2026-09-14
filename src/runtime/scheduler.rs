@@ -684,12 +684,14 @@ async fn run_websocket(
         tokio::select! {
             biased;
 
-            // The guest may be awaiting close; the socket is not coming back.
+            // The guest may be awaiting close; the socket is not coming back. The
+            // frame says 1001, since 1006 must never go on the wire; the guest sees
+            // 1006, the code a client treats as a dropped connection.
             _ = cancel.cancelled() => {
                 let _ = send_tx.send(WebSocketOutgoing::Close { code: 1001, reason: CANCELLED.into() });
                 let _ = callback_tx.send(CallbackMessage::WebSocketEvent(
                     ws_id,
-                    WebSocketIncoming::Closed { code: 1001, reason: CANCELLED.into() },
+                    WebSocketIncoming::Closed { code: 1006, reason: CANCELLED.into() },
                 ));
                 break;
             }
