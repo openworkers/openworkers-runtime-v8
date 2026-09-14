@@ -25,6 +25,10 @@ use openworkers_core::{
 
 pub type CallbackId = u64;
 
+/// Settled in place of a real result when a request is cancelled: a promise that
+/// is never settled parks the event loop for the life of the context.
+const CANCELLED: &str = "Operation cancelled";
+
 /// Wrapper that sends a callback message AND notifies the exec() loop
 #[derive(Clone)]
 pub struct CallbackSender {
@@ -176,7 +180,10 @@ pub async fn run_event_loop(
                         tokio::spawn(async move {
                             let result = tokio::select! {
                                 biased;
-                                _ = cancel.cancelled() => return,
+                                _ = cancel.cancelled() => {
+                                    let _ = callback_tx.send(CallbackMessage::FetchError(promise_id, CANCELLED.into()));
+                                    return;
+                                }
                                 r = execute_fetch_via_ops(request, manager, ops, cancel.clone()) => r,
                             };
 
@@ -202,7 +209,10 @@ pub async fn run_event_loop(
                         tokio::spawn(async move {
                             let result = tokio::select! {
                                 biased;
-                                _ = cancel.cancelled() => return,
+                                _ = cancel.cancelled() => {
+                                    let _ = callback_tx.send(CallbackMessage::FetchError(promise_id, CANCELLED.into()));
+                                    return;
+                                }
                                 r = execute_binding_fetch_via_ops(binding_name, request, manager, ops, cancel.clone()) => r,
                             };
 
@@ -227,7 +237,10 @@ pub async fn run_event_loop(
                         tokio::spawn(async move {
                             let result = tokio::select! {
                                 biased;
-                                _ = cancel.cancelled() => return,
+                                _ = cancel.cancelled() => {
+                                    let _ = callback_tx.send(CallbackMessage::StorageResult(callback_id, StorageResult::Error(CANCELLED.into())));
+                                    return;
+                                }
                                 r = ops.handle(Operation::BindingStorage {
                                     binding: binding_name,
                                     op: storage_op,
@@ -252,7 +265,10 @@ pub async fn run_event_loop(
                         tokio::spawn(async move {
                             let result = tokio::select! {
                                 biased;
-                                _ = cancel.cancelled() => return,
+                                _ = cancel.cancelled() => {
+                                    let _ = callback_tx.send(CallbackMessage::KvResult(callback_id, KvResult::Error(CANCELLED.into())));
+                                    return;
+                                }
                                 r = ops.handle(Operation::BindingKv {
                                     binding: binding_name,
                                     op: kv_op,
@@ -276,7 +292,10 @@ pub async fn run_event_loop(
                         tokio::spawn(async move {
                             let result = tokio::select! {
                                 biased;
-                                _ = cancel.cancelled() => return,
+                                _ = cancel.cancelled() => {
+                                    let _ = callback_tx.send(CallbackMessage::DatabaseResult(callback_id, DatabaseResult::Error(CANCELLED.into())));
+                                    return;
+                                }
                                 r = ops.handle(Operation::BindingDatabase {
                                     binding: binding_name,
                                     op: database_op,
@@ -304,7 +323,10 @@ pub async fn run_event_loop(
                         tokio::spawn(async move {
                             let result = tokio::select! {
                                 biased;
-                                _ = cancel.cancelled() => return,
+                                _ = cancel.cancelled() => {
+                                    let _ = callback_tx.send(CallbackMessage::FetchError(callback_id, CANCELLED.into()));
+                                    return;
+                                }
                                 r = ops.handle(Operation::BindingWorker {
                                     binding: binding_name,
                                     request,
@@ -409,7 +431,10 @@ pub async fn run_event_loop(
                         tokio::spawn(async move {
                             let chunk = tokio::select! {
                                 biased;
-                                _ = cancel.cancelled() => return,
+                                _ = cancel.cancelled() => {
+                                    let _ = callback_tx.send(CallbackMessage::StreamChunk(callback_id, stream_manager::StreamChunk::Error(CANCELLED.into())));
+                                    return;
+                                }
                                 r = manager.read_chunk(stream_id) => match r {
                                     Ok(chunk) => chunk,
                                     Err(e) => stream_manager::StreamChunk::Error(e),
@@ -601,7 +626,10 @@ async fn run_websocket(
     // Phase 1: Connect
     let result = tokio::select! {
         biased;
-        _ = cancel.cancelled() => return,
+        _ = cancel.cancelled() => {
+            let _ = callback_tx.send(CallbackMessage::WebSocketConnectError(callback_id, CANCELLED.into()));
+            return;
+        }
         r = ops.handle(Operation::WebSocketConnect { url, headers }) => r,
     };
 
