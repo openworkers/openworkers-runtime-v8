@@ -83,13 +83,17 @@ pub fn setup_stream_ops(
                 async pull(controller) {
                     return new Promise((resolve) => {
                         __nativeStreamRead(streamId, (result) => {
-                            if (result.error) {
-                                controller.error(new Error(result.error));
-                            } else if (result.done) {
-                                controller.close();
-                            } else {
-                                controller.enqueue(result.value);
-                            }
+                            // A stream cancelled with a read in flight refuses the
+                            // chunk that still lands; the read has to settle anyway.
+                            try {
+                                if (result.error) {
+                                    controller.error(new Error(result.error));
+                                } else if (result.done) {
+                                    controller.close();
+                                } else {
+                                    controller.enqueue(result.value);
+                                }
+                            } catch (_) {}
                             resolve();
                         });
                     });

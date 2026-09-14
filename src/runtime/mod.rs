@@ -2,6 +2,8 @@ pub mod bindings;
 pub mod callback_handlers;
 pub mod crypto;
 pub(crate) mod dispatch;
+pub(crate) use dispatch::Guest;
+pub(crate) use dispatch::call_guest;
 pub mod scheduler;
 pub mod stream_manager;
 pub mod text_encoding;
@@ -33,35 +35,27 @@ pub(crate) fn dispatch_binding_callbacks(
     error_msg: Option<&str>,
     result_value: Option<v8::Local<v8::Value>>,
 ) {
-    if let Some(err_msg) = error_msg {
-        // Error - call reject
-        let reject_opt = {
-            let mut cbs = reject_callbacks.borrow_mut();
-            cbs.remove(&callback_id)
-        };
-        // Cleanup resolve
-        resolve_callbacks.borrow_mut().remove(&callback_id);
+    let resolve = resolve_callbacks.borrow_mut().remove(&callback_id);
+    let reject = reject_callbacks.borrow_mut().remove(&callback_id);
 
-        if let Some(callback_global) = reject_opt {
+    if let Some(err_msg) = error_msg {
+        if let Some(reject) = reject {
             let error_msg_val = v8::String::new(scope, err_msg).unwrap();
             let error = v8::Exception::error(scope, error_msg_val);
-            let callback = v8::Local::new(scope, &callback_global);
-            let recv = v8::undefined(scope);
-            callback.call(scope, recv.into(), &[error]);
+            let reject = v8::Local::new(scope, &reject);
+            call_guest(scope, reject, &[error]);
         }
-    } else if let Some(value) = result_value {
-        // Success - call resolve
-        let resolve_opt = {
-            let mut cbs = resolve_callbacks.borrow_mut();
-            cbs.remove(&callback_id)
-        };
-        // Cleanup reject
-        reject_callbacks.borrow_mut().remove(&callback_id);
+    } else if let Some(value) = result_value
+        && let Some(resolve) = resolve
+    {
+        let resolve = v8::Local::new(scope, &resolve);
 
-        if let Some(callback_global) = resolve_opt {
-            let callback = v8::Local::new(scope, &callback_global);
-            let recv = v8::undefined(scope);
-            callback.call(scope, recv.into(), &[value]);
+        // A resolve that throws still owes the promise an answer.
+        if let (Guest::Threw(thrown), Some(reject)) = (call_guest(scope, resolve, &[value]), reject)
+        {
+            let reject = v8::Local::new(scope, &reject);
+            let exception = v8::Local::new(scope, &thrown);
+            call_guest(scope, reject, &[exception]);
         }
     }
 }
@@ -90,33 +84,32 @@ pub(crate) fn dispatch_ws_event(
     };
 
     let callback = v8::Local::new(scope, &callback_global);
-    let recv = v8::undefined(scope);
 
     match incoming {
         WebSocketIncoming::Text(s) => {
             let type_val = v8::String::new(scope, "message").unwrap();
             let data_val = v8::String::new(scope, &s).unwrap();
-            callback.call(scope, recv.into(), &[type_val.into(), data_val.into()]);
+            call_guest(scope, callback, &[type_val.into(), data_val.into()]);
         }
         WebSocketIncoming::Binary(bytes) => {
             let type_val = v8::String::new(scope, "message").unwrap();
             let ab = crate::v8_helpers::create_array_buffer_from_vec(scope, bytes);
-            callback.call(scope, recv.into(), &[type_val.into(), ab.into()]);
+            call_guest(scope, callback, &[type_val.into(), ab.into()]);
         }
         WebSocketIncoming::Closed { code, reason } => {
             let type_val = v8::String::new(scope, "close").unwrap();
             let code_val = v8::Number::new(scope, code as f64);
             let reason_val = v8::String::new(scope, &reason).unwrap();
-            callback.call(
+            call_guest(
                 scope,
-                recv.into(),
+                callback,
                 &[type_val.into(), code_val.into(), reason_val.into()],
             );
         }
         WebSocketIncoming::Error(e) => {
             let type_val = v8::String::new(scope, "error").unwrap();
             let msg_val = v8::String::new(scope, &e).unwrap();
-            callback.call(scope, recv.into(), &[type_val.into(), msg_val.into()]);
+            call_guest(scope, callback, &[type_val.into(), msg_val.into()]);
         }
     };
 }

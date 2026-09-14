@@ -459,6 +459,7 @@ pub async fn run_event_loop(
                     SchedulerMessage::BeginRequest(abort) => {
                         request_cancel.cancel();
                         request_cancel = cancel.child_token();
+                        ws_commands.clear();
 
                         if let Some(abort) = abort {
                             let scope = request_cancel.clone();
@@ -683,7 +684,15 @@ async fn run_websocket(
         tokio::select! {
             biased;
 
-            _ = cancel.cancelled() => break,
+            // The guest may be awaiting close; the socket is not coming back.
+            _ = cancel.cancelled() => {
+                let _ = send_tx.send(WebSocketOutgoing::Close { code: 1001, reason: CANCELLED.into() });
+                let _ = callback_tx.send(CallbackMessage::WebSocketEvent(
+                    ws_id,
+                    WebSocketIncoming::Closed { code: 1001, reason: CANCELLED.into() },
+                ));
+                break;
+            }
 
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { break };

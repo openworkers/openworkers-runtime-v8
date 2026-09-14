@@ -25,6 +25,46 @@ use super::stream_manager::StreamManager;
 type Callbacks = Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>;
 type WebSocketCallbacks = Rc<RefCell<HashMap<WebSocketId, v8::Global<v8::Function>>>>;
 
+/// What guest code did when called.
+pub(crate) enum Guest {
+    Returned,
+    /// Threw; the value goes to the other half of a resolve/reject pair.
+    Threw(v8::Global<v8::Value>),
+    /// The isolate is being terminated: run no more guest code.
+    Terminated,
+}
+
+/// Call guest code under a TryCatch. A throw that escaped a bare call was
+/// dropped along with the promise it owed, and a termination caught by a
+/// TryCatch is cleared when it drops, so that one is thrown again instead.
+pub(crate) fn call_guest(
+    scope: &mut v8::PinScope,
+    function: v8::Local<v8::Function>,
+    args: &[v8::Local<v8::Value>],
+) -> Guest {
+    let tc = pin!(v8::TryCatch::new(scope));
+    let mut tc = tc.init();
+    let recv = v8::undefined(&tc);
+    function.call(&tc, recv.into(), args);
+
+    if tc.has_terminated() {
+        tc.rethrow();
+        return Guest::Terminated;
+    }
+
+    let Some(exception) = tc.exception() else {
+        return Guest::Returned;
+    };
+
+    let text = tc
+        .message()
+        .map(|m| m.get(&tc).to_rust_string_lossy(&tc))
+        .unwrap_or_else(|| "unknown exception".to_string());
+    tracing::warn!("guest callback threw: {text}");
+
+    Guest::Threw(v8::Global::new(&tc, exception))
+}
+
 /// The tables a dispatch reaches for.
 pub(crate) struct Tables<'a> {
     pub fetch: &'a Callbacks,
@@ -52,7 +92,7 @@ pub(crate) fn dispatch(
             {
                 let execute_fn: v8::Local<v8::Function> = execute_fn_val.try_into().unwrap();
                 let id_val = v8::Number::new(scope, callback_id as f64);
-                execute_fn.call(scope, global.into(), &[id_val.into()]);
+                call_guest(scope, execute_fn, &[id_val.into()]);
             }
         }
 
@@ -65,8 +105,7 @@ pub(crate) fn dispatch(
                 let message = v8::String::new(scope, &error_msg).unwrap();
                 let error = v8::Exception::error(scope, message);
                 let callback = v8::Local::new(scope, &callback);
-                let recv = v8::undefined(scope);
-                callback.call(scope, recv.into(), &[error]);
+                call_guest(scope, callback, &[error]);
             }
         }
 
@@ -79,33 +118,13 @@ pub(crate) fn dispatch(
                 callback_handlers::populate_fetch_meta(scope, meta_obj, &meta, stream_id);
                 let callback = v8::Local::new(scope, &callback);
 
-                // Resolving is guest code and can throw, building the Response
-                // among other things. An exception that escapes here settles
-                // nothing, and the promise stays pending for the life of the
-                // request, so hand it to the other half of the pair instead.
-                let thrown = {
-                    let tc = pin!(v8::TryCatch::new(scope));
-                    let tc = tc.init();
-                    let recv = v8::undefined(&tc);
-                    callback.call(&tc, recv.into(), &[meta_obj.into()]);
-
-                    tc.exception()
-                        .map(|exception| v8::Global::new(&tc, exception))
-                };
-
-                if let Some(thrown) = thrown {
-                    let message = v8::Local::new(scope, &thrown)
-                        .to_string(scope)
-                        .map(|s| s.to_rust_string_lossy(scope))
-                        .unwrap_or_else(|| "unknown exception".to_string());
-                    tracing::warn!("fetch callback threw, rejecting the promise: {message}");
-
-                    if let Some(on_error) = on_error {
-                        let on_error = v8::Local::new(scope, &on_error);
-                        let exception = v8::Local::new(scope, &thrown);
-                        let recv = v8::undefined(scope);
-                        on_error.call(scope, recv.into(), &[exception]);
-                    }
+                // Resolving builds the Response, which can refuse what it is given.
+                if let (Guest::Threw(thrown), Some(on_error)) =
+                    (call_guest(scope, callback, &[meta_obj.into()]), on_error)
+                {
+                    let on_error = v8::Local::new(scope, &on_error);
+                    let exception = v8::Local::new(scope, &thrown);
+                    call_guest(scope, on_error, &[exception]);
                 }
             }
         }
@@ -117,8 +136,7 @@ pub(crate) fn dispatch(
                 let result_obj = v8::Object::new(scope);
                 callback_handlers::populate_stream_chunk_result(scope, result_obj, chunk);
                 let callback = v8::Local::new(scope, &callback);
-                let recv = v8::undefined(scope);
-                callback.call(scope, recv.into(), &[result_obj.into()]);
+                call_guest(scope, callback, &[result_obj.into()]);
             }
         }
 
