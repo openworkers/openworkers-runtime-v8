@@ -783,15 +783,29 @@ impl Worker {
     ) -> Result<(), String> {
         use crate::event_loop::drain_and_process;
         use crate::runtime::CallbackMessage;
+        use std::future::Future;
         use std::task::Poll;
 
         let mut abort_signaled_at: Option<tokio::time::Instant> = None;
         let mut pending_callbacks: Vec<CallbackMessage> = Vec::with_capacity(16);
 
+        let mut deadline = wall_guard
+            .deadline()
+            .map(|at| Box::pin(tokio::time::sleep_until(at)));
+
         std::future::poll_fn(|cx| {
             // 0. A client that hangs up is seen by the task pumping the body,
             //    which wakes this loop through the stream manager.
             self.runtime.stream_manager.register_waker(cx.waker());
+
+            // The watchdog only sets a flag; nothing else wakes a parked loop
+            // to read it, so the deadline is polled here as well.
+            if let Some(sleep) = deadline.as_mut()
+                && sleep.as_mut().poll(cx).is_ready()
+            {
+                wall_guard.expire();
+                return Poll::Ready(Err("Execution terminated".to_string()));
+            }
 
             // 1. Check termination (CPU/wall-clock guards)
             if self.is_terminated(wall_guard, cpu_guard) {

@@ -1,17 +1,16 @@
 //! Run: `cargo test --test timeout_test`
-//! Note: wall-clock timeout tests are Linux-only
+//! Note: the busy-loop wall-clock test is Linux-only
 
 mod common;
 
 use common::run_in_local;
-#[cfg(target_os = "linux")]
 use openworkers_core::TerminationReason;
 use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, RuntimeLimits, Script};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
-// Wall-clock timeout tests are Linux-only because they spin CPU waiting for timeout.
-// On macOS without CPU enforcement, these tests would burn CPU unnecessarily.
+// The busy-loop test is Linux-only: it spins CPU until the timeout, which on
+// macOS without CPU enforcement would burn a core for nothing.
 
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "current_thread")]
@@ -62,7 +61,6 @@ async fn test_wall_clock_timeout_infinite_loop() {
     .await;
 }
 
-#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "current_thread")]
 #[ntest::timeout(3000)] // 3s max - test should complete in ~500ms
 async fn test_wall_clock_timeout_async_loop() {

@@ -836,6 +836,7 @@ impl ExecutionContext {
         abort_config: Option<AbortConfig>,
     ) -> Result<(), String> {
         use crate::event_loop::drain_and_process;
+        use std::future::Future;
         use std::task::Poll;
 
         let mut abort_signaled_at: Option<tokio::time::Instant> = None;
@@ -843,10 +844,23 @@ impl ExecutionContext {
         let lmi_ptr = self.lmi_ptr; // Copy raw pointer (no persistent borrow on self)
         let async_waiter = self.async_waiter.clone(); // Clone Rc (cheap) to avoid borrow on self
 
+        let mut deadline = wall_guard
+            .deadline()
+            .map(|at| Box::pin(tokio::time::sleep_until(at)));
+
         std::future::poll_fn(|cx| {
             // A client that hangs up is seen by the task pumping the body,
             // which wakes this loop through the stream manager.
             self.request.stream_manager.register_waker(cx.waker());
+
+            // The watchdog only sets a flag; nothing else wakes a parked loop
+            // to read it, so the deadline is polled here as well.
+            if let Some(sleep) = deadline.as_mut()
+                && sleep.as_mut().poll(cx).is_ready()
+            {
+                wall_guard.expire();
+                return Poll::Ready(Err("Execution terminated".to_string()));
+            }
 
             // -- Fair queue gate (if multiplexing enabled) --
             // When multiple requests share an isolate, only one can hold the

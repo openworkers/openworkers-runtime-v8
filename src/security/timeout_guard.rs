@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+use tokio::time::Instant;
 
 /// RAII guard that spawns a watchdog thread to terminate V8 execution on timeout.
 ///
@@ -55,6 +56,8 @@ pub struct TimeoutGuard {
     thread_handle: Option<thread::JoinHandle<()>>,
     /// Flag set when timeout is triggered
     triggered: Arc<AtomicBool>,
+    /// When the limit lands, for a loop to poll against
+    deadline: Option<Instant>,
 }
 
 impl TimeoutGuard {
@@ -78,9 +81,11 @@ impl TimeoutGuard {
                 cancel_tx: None,
                 thread_handle: None,
                 triggered,
+                deadline: None,
             };
         }
 
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
         let (cancel_tx, cancel_rx) = mpsc::channel::<()>();
         let triggered_clone = triggered.clone();
 
@@ -116,7 +121,19 @@ impl TimeoutGuard {
             cancel_tx: Some(cancel_tx),
             thread_handle: Some(thread_handle),
             triggered,
+            deadline: Some(deadline),
         }
+    }
+
+    /// When the limit lands; None for a disabled guard.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    /// Record the limit as hit from the loop that observed it, so the reason
+    /// reads wall clock whichever of the loop and the watchdog got there first.
+    pub fn expire(&self) {
+        self.triggered.store(true, Ordering::SeqCst);
     }
 
     /// Check if the timeout was triggered.
@@ -159,6 +176,7 @@ mod tests {
             cancel_tx: None,
             thread_handle: None,
             triggered: Arc::new(AtomicBool::new(false)),
+            deadline: None,
         };
 
         assert!(!guard.was_triggered());
