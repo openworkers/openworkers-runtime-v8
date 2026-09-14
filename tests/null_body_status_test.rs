@@ -8,10 +8,15 @@
 mod common;
 
 use common::run_in_local;
-use openworkers_core::{
-    Event, HttpMethod, HttpRequest, HttpResponse, OpFuture, OperationsHandler, RequestBody,
-    ResponseBody, Script,
-};
+use openworkers_core::Event;
+use openworkers_core::HttpMethod;
+use openworkers_core::HttpRequest;
+use openworkers_core::HttpResponse;
+use openworkers_core::OpFuture;
+use openworkers_core::OperationsHandler;
+use openworkers_core::RequestBody;
+use openworkers_core::ResponseBody;
+use openworkers_core::Script;
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 use std::sync::Arc;

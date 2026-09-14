@@ -1317,7 +1317,8 @@ impl ExecutionContext {
         self.request.fetch_error_callbacks.borrow_mut().clear();
         self.request.stream_callbacks.borrow_mut().clear();
         self.request.ws_event_callbacks.borrow_mut().clear();
-        *self.request.next_callback_id.borrow_mut() = 1;
+        // The id counter keeps counting: an answer to the previous request that
+        // lands late must find no callback, not the next request's.
 
         Ok(())
     }
