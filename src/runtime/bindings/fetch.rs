@@ -1,5 +1,6 @@
 use super::super::{CallbackId, SchedulerMessage};
 use super::state::FetchState;
+use crate::v8_helpers::throw_type_error;
 use openworkers_core::{
     DatabaseOp, HttpMethod, HttpRequest, KvOp, RequestBody, SqlParam, StorageOp,
 };
@@ -63,24 +64,47 @@ struct DatabaseParams {
     params: Vec<SqlParam>,
 }
 
-/// Parse JS options object into HttpRequest using serde_v8
+/// The request a JS options object describes, or why it describes none.
 fn parse_http_request(
     scope: &mut v8::PinScope,
     options: v8::Local<v8::Value>,
-) -> Option<HttpRequest> {
-    let opts: FetchOptions = serde_v8::from_v8_any(scope, options).ok()?;
-    let method = opts.method.parse().unwrap_or(HttpMethod::Get);
+) -> Result<HttpRequest, String> {
+    let opts: FetchOptions = serde_v8::from_v8_any(scope, options)
+        .map_err(|e| format!("fetch: the options are not a request object: {e}"))?;
+    let method: HttpMethod = opts
+        .method
+        .parse()
+        .map_err(|()| format!("fetch: unknown method \"{}\"", opts.method))?;
     let body = match opts.body {
         Some(buf) => RequestBody::Bytes(bytes::Bytes::from(buf.to_vec())),
         None => RequestBody::None,
     };
 
-    Some(HttpRequest {
+    Ok(HttpRequest {
         url: opts.url,
         method,
         headers: opts.headers,
         body,
     })
+}
+
+/// The resolve and reject callbacks an async op takes, or a TypeError thrown
+/// in their place: an op that returns without them leaves the promise pending.
+pub(super) fn resolve_reject<'a>(
+    scope: &mut v8::PinScope,
+    resolve: v8::Local<'a, v8::Value>,
+    reject: v8::Local<'a, v8::Value>,
+) -> Option<(v8::Local<'a, v8::Function>, v8::Local<'a, v8::Function>)> {
+    let resolve = v8::Local::<v8::Function>::try_from(resolve);
+    let reject = v8::Local::<v8::Function>::try_from(reject);
+
+    match (resolve, reject) {
+        (Ok(resolve), Ok(reject)) => Some((resolve, reject)),
+        _ => {
+            throw_type_error(scope, "the resolve and reject callbacks are not functions");
+            None
+        }
+    }
 }
 
 /// Register success callback and return callback ID
@@ -138,26 +162,19 @@ where
                 return;
             };
 
-            if args.length() < 4 {
-                return;
-            }
-
             let Ok(binding_name) = serde_v8::from_v8_any::<String>(scope, args.get(0)) else {
-                return;
+                return throw_type_error(scope, "binding fetch: the binding name is not a string");
             };
 
-            let Some(request) = parse_http_request(scope, args.get(1)) else {
-                return;
+            let request = match parse_http_request(scope, args.get(1)) {
+                Ok(request) => request,
+                Err(message) => return throw_type_error(scope, &message),
             };
 
-            let (success_cb, error_cb) = (args.get(2), args.get(3));
-
-            if !success_cb.is_function() || !error_cb.is_function() {
+            let Some((success_fn, error_fn)) = resolve_reject(scope, args.get(2), args.get(3))
+            else {
                 return;
-            }
-
-            let success_fn: v8::Local<v8::Function> = success_cb.try_into().unwrap();
-            let error_fn: v8::Local<v8::Function> = error_cb.try_into().unwrap();
+            };
 
             let callback_id = register_callbacks_with_error(&state, scope, success_fn, error_fn);
 
@@ -199,25 +216,14 @@ pub fn setup_fetch(
                 return;
             };
 
-            if args.length() < 3 {
-                return;
-            }
-
-            let Some(request) = parse_http_request(scope, args.get(0)) else {
-                return;
+            let request = match parse_http_request(scope, args.get(0)) {
+                Ok(request) => request,
+                Err(message) => return throw_type_error(scope, &message),
             };
 
-            let resolve_val = args.get(1);
-            if !resolve_val.is_function() {
+            let Some((resolve, reject)) = resolve_reject(scope, args.get(1), args.get(2)) else {
                 return;
-            }
-            let resolve: v8::Local<v8::Function> = resolve_val.try_into().unwrap();
-
-            let reject_val = args.get(2);
-            if !reject_val.is_function() {
-                return;
-            }
-            let reject: v8::Local<v8::Function> = reject_val.try_into().unwrap();
+            };
 
             let callback_id = register_callbacks_with_error(&state, scope, resolve, reject);
 
@@ -245,28 +251,28 @@ pub fn setup_fetch(
                 return;
             };
 
-            if args.length() < 4 {
-                return;
-            }
-
             let Ok(binding_name) = serde_v8::from_v8_any::<String>(scope, args.get(0)) else {
-                return;
+                return throw_type_error(scope, "storage: the binding name is not a string");
             };
 
             let Ok(operation) = serde_v8::from_v8_any::<String>(scope, args.get(1)) else {
-                return;
+                return throw_type_error(scope, "storage: the operation is not a string");
             };
 
-            let Ok(params) = serde_v8::from_v8_any::<StorageParams>(scope, args.get(2)) else {
-                return;
+            let params = match serde_v8::from_v8_any::<StorageParams>(scope, args.get(2)) {
+                Ok(params) => params,
+                Err(e) => return throw_type_error(scope, &format!("storage: bad parameters: {e}")),
             };
 
             let storage_op = match operation.as_str() {
                 "get" => StorageOp::Get { key: params.key },
                 "fetch" => StorageOp::Fetch { key: params.key },
-                "put" => StorageOp::Put {
-                    key: params.key,
-                    body: params.body.map(|b| b.to_vec()).unwrap_or_default(),
+                "put" => match params.body {
+                    Some(body) => StorageOp::Put {
+                        key: params.key,
+                        body: body.to_vec(),
+                    },
+                    None => return throw_type_error(scope, "storage put: takes a body"),
                 },
                 "head" => StorageOp::Head { key: params.key },
                 "list" => StorageOp::List {
@@ -274,21 +280,17 @@ pub fn setup_fetch(
                     limit: params.limit,
                 },
                 "delete" => StorageOp::Delete { key: params.key },
-                _ => return,
+                _ => {
+                    let message = format!("storage: unknown operation \"{operation}\"");
+                    return throw_type_error(scope, &message);
+                }
             };
 
-            if args.length() < 5 {
+            let Some((resolve_fn, reject_fn)) = resolve_reject(scope, args.get(3), args.get(4))
+            else {
                 return;
-            }
+            };
 
-            let (resolve_cb, reject_cb) = (args.get(3), args.get(4));
-
-            if !resolve_cb.is_function() || !reject_cb.is_function() {
-                return;
-            }
-
-            let resolve_fn: v8::Local<v8::Function> = resolve_cb.try_into().unwrap();
-            let reject_fn: v8::Local<v8::Function> = reject_cb.try_into().unwrap();
             let callback_id = register_callbacks_with_error(&state, scope, resolve_fn, reject_fn);
 
             let _ = state.scheduler_tx.send(SchedulerMessage::BindingStorage(
@@ -312,49 +314,45 @@ pub fn setup_fetch(
                 return;
             };
 
-            if args.length() < 4 {
-                return;
-            }
-
             let Ok(binding_name) = serde_v8::from_v8_any::<String>(scope, args.get(0)) else {
-                return;
+                return throw_type_error(scope, "kv: the binding name is not a string");
             };
 
             let Ok(operation) = serde_v8::from_v8_any::<String>(scope, args.get(1)) else {
-                return;
+                return throw_type_error(scope, "kv: the operation is not a string");
             };
 
-            let Ok(params) = serde_v8::from_v8_any::<KvParams>(scope, args.get(2)) else {
-                return;
+            let params = match serde_v8::from_v8_any::<KvParams>(scope, args.get(2)) {
+                Ok(params) => params,
+                Err(e) => return throw_type_error(scope, &format!("kv: bad parameters: {e}")),
             };
 
             let kv_op = match operation.as_str() {
                 "get" => KvOp::Get { key: params.key },
-                "put" => KvOp::Put {
-                    key: params.key,
-                    value: params.value.unwrap_or(serde_json::Value::Null),
-                    expires_in: params.expires_in,
+                "put" => match params.value {
+                    Some(value) => KvOp::Put {
+                        key: params.key,
+                        value,
+                        expires_in: params.expires_in,
+                    },
+                    None => return throw_type_error(scope, "kv put: takes a value"),
                 },
                 "delete" => KvOp::Delete { key: params.key },
                 "list" => KvOp::List {
                     prefix: params.prefix,
                     limit: params.limit,
                 },
-                _ => return,
+                _ => {
+                    let message = format!("kv: unknown operation \"{operation}\"");
+                    return throw_type_error(scope, &message);
+                }
             };
 
-            if args.length() < 5 {
+            let Some((resolve_fn, reject_fn)) = resolve_reject(scope, args.get(3), args.get(4))
+            else {
                 return;
-            }
+            };
 
-            let (resolve_cb, reject_cb) = (args.get(3), args.get(4));
-
-            if !resolve_cb.is_function() || !reject_cb.is_function() {
-                return;
-            }
-
-            let resolve_fn: v8::Local<v8::Function> = resolve_cb.try_into().unwrap();
-            let reject_fn: v8::Local<v8::Function> = reject_cb.try_into().unwrap();
             let callback_id = register_callbacks_with_error(&state, scope, resolve_fn, reject_fn);
 
             let _ = state.scheduler_tx.send(SchedulerMessage::BindingKv(

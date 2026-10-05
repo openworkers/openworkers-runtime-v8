@@ -17,6 +17,25 @@ use std::rc::Rc;
 use v8;
 
 use super::super::scheduler::SchedulerMessage;
+use super::fetch::resolve_reject;
+use crate::v8_helpers::throw_type_error;
+
+/// The socket id an op was given, or a TypeError thrown in its place.
+fn socket_id(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Option<u64> {
+    if !value.is_number() {
+        throw_type_error(scope, "WebSocket: the socket id is not a number");
+        return None;
+    }
+
+    Some(value.number_value(scope).unwrap() as u64)
+}
+
+/// None when the conversion threw; that exception is the answer.
+fn string_of(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Option<String> {
+    value
+        .to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+}
 
 /// Register all WebSocket native functions and the JS WebSocket class.
 pub fn setup_websocket(
@@ -37,30 +56,28 @@ pub fn setup_websocket(
                 return;
             };
 
-            // Parse url
-            let url = match args.get(0).to_string(scope) {
-                Some(s) => s.to_rust_string_lossy(scope),
-                None => return,
-            };
-
-            // Parse headers object
-            let headers = if args.get(1).is_object() {
-                serde_v8::from_v8_any::<HashMap<String, String>>(scope, args.get(1))
-                    .unwrap_or_default()
-            } else {
-                HashMap::new()
-            };
-
-            // resolve and reject callbacks
-            let resolve_cb = args.get(2);
-            let reject_cb = args.get(3);
-
-            if !resolve_cb.is_function() || !reject_cb.is_function() {
+            let Some(url) = string_of(scope, args.get(0)) else {
                 return;
-            }
+            };
 
-            let resolve_fn: v8::Local<v8::Function> = resolve_cb.try_into().unwrap();
-            let reject_fn: v8::Local<v8::Function> = reject_cb.try_into().unwrap();
+            let headers = args.get(1);
+            let headers = if headers.is_null_or_undefined() {
+                HashMap::new()
+            } else {
+                match serde_v8::from_v8_any::<HashMap<String, String>>(scope, headers) {
+                    Ok(headers) => headers,
+                    Err(e) => {
+                        let message =
+                            format!("WebSocket: the headers are not a name/value object: {e}");
+                        return throw_type_error(scope, &message);
+                    }
+                }
+            };
+
+            let Some((resolve_fn, reject_fn)) = resolve_reject(scope, args.get(2), args.get(3))
+            else {
+                return;
+            };
 
             // Register callbacks using FetchState (same pattern as fetch)
             let callback_id = {
@@ -104,14 +121,13 @@ pub fn setup_websocket(
             };
             let ws_state = ws_state.clone();
 
-            let ws_id = args.get(0).number_value(scope).unwrap_or(0.0) as u64;
-            let dispatcher_cb = args.get(1);
-
-            if !dispatcher_cb.is_function() {
+            let Some(ws_id) = socket_id(scope, args.get(0)) else {
                 return;
-            }
+            };
 
-            let dispatcher_fn: v8::Local<v8::Function> = dispatcher_cb.try_into().unwrap();
+            let Ok(dispatcher_fn) = v8::Local::<v8::Function>::try_from(args.get(1)) else {
+                return throw_type_error(scope, "WebSocket: the dispatcher is not a function");
+            };
 
             // Store the dispatcher callback (persistent, not one-shot)
             ws_state
@@ -138,14 +154,15 @@ pub fn setup_websocket(
             };
             let state = state.clone();
 
-            let ws_id = args.get(0).number_value(scope).unwrap_or(0.0) as u64;
+            let Some(ws_id) = socket_id(scope, args.get(0)) else {
+                return;
+            };
             let data = args.get(1);
 
             let msg = if data.is_string() {
-                let s = data
-                    .to_string(scope)
-                    .map(|s| s.to_rust_string_lossy(scope))
-                    .unwrap_or_default();
+                let Some(s) = string_of(scope, data) else {
+                    return;
+                };
                 WebSocketOutgoing::Text(s)
             } else if data.is_array_buffer() {
                 let ab: v8::Local<v8::ArrayBuffer> = data.try_into().unwrap();
@@ -159,12 +176,10 @@ pub fn setup_websocket(
                 view.copy_contents(&mut buf);
                 WebSocketOutgoing::Binary(buf)
             } else {
-                // Fallback: convert to string
-                let s = data
-                    .to_string(scope)
-                    .map(|s| s.to_rust_string_lossy(scope))
-                    .unwrap_or_default();
-                WebSocketOutgoing::Text(s)
+                return throw_type_error(
+                    scope,
+                    "WebSocket: send takes a string, an ArrayBuffer or a view",
+                );
             };
 
             let _ = state
@@ -185,13 +200,17 @@ pub fn setup_websocket(
             };
             let state = state.clone();
 
-            let ws_id = args.get(0).number_value(scope).unwrap_or(0.0) as u64;
-            let code = args.get(1).number_value(scope).unwrap_or(1000.0) as u16;
-            let reason = args
-                .get(2)
-                .to_string(scope)
-                .map(|s| s.to_rust_string_lossy(scope))
-                .unwrap_or_default();
+            let Some(ws_id) = socket_id(scope, args.get(0)) else {
+                return;
+            };
+            let code = args.get(1);
+            if !code.is_number() {
+                return throw_type_error(scope, "WebSocket: the close code is not a number");
+            }
+            let code = code.number_value(scope).unwrap() as u16;
+            let Some(reason) = string_of(scope, args.get(2)) else {
+                return;
+            };
 
             let _ = state
                 .scheduler_tx

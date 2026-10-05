@@ -52,7 +52,7 @@ pub fn setup_performance(scope: &mut v8::PinScope) {
     let origin = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_secs_f64() * 1000.0)
-        .unwrap_or(0.0);
+        .expect("the wall clock is before 1970");
     let origin = v8::Number::new(scope, origin);
     super::native::register_op(scope, "timeOrigin", origin.into());
 }

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::rc::Rc;
 
+use crate::v8_helpers::throw_type_error;
 use flate2::Compression;
 use flate2::write::DeflateDecoder;
 use flate2::write::DeflateEncoder;
@@ -84,10 +85,14 @@ pub struct CompressionState {
     next_id: RefCell<u32>,
 }
 
-fn throw(scope: &mut v8::PinScope, message: &str) {
-    let msg = v8::String::new(scope, message).unwrap();
-    let exception = v8::Exception::type_error(scope, msg);
-    scope.throw_exception(exception);
+/// The stream id an op was given, or a TypeError thrown in its place.
+fn stream_id(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Option<u32> {
+    if !value.is_uint32() {
+        throw_type_error(scope, "a compression stream op takes a stream id");
+        return None;
+    }
+
+    Some(value.uint32_value(scope).unwrap())
 }
 
 fn bytes_of(value: v8::Local<v8::Value>) -> Option<Vec<u8>> {
@@ -150,7 +155,7 @@ fn compression_start(
     // The namespace is reachable from guest code, so the format is checked here
     // and not only in the constructor that the standard makes throw.
     let Some(codec) = Codec::new(&format, decompress) else {
-        throw(
+        throw_type_error(
             scope,
             &format!("Unsupported compression format: '{}'", format),
         );
@@ -174,10 +179,12 @@ fn compression_push(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let id = args.get(0).uint32_value(scope).unwrap_or(0);
+    let Some(id) = stream_id(scope, args.get(0)) else {
+        return;
+    };
 
     let Some(bytes) = bytes_of(args.get(1)) else {
-        throw(scope, "a compression stream takes a BufferSource");
+        throw_type_error(scope, "a compression stream takes a BufferSource");
         return;
     };
 
@@ -185,7 +192,7 @@ fn compression_push(
     let mut codecs = state.codecs.borrow_mut();
 
     let Some(codec) = codecs.get_mut(&id) else {
-        throw(scope, "the compression stream is already closed");
+        throw_type_error(scope, "the compression stream is already closed");
         return;
     };
 
@@ -197,7 +204,7 @@ fn compression_push(
         Err(err) => {
             codecs.remove(&id);
             drop(codecs);
-            throw(scope, &format!("compression failed: {}", err));
+            throw_type_error(scope, &format!("compression failed: {}", err));
         }
     }
 }
@@ -208,17 +215,19 @@ fn compression_finish(
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let id = args.get(0).uint32_value(scope).unwrap_or(0);
+    let Some(id) = stream_id(scope, args.get(0)) else {
+        return;
+    };
     let codec = state(scope).codecs.borrow_mut().remove(&id);
 
     let Some(codec) = codec else {
-        throw(scope, "the compression stream is already closed");
+        throw_type_error(scope, "the compression stream is already closed");
         return;
     };
 
     match codec.finish() {
         Ok(out) => rv.set(as_uint8array(scope, out).into()),
-        Err(err) => throw(scope, &format!("compression failed: {}", err)),
+        Err(err) => throw_type_error(scope, &format!("compression failed: {}", err)),
     }
 }
 
@@ -228,7 +237,9 @@ fn compression_drop(
     args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
 ) {
-    let id = args.get(0).uint32_value(scope).unwrap_or(0);
+    let Some(id) = stream_id(scope, args.get(0)) else {
+        return;
+    };
     state(scope).codecs.borrow_mut().remove(&id);
 }
 

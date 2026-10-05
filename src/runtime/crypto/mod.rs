@@ -6,6 +6,22 @@ mod pbkdf2;
 mod random;
 mod rsa;
 
+/// Copies a Uint8Array argument out of the V8 heap, or names the argument
+/// that is not one.
+pub(super) fn uint8_array_arg(
+    op: &str,
+    args: &v8::FunctionCallbackArguments,
+    index: i32,
+) -> Result<Vec<u8>, String> {
+    let Ok(array) = v8::Local::<v8::Uint8Array>::try_from(args.get(index)) else {
+        return Err(format!("{op}: argument {index} is not a Uint8Array"));
+    };
+    let mut bytes = vec![0u8; array.byte_length()];
+    array.copy_contents(&mut bytes);
+
+    Ok(bytes)
+}
+
 /// Setup crypto global object with getRandomValues and subtle
 pub fn setup_crypto(scope: &mut v8::PinScope) {
     let context = scope.get_current_context();

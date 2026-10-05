@@ -1,69 +1,87 @@
 use ring::aead;
 use v8;
 
-/// Copies a Uint8Array argument out of the V8 heap.
-fn bytes_arg(args: &v8::FunctionCallbackArguments, index: i32) -> Option<Vec<u8>> {
-    let array = v8::Local::<v8::Uint8Array>::try_from(args.get(index)).ok()?;
-    let mut bytes = vec![0u8; array.byte_length()];
-    array.copy_contents(&mut bytes);
+use super::uint8_array_arg;
+use crate::v8_helpers::{create_array_buffer_from_vec, throw_error, throw_type_error};
 
-    Some(bytes)
+/// Why an op did not answer: an argument was wrong, or the arguments were
+/// right and the cipher refused.
+enum Failure {
+    Argument(String),
+    Operation(&'static str),
+}
+
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Failure::Argument(message)
+    }
+}
+
+fn bytes_arg(args: &v8::FunctionCallbackArguments, index: i32) -> Result<Vec<u8>, String> {
+    uint8_array_arg("AES-GCM", args, index)
 }
 
 /// Ring has no AES-192, so WebCrypto's middle key size is rejected here.
-fn gcm_key(key: &[u8]) -> Option<aead::LessSafeKey> {
+fn gcm_key(key: &[u8]) -> Result<aead::LessSafeKey, String> {
     let algorithm = match key.len() {
         16 => &aead::AES_128_GCM,
         32 => &aead::AES_256_GCM,
-        _ => return None,
+        len => return Err(format!("AES-GCM: the key is {len} bytes, not 16 or 32")),
     };
 
-    Some(aead::LessSafeKey::new(
-        aead::UnboundKey::new(algorithm, key).ok()?,
+    // The length is checked above, and that is all UnboundKey::new checks.
+    Ok(aead::LessSafeKey::new(
+        aead::UnboundKey::new(algorithm, key).unwrap(),
     ))
+}
+
+fn nonce(bytes: &[u8]) -> Result<aead::Nonce, String> {
+    aead::Nonce::try_assume_unique_for_key(bytes)
+        .map_err(|_| format!("AES-GCM: the iv is {} bytes, not 12", bytes.len()))
 }
 
 /// Seals (key, nonce, plaintext, aad) into ciphertext with the tag appended,
 /// which is the layout WebCrypto hands back from encrypt().
-fn seal(args: &v8::FunctionCallbackArguments) -> Option<Vec<u8>> {
+fn seal(args: &v8::FunctionCallbackArguments) -> Result<Vec<u8>, Failure> {
     let key = gcm_key(&bytes_arg(args, 0)?)?;
-    let nonce = aead::Nonce::try_assume_unique_for_key(&bytes_arg(args, 1)?).ok()?;
+    let nonce = nonce(&bytes_arg(args, 1)?)?;
     let aad = bytes_arg(args, 3)?;
     let mut data = bytes_arg(args, 2)?;
 
     key.seal_in_place_append_tag(nonce, aead::Aad::from(&aad), &mut data)
-        .ok()?;
+        .map_err(|_| Failure::Operation("AES-GCM: the plaintext is too long"))?;
 
-    Some(data)
+    Ok(data)
 }
 
-fn open(args: &v8::FunctionCallbackArguments) -> Option<Vec<u8>> {
+fn open(args: &v8::FunctionCallbackArguments) -> Result<Vec<u8>, Failure> {
     let key = gcm_key(&bytes_arg(args, 0)?)?;
-    let nonce = aead::Nonce::try_assume_unique_for_key(&bytes_arg(args, 1)?).ok()?;
+    let nonce = nonce(&bytes_arg(args, 1)?)?;
     let aad = bytes_arg(args, 3)?;
     let mut data = bytes_arg(args, 2)?;
 
     let plain = key
         .open_in_place(nonce, aead::Aad::from(&aad), &mut data)
-        .ok()?;
+        .map_err(|_| Failure::Operation("AES-GCM: decryption failed"))?;
 
-    Some(plain.to_vec())
+    Ok(plain.to_vec())
+}
+
+/// Answers an op with its bytes, or throws what stopped it.
+fn answer(scope: &mut v8::PinScope, mut retval: v8::ReturnValue, result: Result<Vec<u8>, Failure>) {
+    match result {
+        Ok(out) => retval.set(create_array_buffer_from_vec(scope, out).into()),
+        Err(Failure::Argument(message)) => throw_type_error(scope, &message),
+        Err(Failure::Operation(message)) => throw_error(scope, message),
+    }
 }
 
 pub(super) fn setup_aes(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Object>) {
     // Native AES-GCM: __nativeAesGcmSeal/Open(key, iv, data, aad) -> ArrayBuffer
     let seal_fn = v8::Function::new(
         scope,
-        |scope: &mut v8::PinScope,
-         args: v8::FunctionCallbackArguments,
-         mut retval: v8::ReturnValue| {
-            match seal(&args) {
-                Some(out) => {
-                    let buffer = crate::v8_helpers::create_array_buffer_from_vec(scope, out);
-                    retval.set(buffer.into());
-                }
-                None => retval.set(v8::undefined(scope).into()),
-            }
+        |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, retval: v8::ReturnValue| {
+            answer(scope, retval, seal(&args));
         },
     )
     .unwrap();
@@ -73,16 +91,8 @@ pub(super) fn setup_aes(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
 
     let open_fn = v8::Function::new(
         scope,
-        |scope: &mut v8::PinScope,
-         args: v8::FunctionCallbackArguments,
-         mut retval: v8::ReturnValue| {
-            match open(&args) {
-                Some(out) => {
-                    let buffer = crate::v8_helpers::create_array_buffer_from_vec(scope, out);
-                    retval.set(buffer.into());
-                }
-                None => retval.set(v8::undefined(scope).into()),
-            }
+        |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, retval: v8::ReturnValue| {
+            answer(scope, retval, open(&args));
         },
     )
     .unwrap();
@@ -204,13 +214,7 @@ pub(super) fn setup_aes(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
         crypto.subtle.encrypt = function(algorithm, key, data) {
             return new Promise((resolve, reject) => {
                 try {
-                    const result = crypto.subtle.__nativeAesGcmSeal(...__aesGcmArgs(algorithm, key, data));
-
-                    if (!result) {
-                        throw new Error('AES-GCM encrypt failed');
-                    }
-
-                    resolve(result);
+                    resolve(crypto.subtle.__nativeAesGcmSeal(...__aesGcmArgs(algorithm, key, data)));
                 } catch (e) {
                     reject(e);
                 }
@@ -220,13 +224,7 @@ pub(super) fn setup_aes(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
         crypto.subtle.decrypt = function(algorithm, key, data) {
             return new Promise((resolve, reject) => {
                 try {
-                    const result = crypto.subtle.__nativeAesGcmOpen(...__aesGcmArgs(algorithm, key, data));
-
-                    if (!result) {
-                        throw new Error('AES-GCM decrypt failed');
-                    }
-
-                    resolve(result);
+                    resolve(crypto.subtle.__nativeAesGcmOpen(...__aesGcmArgs(algorithm, key, data)));
                 } catch (e) {
                     reject(e);
                 }

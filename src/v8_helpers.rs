@@ -82,3 +82,18 @@ pub fn create_array_buffer_from_vec<'s>(
         v8::ArrayBuffer::with_backing_store(scope, &backing_store)
     }
 }
+
+/// Throws a TypeError at the native call site, so a JS caller sees what the op
+/// was given instead of a value the op chose for it.
+pub(crate) fn throw_type_error(scope: &mut v8::PinScope, message: &str) {
+    let message = v8::String::new(scope, message).unwrap();
+    let exception = v8::Exception::type_error(scope, message);
+    scope.throw_exception(exception);
+}
+
+/// Throws a plain Error: the arguments were right and the operation failed.
+pub(crate) fn throw_error(scope: &mut v8::PinScope, message: &str) {
+    let message = v8::String::new(scope, message).unwrap();
+    let exception = v8::Exception::error(scope, message);
+    scope.throw_exception(exception);
+}

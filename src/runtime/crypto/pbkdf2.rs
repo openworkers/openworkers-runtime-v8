@@ -1,5 +1,61 @@
 use ring::pbkdf2;
+use std::num::NonZeroU32;
 use v8;
+
+use super::uint8_array_arg;
+use crate::v8_helpers::{create_array_buffer_from_vec, throw_type_error};
+
+struct Derivation {
+    algorithm: pbkdf2::Algorithm,
+    password: Vec<u8>,
+    salt: Vec<u8>,
+    iterations: NonZeroU32,
+    length_bytes: usize,
+}
+
+/// The derivation `(hash, password, salt, iterations, lengthBits)` asks for,
+/// or the argument that stops it.
+fn derivation(
+    scope: &mut v8::PinScope,
+    args: &v8::FunctionCallbackArguments,
+) -> Result<Derivation, String> {
+    let Some(hash) = args.get(0).to_string(scope) else {
+        return Err("PBKDF2: the hash name is not a string".into());
+    };
+    let hash = hash.to_rust_string_lossy(scope);
+    let algorithm = match hash.to_uppercase().as_str() {
+        "SHA-1" => pbkdf2::PBKDF2_HMAC_SHA1,
+        "SHA-256" => pbkdf2::PBKDF2_HMAC_SHA256,
+        "SHA-384" => pbkdf2::PBKDF2_HMAC_SHA384,
+        "SHA-512" => pbkdf2::PBKDF2_HMAC_SHA512,
+        _ => return Err(format!("PBKDF2: unknown hash \"{hash}\"")),
+    };
+
+    let password = uint8_array_arg("PBKDF2", args, 1)?;
+    let salt = uint8_array_arg("PBKDF2", args, 2)?;
+
+    let iterations = args.get(3);
+    if !iterations.is_number() {
+        return Err("PBKDF2: the iteration count is not a number".into());
+    }
+    let Some(iterations) = NonZeroU32::new(iterations.number_value(scope).unwrap() as u32) else {
+        return Err("PBKDF2: the iteration count must be at least 1".into());
+    };
+
+    let length = args.get(4);
+    if !length.is_number() {
+        return Err("PBKDF2: the length is not a number".into());
+    }
+    let length_bytes = length.number_value(scope).unwrap() as usize / 8;
+
+    Ok(Derivation {
+        algorithm,
+        password,
+        salt,
+        iterations,
+        length_bytes,
+    })
+}
 
 pub(super) fn setup_pbkdf2(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Object>) {
     // Native PBKDF2: __nativePbkdf2DeriveBits(hashAlgo, password, salt, iterations, lengthBits) -> ArrayBuffer
@@ -8,75 +64,21 @@ pub(super) fn setup_pbkdf2(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::O
         |scope: &mut v8::PinScope,
          args: v8::FunctionCallbackArguments,
          mut retval: v8::ReturnValue| {
-            if args.length() < 5 {
-                retval.set(v8::undefined(scope).into());
-                return;
-            }
-
-            let hash_algo = if let Some(algo_str) = args.get(0).to_string(scope) {
-                algo_str.to_rust_string_lossy(scope)
-            } else {
-                retval.set(v8::undefined(scope).into());
-                return;
+            let derivation = match derivation(scope, &args) {
+                Ok(derivation) => derivation,
+                Err(message) => return throw_type_error(scope, &message),
             };
 
-            let password =
-                if let Ok(uint8_array) = v8::Local::<v8::Uint8Array>::try_from(args.get(1)) {
-                    let len = uint8_array.byte_length();
-                    let mut bytes = vec![0u8; len];
-                    uint8_array.copy_contents(&mut bytes);
-                    bytes
-                } else {
-                    retval.set(v8::undefined(scope).into());
-                    return;
-                };
+            let mut out = vec![0u8; derivation.length_bytes];
+            pbkdf2::derive(
+                derivation.algorithm,
+                derivation.iterations,
+                &derivation.salt,
+                &derivation.password,
+                &mut out,
+            );
 
-            let salt = if let Ok(uint8_array) = v8::Local::<v8::Uint8Array>::try_from(args.get(2)) {
-                let len = uint8_array.byte_length();
-                let mut bytes = vec![0u8; len];
-                uint8_array.copy_contents(&mut bytes);
-                bytes
-            } else {
-                retval.set(v8::undefined(scope).into());
-                return;
-            };
-
-            let iterations = if let Some(n) = args.get(3).number_value(scope) {
-                n as u32
-            } else {
-                retval.set(v8::undefined(scope).into());
-                return;
-            };
-
-            let length_bits = if let Some(n) = args.get(4).number_value(scope) {
-                n as usize
-            } else {
-                retval.set(v8::undefined(scope).into());
-                return;
-            };
-
-            let length_bytes = length_bits / 8;
-
-            let algorithm = match hash_algo.to_uppercase().as_str() {
-                "SHA-1" => pbkdf2::PBKDF2_HMAC_SHA1,
-                "SHA-256" => pbkdf2::PBKDF2_HMAC_SHA256,
-                "SHA-384" => pbkdf2::PBKDF2_HMAC_SHA384,
-                "SHA-512" => pbkdf2::PBKDF2_HMAC_SHA512,
-                _ => {
-                    retval.set(v8::undefined(scope).into());
-                    return;
-                }
-            };
-
-            let iterations = std::num::NonZeroU32::new(iterations)
-                .unwrap_or(std::num::NonZeroU32::new(1).unwrap());
-
-            let mut out = vec![0u8; length_bytes];
-            pbkdf2::derive(algorithm, iterations, &salt, &password, &mut out);
-
-            let array_buffer = crate::v8_helpers::create_array_buffer_from_vec(scope, out);
-
-            retval.set(array_buffer.into());
+            retval.set(create_array_buffer_from_vec(scope, out).into());
         },
     )
     .unwrap();
@@ -162,15 +164,9 @@ pub(super) fn setup_pbkdf2(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::O
                         ? algorithm.hash
                         : algorithm.hash.name;
 
-                    const result = crypto.subtle.__nativePbkdf2DeriveBits(
+                    resolve(crypto.subtle.__nativePbkdf2DeriveBits(
                         hashName, baseKey.__keyData, salt, iterations, length
-                    );
-
-                    if (result) {
-                        resolve(result);
-                    } else {
-                        reject(new Error('PBKDF2 deriveBits failed'));
-                    }
+                    ));
                 } catch (e) {
                     reject(e);
                 }
