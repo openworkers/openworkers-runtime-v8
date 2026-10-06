@@ -77,8 +77,8 @@ mod linux {
             };
 
             if ret != 0 {
-                eprintln!(
-                    "[openworkers-runtime-v8] Failed to create CPU timer: {}",
+                tracing::error!(
+                    "Failed to create CPU timer: {}",
                     std::io::Error::last_os_error()
                 );
                 return None;
@@ -101,8 +101,8 @@ mod linux {
                 unsafe { libc::timer_settime(timer_id, 0, &timer_spec, std::ptr::null_mut()) };
 
             if ret != 0 {
-                eprintln!(
-                    "[openworkers-runtime-v8] Failed to arm CPU timer: {}",
+                tracing::error!(
+                    "Failed to arm CPU timer: {}",
                     std::io::Error::last_os_error()
                 );
                 unsafe { libc::timer_delete(timer_id) };
@@ -238,16 +238,16 @@ mod linux {
 
                 if let Some(enforcer_data) = data {
                     if !enforcer_data.terminated.swap(true, Ordering::SeqCst) {
-                        eprintln!(
-                            "[openworkers-runtime-v8] CPU time limit exceeded for enforcer #{}, terminating isolate",
+                        tracing::warn!(
+                            "CPU time limit exceeded for enforcer #{}, terminating isolate",
                             enforcer_id
                         );
                         enforcer_data.isolate_handle.terminate_execution();
                     }
                 } else {
                     // Timer fired but enforcer was already dropped (normal race condition)
-                    eprintln!(
-                        "[openworkers-runtime-v8] SIGALRM for unknown enforcer #{} (already dropped?)",
+                    tracing::warn!(
+                        "SIGALRM for unknown enforcer #{} (already dropped?)",
                         enforcer_id
                     );
                 }

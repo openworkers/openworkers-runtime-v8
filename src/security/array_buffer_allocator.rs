@@ -78,6 +78,8 @@ impl CustomAllocator {
 
 /// Called by V8 when JS code does `new ArrayBuffer(n)` or `new Uint8Array(n)`.
 /// Returns a pointer to zeroed memory, or NULL if the limit is exceeded.
+// V8 calls this from inside its allocator, so the report stays off the tracing
+// subscriber and its locks.
 #[allow(clippy::unnecessary_cast)]
 unsafe extern "C" fn allocate(allocator: &CustomAllocator, n: usize) -> *mut c_void {
     // Optimistically add n bytes to our running total (atomic, thread-safe)
@@ -112,6 +114,8 @@ unsafe extern "C" fn allocate(allocator: &CustomAllocator, n: usize) -> *mut c_v
 
 /// Called by V8 for uninitialized allocation (performance optimization).
 /// Same as `allocate` but doesn't zero the memory.
+// V8 calls this from inside its allocator, so the report stays off the tracing
+// subscriber and its locks.
 #[allow(clippy::unnecessary_cast)]
 #[allow(clippy::uninit_vec)]
 unsafe extern "C" fn allocate_uninitialized(allocator: &CustomAllocator, n: usize) -> *mut c_void {

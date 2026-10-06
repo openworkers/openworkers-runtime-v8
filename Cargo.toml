@@ -89,3 +89,10 @@ rand = "0.10"
 # ESM -> classic script lowering for the SSR benchmarks
 openworkers-transform = { git = "https://github.com/openworkers/openworkers-transform", tag = "v0.1.0" }
 
+
+[lints.clippy]
+# A hit on the clippy.toml list is an error, not a warning to scroll past.
+disallowed_methods = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"

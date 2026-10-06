@@ -356,7 +356,7 @@ impl Runtime {
                 .to_string(&tc_scope)
                 .map(|s| s.to_rust_string_lossy(&tc_scope))
                 .unwrap_or_else(|| "Unknown exception".to_string());
-            eprintln!(
+            tracing::warn!(
                 "Exception during microtask processing: {}",
                 exception_string
             );
@@ -414,7 +414,7 @@ impl Runtime {
                 .to_string(&tc_scope)
                 .map(|s| s.to_rust_string_lossy(&tc_scope))
                 .unwrap_or_else(|| "Unknown exception".to_string());
-            eprintln!(
+            tracing::warn!(
                 "Exception during microtask processing: {}",
                 exception_string
             );

@@ -102,8 +102,8 @@ impl TimeoutGuard {
                     }
                     // Timeout expired - terminate execution
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        eprintln!(
-                            "[openworkers-runtime-v8] Wall-clock timeout after {}ms, terminating isolate",
+                        tracing::warn!(
+                            "Wall-clock timeout after {}ms, terminating isolate",
                             timeout_ms
                         );
                         triggered_clone.store(true, Ordering::SeqCst);
@@ -156,10 +156,7 @@ impl Drop for TimeoutGuard {
         if let Some(handle) = self.thread_handle.take() {
             // Join the thread - should complete quickly after cancellation
             if let Err(e) = handle.join() {
-                eprintln!(
-                    "[openworkers-runtime-v8] Timeout watchdog thread panicked: {:?}",
-                    e
-                );
+                tracing::error!("Timeout watchdog thread panicked: {:?}", e);
             }
         }
     }

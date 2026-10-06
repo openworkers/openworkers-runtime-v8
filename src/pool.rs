@@ -170,7 +170,9 @@ struct CachedContext {
     env_updated_at: Option<i64>,
 }
 
-/// Get the max context reuses from CONTEXT_MAX_REUSES env var
+/// A tuning that `PinnedPoolConfig` does not carry, so it comes from the
+/// environment.
+#[allow(clippy::disallowed_methods)]
 fn context_max_reuses() -> u32 {
     static MAX_REUSES: OnceLock<u32> = OnceLock::new();
     *MAX_REUSES.get_or_init(|| {
