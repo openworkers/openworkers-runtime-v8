@@ -56,7 +56,7 @@ pub struct ExecutionContext {
     /// Per-request state (V8 context, channels, callbacks, streams)
     pub request: RequestContext,
 
-    /// Fair FIFO queue for V8 Locker when multiplexing (None for simple pool path)
+    /// Fair FIFO queue for the V8 Locker; None when the isolate serves one request at a time
     pub(crate) async_waiter: Option<Arc<AsyncWaiter>>,
 }
 
@@ -836,7 +836,7 @@ impl ExecutionContext {
                 return Poll::Ready(Err("Execution terminated".to_string()));
             }
 
-            // -- Fair queue gate (if multiplexing enabled) --
+            // -- Fair queue gate (when requests share the isolate) --
             // When multiple requests share an isolate, only one can hold the
             // V8 Locker at a time. Others wait in FIFO order.
             if let Some(ref waiter) = async_waiter

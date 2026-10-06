@@ -37,10 +37,9 @@ execute_pinned(PinnedExecuteRequest {
 ### Pinned Pool (Recommended)
 
 Thread-local isolate pool with per-owner isolation and warm context caching.
-Two compile-time variants:
-
-- **Simple** (default): 1 request per isolate (exclusive `AtomicBool`)
-- **Multiplexed** (`--features multiplexing`): N concurrent requests per isolate via `AsyncWaiter` fair FIFO queue
+`PinnedPoolConfig::max_concurrent_per_isolate` sets how many requests an isolate
+serves at once: 1 gives each request the isolate to itself, and more lets
+requests share it through the `AsyncWaiter` fair FIFO queue.
 
 ### Worker (Maximum Isolation)
 

@@ -1,100 +1,56 @@
 //! Isolate pool with per-owner isolation.
 //!
-//! Two modes selected at compile time:
+//! An isolate serves `max_concurrent_per_isolate` requests at once. At 1 a
+//! request has the isolate to itself; above 1 the requests share it and take
+//! turns on the V8 Locker through the `AsyncWaiter` fair queue.
 //!
-//! - **Simple** (default): 1 request per isolate (exclusive `AtomicBool`).
-//! - **Multiplexed** (`--features multiplexing`): N concurrent requests per
-//!   isolate via `AtomicUsize` + `AsyncWaiter` fair FIFO queue.
-//!
-//! Common features (both modes):
 //! - Thread-local pools (no global mutex contention)
 //! - Owner-based isolation (worker_id or tenant_id)
 //! - LRU eviction when pool is full
 //! - Warm context caching for sub-ms request handling
 
-#[cfg(not(feature = "multiplexing"))]
-use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::sync::Mutex;
 
 use crate::LockerManagedIsolate;
+use crate::async_waiter::AsyncWaiter;
 use crate::execution_context::ExecutionContext;
 use crate::pool_common::{LocalPoolStats, PinnedExecuteRequest, PinnedPoolConfig, PinnedPoolStats};
 use crate::pool_policy::{self, Acquire, ContextKey, IsolateLoad, Limits, PoolLoad, Refusal};
 use crate::request_context::RequestContext;
 use openworkers_core::{OperationsHandle, RuntimeLimits, TerminationReason};
 
-// ============================================================================
-// Concurrency State (cfg-gated)
-// ============================================================================
-
-/// Simple mode: exclusive access via AtomicBool (1 request per isolate).
-#[cfg(not(feature = "multiplexing"))]
+/// The slots of one isolate and, when there is more than one, the queue that
+/// orders their turns on the V8 Locker.
 struct ConcurrencyState {
-    in_use: AtomicBool,
-}
-
-#[cfg(not(feature = "multiplexing"))]
-impl ConcurrencyState {
-    fn new(_max_concurrent: usize) -> Self {
-        Self {
-            in_use: AtomicBool::new(false),
-        }
-    }
-
-    fn try_acquire(&self) -> bool {
-        self.in_use
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-    }
-
-    fn release(&self) {
-        self.in_use.store(false, Ordering::Release);
-    }
-
-    fn is_free(&self) -> bool {
-        !self.in_use.load(Ordering::Acquire)
-    }
-
-    fn has_capacity(&self) -> bool {
-        self.is_free()
-    }
-
-    fn async_waiter(&self) -> Option<Arc<crate::async_waiter::AsyncWaiter>> {
-        None
-    }
-}
-
-/// Multiplexed mode: N concurrent requests via AtomicUsize + AsyncWaiter fair queue.
-#[cfg(feature = "multiplexing")]
-struct ConcurrencyState {
-    active_count: AtomicUsize,
+    active: AtomicUsize,
     max_concurrent: usize,
-    async_waiter: Arc<crate::async_waiter::AsyncWaiter>,
+    /// A lone request never waits for the Locker, so a single slot has no
+    /// queue and skips the fair-queue gate on every poll.
+    async_waiter: Option<Arc<AsyncWaiter>>,
 }
 
-#[cfg(feature = "multiplexing")]
 impl ConcurrencyState {
     fn new(max_concurrent: usize) -> Self {
         Self {
-            active_count: AtomicUsize::new(0),
+            active: AtomicUsize::new(0),
             max_concurrent,
-            async_waiter: Arc::new(crate::async_waiter::AsyncWaiter::new()),
+            async_waiter: (max_concurrent > 1).then(|| Arc::new(AsyncWaiter::new())),
         }
     }
 
     fn try_acquire(&self) -> bool {
         loop {
-            let current = self.active_count.load(Ordering::Acquire);
+            let current = self.active.load(Ordering::Acquire);
 
             if current >= self.max_concurrent {
                 return false;
             }
 
             if self
-                .active_count
+                .active
                 .compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
@@ -104,19 +60,19 @@ impl ConcurrencyState {
     }
 
     fn release(&self) {
-        self.active_count.fetch_sub(1, Ordering::Release);
+        self.active.fetch_sub(1, Ordering::Release);
     }
 
     fn is_free(&self) -> bool {
-        self.active_count.load(Ordering::Acquire) == 0
+        self.active.load(Ordering::Acquire) == 0
     }
 
     fn has_capacity(&self) -> bool {
-        self.active_count.load(Ordering::Acquire) < self.max_concurrent
+        self.active.load(Ordering::Acquire) < self.max_concurrent
     }
 
-    fn async_waiter(&self) -> Option<Arc<crate::async_waiter::AsyncWaiter>> {
-        Some(Arc::clone(&self.async_waiter))
+    fn async_waiter(&self) -> Option<Arc<AsyncWaiter>> {
+        self.async_waiter.clone()
     }
 }
 
@@ -131,6 +87,10 @@ static POOL_CONFIG: OnceLock<PinnedPoolConfig> = OnceLock::new();
 ///
 /// Must be called once at startup, before any pool access.
 pub fn init_pinned_pool(config: PinnedPoolConfig) {
+    assert!(
+        config.max_concurrent_per_isolate >= 1,
+        "max_concurrent_per_isolate must be at least 1"
+    );
     let max_per_thread = config.max_per_thread;
     let max_per_owner = config.max_per_owner;
     let max_concurrent = config.max_concurrent_per_isolate;
@@ -188,13 +148,9 @@ struct TaggedIsolateInner {
 }
 
 /// A tagged isolate with owner tracking and concurrency control.
-///
-/// Each isolate is tagged with an owner_id. Concurrency is managed by
-/// `ConcurrencyState` (exclusive `AtomicBool` or multiplexed `AtomicUsize`).
 struct TaggedIsolate {
     /// Owner identifier (immutable after creation)
     owner_id: String,
-    /// Concurrency control (cfg-gated: exclusive or multiplexed)
     concurrency: ConcurrencyState,
     /// The V8 isolate, shared with every ExecutionContext that runs in it
     /// and entered through its Locker.
@@ -562,7 +518,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
         Arc::clone(&pooled.memory_limit_hit),
     );
 
-    // Get async_waiter from concurrency state (None for simple, Some for multiplexed)
+    // None when the isolate serves one request at a time
     let async_waiter = isolate_arc.concurrency.async_waiter();
 
     // Lock inner briefly for bookkeeping and cached context lookup
@@ -847,10 +803,8 @@ mod tests {
         assert!(isolate.try_acquire());
     }
 
-    #[cfg(feature = "multiplexing")]
     #[test]
     fn test_tagged_isolate_multiplexing() {
-        // Test that max_concurrent > 1 allows multiple concurrent acquires
         let limits = openworkers_core::RuntimeLimits::default();
         let isolate = TaggedIsolate::new("test_owner".to_string(), limits, 3, 10);
 

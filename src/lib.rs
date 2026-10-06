@@ -6,14 +6,10 @@
 //!
 //! ### Pinned Pool (Recommended for Production)
 //!
-//! Thread-local isolate pool with per-owner isolation. Two implementations
-//! selected at compile time via feature flags:
-//!
-//! - **Simple** (default): One request per isolate (exclusive access).
-//!   Best for most workloads.
-//! - **Multiplexed** (`--features multiplexing`): Multiple concurrent requests
-//!   per isolate via `AsyncWaiter` fair queue. Best for high-concurrency,
-//!   I/O-bound workers.
+//! Thread-local isolate pool with per-owner isolation.
+//! `PinnedPoolConfig::max_concurrent_per_isolate` sets how many requests an
+//! isolate serves at once: 1 gives each request the isolate to itself, and
+//! more lets I/O-bound requests share it through the `AsyncWaiter` fair queue.
 //!
 //! ```ignore
 //! use openworkers_runtime_v8::{init_pinned_pool, execute_pinned, PinnedPoolConfig, PinnedExecuteRequest};

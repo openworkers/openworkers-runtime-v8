@@ -96,7 +96,7 @@ async fn bench_pinned_cold_start() {
         init_pinned_pool(PinnedPoolConfig {
             max_per_thread: 100,
             max_per_owner: None,
-            max_concurrent_per_isolate: 20,
+            max_concurrent_per_isolate: 1,
             max_cached_contexts: 10,
             overcommit: true,
             max_context_reuses: 1000,
@@ -152,7 +152,7 @@ async fn bench_pinned_warm_start() {
         init_pinned_pool(PinnedPoolConfig {
             max_per_thread: 100,
             max_per_owner: None,
-            max_concurrent_per_isolate: 20,
+            max_concurrent_per_isolate: 1,
             max_cached_contexts: 10,
             overcommit: true,
             max_context_reuses: 1000,

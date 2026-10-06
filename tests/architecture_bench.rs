@@ -138,7 +138,7 @@ async fn bench_pinned_standard() {
         init_pinned_pool(PinnedPoolConfig {
             max_per_thread: 10,
             max_per_owner: None,
-            max_concurrent_per_isolate: 20,
+            max_concurrent_per_isolate: 1,
             max_cached_contexts: 10,
             overcommit: true,
             max_context_reuses: 1000,
@@ -212,7 +212,7 @@ async fn bench_pinned_cpu_bound() {
         init_pinned_pool(PinnedPoolConfig {
             max_per_thread: 10,
             max_per_owner: None,
-            max_concurrent_per_isolate: 20,
+            max_concurrent_per_isolate: 1,
             max_cached_contexts: 10,
             overcommit: true,
             max_context_reuses: 1000,
@@ -273,7 +273,7 @@ async fn bench_pinned_warm_cache() {
         init_pinned_pool(PinnedPoolConfig {
             max_per_thread: 10,
             max_per_owner: None,
-            max_concurrent_per_isolate: 20,
+            max_concurrent_per_isolate: 1,
             max_cached_contexts: 10,
             overcommit: true,
             max_context_reuses: 1000,

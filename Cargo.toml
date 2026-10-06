@@ -16,9 +16,6 @@ sandbox = ["v8/v8_enable_sandbox", "serde_v8/v8_enable_sandbox"]
 # V8's SharedHeapDeserializer::DeserializeStringTable not being thread-safe.
 # Code cache (always enabled) is the safe alternative (skips parse+compile only).
 unsafe-worker-snapshot = []
-# Multiplexed isolate pool: multiple concurrent requests per isolate via Locker + AsyncWaiter.
-# Without this feature, the simple pool is used (1 request per isolate, no Locker).
-multiplexing = []
 
 [dependencies]
 

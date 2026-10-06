@@ -79,7 +79,7 @@ fn bench_pinned_pool(config: &BenchConfig) -> BenchResult {
     init_pinned_pool(PinnedPoolConfig {
         max_per_thread: config.pool_size,
         max_per_owner: None,
-        max_concurrent_per_isolate: 20,
+        max_concurrent_per_isolate: 1,
         max_cached_contexts: 10,
         overcommit: true,
         max_context_reuses: 1000,

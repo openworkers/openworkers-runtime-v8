@@ -18,11 +18,9 @@ See [architecture.md](./architecture.md) for historical benchmark data.
 
 Thread-local isolate pool with per-owner isolation. This is the production mode.
 
-Two implementations selected at compile time:
-
-- **Simple** (default): One request per isolate (exclusive access).
-- **Multiplexed** (`--features multiplexing`): Multiple concurrent requests per isolate
-  via `AsyncWaiter` fair FIFO queue.
+`PinnedPoolConfig::max_concurrent_per_isolate` sets how many requests an isolate
+serves at once: 1 gives each request the isolate to itself, and more lets requests
+share it through the `AsyncWaiter` fair FIFO queue.
 
 ```rust
 use openworkers_runtime_v8::{init_pinned_pool, execute_pinned, PinnedPoolConfig, PinnedExecuteRequest};

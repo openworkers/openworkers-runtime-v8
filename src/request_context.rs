@@ -1,8 +1,8 @@
 //! Per-request state for V8 execution contexts.
 //!
 //! RequestContext holds all state specific to a single HTTP request or task
-//! execution. Multiple RequestContexts can share the same V8 isolate when
-//! intra-isolate multiplexing is enabled.
+//! execution. Multiple RequestContexts share one V8 isolate when
+//! `max_concurrent_per_isolate` is above 1.
 //!
 //! Binding state isolation is automatic: `store_state!`/`get_state!` macros
 //! reach the `ContextSlots` this struct owns, one per v8::Context.

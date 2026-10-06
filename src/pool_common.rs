@@ -1,4 +1,4 @@
-//! Shared types between pool implementations (simple and multiplexed).
+//! The pool configuration, request and stats types.
 
 use openworkers_core::{Event, OperationsHandle, RuntimeLimits, Script};
 
@@ -10,8 +10,8 @@ pub struct PinnedPoolConfig {
     /// Maximum isolates per owner per thread (prevents one tenant from monopolizing).
     /// None means no limit (bounded only by max_per_thread).
     pub max_per_owner: Option<usize>,
-    /// Maximum concurrent requests per isolate (multiplexing).
-    /// Only used with the `multiplexing` feature. Simple pool always uses 1.
+    /// Requests an isolate serves at once, at least 1. At 1 a request has the
+    /// isolate to itself; above 1 the requests share it through the fair queue.
     pub max_concurrent_per_isolate: usize,
     /// Maximum cached contexts per isolate (warm hit pool).
     /// Limits memory usage per isolate.
