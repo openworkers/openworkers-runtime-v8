@@ -140,6 +140,8 @@ async fn bench_pinned_standard() {
             max_per_owner: None,
             max_concurrent_per_isolate: 20,
             max_cached_contexts: 10,
+            overcommit: true,
+            max_context_reuses: 1000,
             limits: RuntimeLimits::default(),
         });
 
@@ -212,6 +214,8 @@ async fn bench_pinned_cpu_bound() {
             max_per_owner: None,
             max_concurrent_per_isolate: 20,
             max_cached_contexts: 10,
+            overcommit: true,
+            max_context_reuses: 1000,
             limits: RuntimeLimits::default(),
         });
 
@@ -271,6 +275,8 @@ async fn bench_pinned_warm_cache() {
             max_per_owner: None,
             max_concurrent_per_isolate: 20,
             max_cached_contexts: 10,
+            overcommit: true,
+            max_context_reuses: 1000,
             limits: RuntimeLimits::default(),
         });
 

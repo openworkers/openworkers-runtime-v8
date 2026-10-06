@@ -97,6 +97,8 @@ async fn a_leftover_op_does_not_answer_the_next_request() {
             max_per_owner: None,
             max_concurrent_per_isolate: 20,
             max_cached_contexts: 10,
+            overcommit: true,
+            max_context_reuses: 1000,
             limits: RuntimeLimits::default(),
         });
 

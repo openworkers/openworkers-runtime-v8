@@ -23,6 +23,7 @@ use tokio::sync::Mutex;
 use crate::LockerManagedIsolate;
 use crate::execution_context::ExecutionContext;
 use crate::pool_common::{LocalPoolStats, PinnedExecuteRequest, PinnedPoolConfig, PinnedPoolStats};
+use crate::pool_policy::{self, Acquire, ContextKey, IsolateLoad, Limits, PoolLoad, Refusal};
 use crate::request_context::RequestContext;
 use openworkers_core::{OperationsHandle, RuntimeLimits, TerminationReason};
 
@@ -56,6 +57,10 @@ impl ConcurrencyState {
 
     fn is_free(&self) -> bool {
         !self.in_use.load(Ordering::Acquire)
+    }
+
+    fn has_capacity(&self) -> bool {
+        self.is_free()
     }
 
     fn async_waiter(&self) -> Option<Arc<crate::async_waiter::AsyncWaiter>> {
@@ -107,13 +112,14 @@ impl ConcurrencyState {
         self.active_count.load(Ordering::Acquire) == 0
     }
 
+    fn has_capacity(&self) -> bool {
+        self.active_count.load(Ordering::Acquire) < self.max_concurrent
+    }
+
     fn async_waiter(&self) -> Option<Arc<crate::async_waiter::AsyncWaiter>> {
         Some(Arc::clone(&self.async_waiter))
     }
 }
-
-/// Default max reuses before discarding a cached context (prevents memory growth)
-const DEFAULT_CONTEXT_MAX_REUSES: u32 = 1000;
 
 // ============================================================================
 // Configuration
@@ -168,19 +174,6 @@ struct CachedContext {
     last_used: Instant,
     ops: OperationsHandle,
     env_updated_at: Option<i64>,
-}
-
-/// A tuning that `PinnedPoolConfig` does not carry, so it comes from the
-/// environment.
-#[allow(clippy::disallowed_methods)]
-fn context_max_reuses() -> u32 {
-    static MAX_REUSES: OnceLock<u32> = OnceLock::new();
-    *MAX_REUSES.get_or_init(|| {
-        std::env::var("CONTEXT_MAX_REUSES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_CONTEXT_MAX_REUSES)
-    })
 }
 
 /// Inner data for a pooled isolate (behind Mutex)
@@ -263,6 +256,21 @@ impl TaggedIsolate {
     fn is_free(&self) -> bool {
         self.concurrency.is_free()
     }
+
+    /// What the policy sees. `try_lock` fails only while a request's own
+    /// bookkeeping holds `inner`, and that request is not idle.
+    fn load(&self) -> IsolateLoad<'_> {
+        let idle_since = self
+            .is_free()
+            .then(|| self.inner.try_lock().ok().map(|inner| inner.last_used))
+            .flatten();
+
+        IsolateLoad {
+            owner: &self.owner_id,
+            has_capacity: self.concurrency.has_capacity(),
+            idle_since,
+        }
+    }
 }
 
 impl Drop for TaggedIsolate {
@@ -286,184 +294,113 @@ struct AcquireResult {
     cache_hit: bool,
 }
 
-/// Thread-local pool supporting per-owner isolation.
+/// Thread-local pool supporting per-owner isolation. The decisions are in
+/// `pool_policy`; this performs them.
 struct ThreadLocalPool {
     /// All isolates in this pool
     isolates: Vec<Arc<TaggedIsolate>>,
-    /// Maximum isolates in this pool
-    max_isolates: usize,
-    /// Maximum isolates per owner (None = no limit)
-    max_per_owner: Option<usize>,
+    policy: Limits,
     /// Runtime limits for new isolates
     limits: RuntimeLimits,
 }
 
 impl ThreadLocalPool {
-    fn new(max_isolates: usize, max_per_owner: Option<usize>, limits: RuntimeLimits) -> Self {
+    fn new(policy: Limits, limits: RuntimeLimits) -> Self {
         Self {
-            isolates: Vec::with_capacity(max_isolates),
-            max_isolates,
-            max_per_owner,
+            isolates: Vec::with_capacity(policy.max_isolates),
+            policy,
             limits,
         }
     }
 
-    /// Count isolates for a given owner
-    fn count_for_owner(&self, owner_id: &str) -> usize {
-        self.isolates
-            .iter()
-            .filter(|i| i.owner_id == owner_id)
-            .count()
-    }
-
-    /// Check if owner has reached their per-owner limit
-    fn owner_at_limit(&self, owner_id: &str) -> bool {
-        match self.max_per_owner {
-            Some(limit) => self.count_for_owner(owner_id) >= limit,
-            None => false,
+    fn load(&self) -> PoolLoad<'_> {
+        PoolLoad {
+            isolates: self.isolates.iter().map(|isolate| isolate.load()).collect(),
+            limits: self.policy,
         }
     }
 
-    /// Acquire an isolate for the given owner.
-    ///
-    /// Strategy:
-    /// 1. Find an isolate with capacity for the same owner
-    /// 2. Create new isolate if under pool/owner limit
-    /// 3. Evict LRU free isolate if pool is full
-    /// 4. Overcommit if all isolates are in use
-    #[allow(clippy::arc_with_non_send_sync)]
-    fn acquire(&mut self, owner_id: &str) -> Option<AcquireResult> {
-        let config = get_config();
-
-        // 1. Try to find an isolate with capacity for the same owner
-        for arc in &self.isolates {
-            if arc.owner_id == owner_id && arc.try_acquire() {
+    fn acquire(&mut self, owner_id: &str) -> Result<AcquireResult, Refusal> {
+        match pool_policy::acquire(&self.load(), owner_id) {
+            Acquire::Reuse(index) => {
+                let isolate = Arc::clone(&self.isolates[index]);
+                // The pool is thread-local, so nothing took the slot since the
+                // snapshot.
+                assert!(isolate.try_acquire());
                 tracing::debug!(
                     "Cache HIT: acquired existing isolate for owner {}",
+                    owner_id
+                );
+
+                Ok(AcquireResult {
+                    isolate,
+                    cache_hit: true,
+                })
+            }
+            Acquire::Build => {
+                tracing::debug!(
+                    "Cache MISS: creating new isolate for owner {} (pool: {}/{})",
+                    owner_id,
+                    self.isolates.len() + 1,
+                    self.policy.max_isolates,
+                );
+
+                Ok(self.build(owner_id))
+            }
+            Acquire::Evict(index) => {
+                let old = self.isolates.remove(index);
+                tracing::info!(
+                    "LRU eviction: evicting isolate for owner {}, replacing with {}",
+                    old.owner_id,
                     owner_id,
                 );
-                return Some(AcquireResult {
-                    isolate: Arc::clone(arc),
-                    cache_hit: true,
-                });
+
+                Ok(self.build(owner_id))
+            }
+            Acquire::Overcommit => {
+                tracing::warn!(
+                    "Pool overcommit: all {} isolates in use, creating extra for owner {}",
+                    self.isolates.len(),
+                    owner_id,
+                );
+
+                Ok(self.build(owner_id))
+            }
+            Acquire::Refuse(refusal) => {
+                tracing::debug!("Pool refused owner {}: {}", owner_id, refusal.message());
+
+                Err(refusal)
             }
         }
+    }
 
-        // Check if owner has reached their isolate limit
-        if self.owner_at_limit(owner_id) {
-            tracing::debug!(
-                "Owner {} at isolate limit ({:?}), all at capacity",
-                owner_id,
-                self.max_per_owner,
-            );
-            return None;
-        }
-
-        // 2. Create new isolate if under pool limit
-        if self.isolates.len() < self.max_isolates {
-            tracing::debug!(
-                "Cache MISS: creating new isolate for owner {} (pool: {}/{}, owner: {}/{:?})",
-                owner_id,
-                self.isolates.len() + 1,
-                self.max_isolates,
-                self.count_for_owner(owner_id) + 1,
-                self.max_per_owner,
-            );
-
-            let entry = Arc::new(TaggedIsolate::new(
-                owner_id.to_string(),
-                self.limits.clone(),
-                config.max_concurrent_per_isolate,
-                config.max_cached_contexts,
-            ));
-            entry.try_acquire();
-            self.isolates.push(Arc::clone(&entry));
-
-            return Some(AcquireResult {
-                isolate: entry,
-                cache_hit: false,
-            });
-        }
-
-        // 3. Pool full — evict LRU (oldest last_used among FREE isolates)
-        let mut lru_idx: Option<usize> = None;
-        let mut oldest = Instant::now();
-
-        for (i, arc) in self.isolates.iter().enumerate() {
-            if arc.is_free()
-                && let Ok(guard) = arc.inner.try_lock()
-                && guard.last_used < oldest
-            {
-                oldest = guard.last_used;
-                lru_idx = Some(i);
-            }
-        }
-
-        if let Some(idx) = lru_idx {
-            let old = self.isolates.remove(idx);
-            let evicted_owner = old.owner_id.clone();
-            tracing::info!(
-                "LRU eviction: evicting isolate for owner {}, replacing with {}",
-                evicted_owner,
-                owner_id,
-            );
-
-            let entry = Arc::new(TaggedIsolate::new(
-                owner_id.to_string(),
-                self.limits.clone(),
-                config.max_concurrent_per_isolate,
-                config.max_cached_contexts,
-            ));
-            entry.try_acquire();
-            self.isolates.push(Arc::clone(&entry));
-
-            return Some(AcquireResult {
-                isolate: entry,
-                cache_hit: false,
-            });
-        }
-
-        // 4. All isolates in use — overcommit (temporary over-limit)
-        tracing::warn!(
-            "Pool overcommit: all {} isolates in use, creating extra for owner {}",
-            self.isolates.len(),
-            owner_id,
-        );
-
-        let entry = Arc::new(TaggedIsolate::new(
+    /// Build an isolate for the owner with its first slot taken.
+    #[allow(clippy::arc_with_non_send_sync)]
+    fn build(&mut self, owner_id: &str) -> AcquireResult {
+        let config = get_config();
+        let isolate = Arc::new(TaggedIsolate::new(
             owner_id.to_string(),
             self.limits.clone(),
             config.max_concurrent_per_isolate,
             config.max_cached_contexts,
         ));
-        entry.try_acquire();
-        self.isolates.push(Arc::clone(&entry));
+        assert!(isolate.try_acquire());
+        self.isolates.push(Arc::clone(&isolate));
 
-        Some(AcquireResult {
-            isolate: entry,
+        AcquireResult {
+            isolate,
             cache_hit: false,
-        })
+        }
     }
 
-    /// Clean up over-limit isolates that are free.
-    /// Called after releasing to reclaim overcommitted isolates.
-    fn cleanup_overlimit(&mut self) {
-        if self.isolates.len() <= self.max_isolates {
-            return;
-        }
-
-        let mut i = 0;
-
-        while i < self.isolates.len() && self.isolates.len() > self.max_isolates {
-            if self.isolates[i].is_free() {
-                let removed = self.isolates.remove(i);
-                tracing::info!(
-                    "Cleanup: removed over-limit isolate for owner {}",
-                    removed.owner_id
-                );
-            } else {
-                i += 1;
-            }
+    /// Drop the idle isolates past the ceiling.
+    fn reclaim(&mut self) {
+        for index in pool_policy::reclaim(&self.load()).into_iter().rev() {
+            let removed = self.isolates.remove(index);
+            tracing::info!(
+                "Cleanup: removed over-limit isolate for owner {}",
+                removed.owner_id
+            );
         }
     }
 
@@ -474,7 +411,7 @@ impl ThreadLocalPool {
         LocalPoolStats {
             total,
             in_use,
-            capacity: self.max_isolates,
+            capacity: self.policy.max_isolates,
         }
     }
 }
@@ -492,8 +429,11 @@ fn ensure_pool_initialized() {
         if pool_opt.is_none() {
             let config = get_config();
             *pool_opt = Some(ThreadLocalPool::new(
-                config.max_per_thread,
-                config.max_per_owner,
+                Limits {
+                    max_isolates: config.max_per_thread,
+                    max_per_owner: config.max_per_owner,
+                    overcommit: config.overcommit,
+                },
                 config.limits.clone(),
             ));
             tracing::debug!(
@@ -505,10 +445,8 @@ fn ensure_pool_initialized() {
     });
 }
 
-/// Acquire an isolate from the local pool.
-///
-/// Returns `Some((isolate, cache_hit))` if successful, or `None` if at capacity.
-fn acquire_from_local_pool(owner_id: &str) -> Option<(Arc<TaggedIsolate>, bool)> {
+/// Acquire an isolate from the local pool, or the refusal that stops it.
+fn acquire_from_local_pool(owner_id: &str) -> Result<(Arc<TaggedIsolate>, bool), Refusal> {
     LOCAL_POOL.with(|pool_cell| {
         let mut pool_opt = pool_cell.borrow_mut();
         let pool = pool_opt.as_mut().expect("Pool not initialized");
@@ -527,7 +465,7 @@ fn release_to_local_pool(isolate: &TaggedIsolate) {
         let mut pool_opt = pool_cell.borrow_mut();
 
         if let Some(pool) = pool_opt.as_mut() {
-            pool.cleanup_overlimit();
+            pool.reclaim();
         }
     });
 }
@@ -614,9 +552,9 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
     // Ensure pool is initialized
     ensure_pool_initialized();
 
-    // Fail-fast: try to acquire an isolate, return error if at capacity
+    // Fail-fast: the runner gets a refusal as TerminationReason::Other.
     let (isolate_arc, is_hit) = acquire_from_local_pool(&owner_id)
-        .ok_or_else(|| TerminationReason::Other("Pool at capacity".to_string()))?;
+        .map_err(|refusal| TerminationReason::Other(refusal.message().to_string()))?;
 
     if is_hit {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
@@ -655,22 +593,26 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
             inner.total_requests,
         );
 
-        // ── Warm hit check ─────────────────────────────────────────────
-        let max_reuses = context_max_reuses();
-        let mut found_idx = None;
+        let keys: Vec<(ContextKey, u32)> = inner
+            .cached_contexts
+            .iter()
+            .map(|cached| {
+                let key = ContextKey {
+                    worker_id: &cached.worker_id,
+                    version: cached.version,
+                    env_updated_at: cached.env_updated_at,
+                };
+                (key, cached.reuse_count)
+            })
+            .collect();
+        let wanted = ContextKey {
+            worker_id: &worker_id,
+            version,
+            env_updated_at,
+        };
+        let found = pool_policy::warm_hit(&keys, wanted, get_config().max_context_reuses);
 
-        for (i, cached) in inner.cached_contexts.iter().enumerate() {
-            if cached.worker_id == worker_id
-                && cached.version == version
-                && cached.env_updated_at == env_updated_at
-                && cached.reuse_count < max_reuses
-            {
-                found_idx = Some(i);
-                break;
-            }
-        }
-
-        found_idx.map(|idx| inner.cached_contexts.swap_remove(idx))
+        found.map(|idx| inner.cached_contexts.swap_remove(idx))
         // MutexGuard dropped here
     };
 
@@ -743,18 +685,10 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
                 if save_to_cache {
                     let mut inner = isolate_arc.inner.lock().await;
 
-                    let evicted = if inner.cached_contexts.len() >= inner.max_cached {
-                        // LRU eviction: replace least recently used context
-                        inner
-                            .cached_contexts
-                            .iter()
-                            .enumerate()
-                            .min_by_key(|(_, c)| c.last_used)
-                            .map(|(i, _)| i)
-                            .map(|idx| inner.cached_contexts.swap_remove(idx))
-                    } else {
-                        None
-                    };
+                    let last_used: Vec<Instant> =
+                        inner.cached_contexts.iter().map(|c| c.last_used).collect();
+                    let evicted = pool_policy::cache_evict(&last_used, inner.max_cached)
+                        .map(|idx| inner.cached_contexts.swap_remove(idx));
 
                     let (request, isolate_ptr) = ec.into_parts();
                     inner.cached_contexts.push(CachedContext {
@@ -867,18 +801,9 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
     if let Some(cached) = new_cached_context {
         let mut inner = isolate_arc.inner.lock().await;
 
-        let evicted = if inner.cached_contexts.len() >= inner.max_cached {
-            // LRU eviction: replace least recently used context
-            inner
-                .cached_contexts
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, c)| c.last_used)
-                .map(|(i, _)| i)
-                .map(|idx| inner.cached_contexts.swap_remove(idx))
-        } else {
-            None
-        };
+        let last_used: Vec<Instant> = inner.cached_contexts.iter().map(|c| c.last_used).collect();
+        let evicted = pool_policy::cache_evict(&last_used, inner.max_cached)
+            .map(|idx| inner.cached_contexts.swap_remove(idx));
 
         inner.cached_contexts.push(cached);
         drop(inner);
@@ -910,6 +835,8 @@ mod tests {
             max_per_owner: None,
             max_concurrent_per_isolate: 1,
             max_cached_contexts: 5,
+            overcommit: true,
+            max_context_reuses: 1000,
             limits: openworkers_core::RuntimeLimits::default(),
         });
     }
@@ -969,15 +896,20 @@ mod tests {
         ensure_test_config();
         // Pool of size 2: when full, LRU free isolate should be evicted
         let limits = openworkers_core::RuntimeLimits::default();
-        let mut pool = ThreadLocalPool::new(2, None, limits);
+        let mut pool = ThreadLocalPool::new(
+            Limits {
+                max_isolates: 2,
+                max_per_owner: None,
+                overcommit: true,
+            },
+            limits,
+        );
 
         // Fill pool with 2 different owners
         let a = pool.acquire("owner_a");
-        assert!(a.is_some());
         assert!(!a.unwrap().cache_hit);
 
         let b = pool.acquire("owner_b");
-        assert!(b.is_some());
         assert!(!b.unwrap().cache_hit);
 
         assert_eq!(pool.isolates.len(), 2);
@@ -990,7 +922,6 @@ mod tests {
 
         // Acquire for new owner_c → should evict owner_a (LRU)
         let c = pool.acquire("owner_c");
-        assert!(c.is_some());
         assert!(!c.unwrap().cache_hit);
         assert_eq!(pool.isolates.len(), 2); // Still at capacity
 
@@ -1006,21 +937,46 @@ mod tests {
         ensure_test_config();
         // Pool of size 2, both in use → should overcommit
         let limits = openworkers_core::RuntimeLimits::default();
-        let mut pool = ThreadLocalPool::new(2, None, limits);
+        let mut pool = ThreadLocalPool::new(
+            Limits {
+                max_isolates: 2,
+                max_per_owner: None,
+                overcommit: true,
+            },
+            limits,
+        );
 
         // Fill pool and keep acquired (in use)
-        let a = pool.acquire("owner_a");
-        assert!(a.is_some());
-
-        let b = pool.acquire("owner_b");
-        assert!(b.is_some());
-
+        assert!(pool.acquire("owner_a").is_ok());
+        assert!(pool.acquire("owner_b").is_ok());
         assert_eq!(pool.isolates.len(), 2);
 
         // All in use — overcommit should create a 3rd
-        let c = pool.acquire("owner_c");
-        assert!(c.is_some());
+        assert!(pool.acquire("owner_c").is_ok());
         assert_eq!(pool.isolates.len(), 3); // Over limit
+    }
+
+    #[test]
+    fn test_pool_refuses_when_full_without_overcommit() {
+        ensure_test_config();
+        let limits = openworkers_core::RuntimeLimits::default();
+        let mut pool = ThreadLocalPool::new(
+            Limits {
+                max_isolates: 1,
+                max_per_owner: None,
+                overcommit: false,
+            },
+            limits,
+        );
+
+        assert!(pool.acquire("owner_a").is_ok());
+        assert!(matches!(pool.acquire("owner_b"), Err(Refusal::PoolFull)));
+        assert_eq!(pool.isolates.len(), 1);
+
+        // The slot frees, and the next owner evicts instead of overcommitting
+        pool.isolates[0].release();
+        assert!(pool.acquire("owner_b").is_ok());
+        assert_eq!(pool.isolates.len(), 1);
     }
 
     #[test]
@@ -1028,35 +984,47 @@ mod tests {
         ensure_test_config();
         // max_per_owner = 1: second acquire for same owner should fail when in use
         let limits = openworkers_core::RuntimeLimits::default();
-        let mut pool = ThreadLocalPool::new(10, Some(1), limits);
+        let mut pool = ThreadLocalPool::new(
+            Limits {
+                max_isolates: 10,
+                max_per_owner: Some(1),
+                overcommit: true,
+            },
+            limits,
+        );
 
-        let a = pool.acquire("owner_a");
-        assert!(a.is_some());
+        assert!(pool.acquire("owner_a").is_ok());
 
-        // Same owner, at limit, isolate in use → returns None
-        let a2 = pool.acquire("owner_a");
-        assert!(a2.is_none());
+        // Same owner, at limit, isolate in use
+        assert!(matches!(
+            pool.acquire("owner_a"),
+            Err(Refusal::OwnerAtLimit)
+        ));
 
         // Different owner works fine
-        let b = pool.acquire("owner_b");
-        assert!(b.is_some());
+        assert!(pool.acquire("owner_b").is_ok());
     }
 
     #[test]
     fn test_pool_cache_hit_on_reacquire() {
         ensure_test_config();
         let limits = openworkers_core::RuntimeLimits::default();
-        let mut pool = ThreadLocalPool::new(10, None, limits);
+        let mut pool = ThreadLocalPool::new(
+            Limits {
+                max_isolates: 10,
+                max_per_owner: None,
+                overcommit: true,
+            },
+            limits,
+        );
 
         // Acquire and release
         let a = pool.acquire("owner_a");
-        assert!(a.is_some());
         assert!(!a.unwrap().cache_hit); // First time = miss
         pool.isolates[0].release();
 
         // Re-acquire same owner → cache hit
         let a2 = pool.acquire("owner_a");
-        assert!(a2.is_some());
         assert!(a2.unwrap().cache_hit);
     }
 
@@ -1064,15 +1032,22 @@ mod tests {
     fn test_pool_stats() {
         ensure_test_config();
         let limits = openworkers_core::RuntimeLimits::default();
-        let mut pool = ThreadLocalPool::new(5, None, limits);
+        let mut pool = ThreadLocalPool::new(
+            Limits {
+                max_isolates: 5,
+                max_per_owner: None,
+                overcommit: true,
+            },
+            limits,
+        );
 
         let stats = pool.stats();
         assert_eq!(stats.total, 0);
         assert_eq!(stats.in_use, 0);
         assert_eq!(stats.capacity, 5);
 
-        pool.acquire("owner_a");
-        pool.acquire("owner_b");
+        pool.acquire("owner_a").ok();
+        pool.acquire("owner_b").ok();
 
         let stats = pool.stats();
         assert_eq!(stats.total, 2);

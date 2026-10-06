@@ -98,6 +98,8 @@ async fn bench_pinned_cold_start() {
             max_per_owner: None,
             max_concurrent_per_isolate: 20,
             max_cached_contexts: 10,
+            overcommit: true,
+            max_context_reuses: 1000,
             limits: RuntimeLimits::default(),
         });
 
@@ -152,6 +154,8 @@ async fn bench_pinned_warm_start() {
             max_per_owner: None,
             max_concurrent_per_isolate: 20,
             max_cached_contexts: 10,
+            overcommit: true,
+            max_context_reuses: 1000,
             limits: RuntimeLimits::default(),
         });
 

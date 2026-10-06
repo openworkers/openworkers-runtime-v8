@@ -73,6 +73,8 @@ async fn cancelling_the_request_closes_the_socket_the_guest_awaits() {
             max_per_owner: None,
             max_concurrent_per_isolate: 20,
             max_cached_contexts: 10,
+            overcommit: true,
+            max_context_reuses: 1000,
             limits: RuntimeLimits::default(),
         });
 

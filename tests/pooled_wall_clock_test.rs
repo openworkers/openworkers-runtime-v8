@@ -30,6 +30,8 @@ async fn a_parked_pooled_guest_is_cut_at_the_wall_clock() {
             max_per_owner: None,
             max_concurrent_per_isolate: 20,
             max_cached_contexts: 10,
+            overcommit: true,
+            max_context_reuses: 1000,
             limits: RuntimeLimits {
                 max_cpu_time_ms: 0,
                 max_wall_clock_time_ms: 500,

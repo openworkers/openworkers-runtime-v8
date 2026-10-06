@@ -48,6 +48,7 @@ pub mod icudata;
 pub mod locker_managed_isolate;
 pub mod platform;
 pub mod pool_common;
+mod pool_policy;
 pub mod request_context;
 pub mod runtime;
 pub mod security;

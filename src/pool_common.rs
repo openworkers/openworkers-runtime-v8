@@ -16,6 +16,11 @@ pub struct PinnedPoolConfig {
     /// Maximum cached contexts per isolate (warm hit pool).
     /// Limits memory usage per isolate.
     pub max_cached_contexts: usize,
+    /// Build past `max_per_thread` when every isolate is in use. Off, a
+    /// request past the ceiling fails with `Pool at capacity`.
+    pub overcommit: bool,
+    /// Requests a cached context serves before it is left to age out.
+    pub max_context_reuses: u32,
     /// Runtime limits for new isolates
     pub limits: RuntimeLimits,
 }
