@@ -12,7 +12,6 @@
 //! - LRU eviction when pool is full
 //! - Warm context caching for sub-ms request handling
 
-use std::cell::UnsafeCell;
 #[cfg(not(feature = "multiplexing"))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -197,11 +196,9 @@ struct TaggedIsolate {
     owner_id: String,
     /// Concurrency control (cfg-gated: exclusive or multiplexed)
     concurrency: ConcurrencyState,
-    /// The V8 isolate (unentered, requires Locker for access).
-    /// Behind UnsafeCell for raw pointer access without Mutex aliasing.
-    /// SAFETY: Concurrency state prevents eviction while in use. Only
-    /// accessed on the thread-local pool's owning thread.
-    isolate: UnsafeCell<LockerManagedIsolate>,
+    /// The V8 isolate, shared with every ExecutionContext that runs in it
+    /// and entered through its Locker.
+    isolate: Arc<LockerManagedIsolate>,
     /// Mutable per-request bookkeeping
     inner: Mutex<TaggedIsolateInner>,
 }
@@ -231,7 +228,7 @@ impl TaggedIsolate {
         Self {
             owner_id,
             concurrency: ConcurrencyState::new(max_concurrent),
-            isolate: UnsafeCell::new(lmi),
+            isolate: Arc::new(lmi),
             inner: Mutex::new(TaggedIsolateInner {
                 cached_contexts: Vec::with_capacity(max_cached),
                 max_cached,
@@ -277,8 +274,7 @@ impl Drop for TaggedIsolate {
     fn drop(&mut self) {
         // Drop the cached contexts under the lock so their v8::Global handles
         // are released now rather than deferred to an isolate that is going away.
-        let lmi = self.isolate.get_mut();
-        let _locker = lmi.isolate.lock();
+        let _locker = self.isolate.isolate.lock();
 
         if let Ok(mut inner) = self.inner.try_lock() {
             inner.cached_contexts.clear();
@@ -375,6 +371,10 @@ impl ThreadLocalPool {
     }
 
     /// Build an isolate for the owner with its first slot taken.
+    ///
+    /// The Arc is not for threads: the pool is thread-local and the cached
+    /// contexts hold Rc state. It lets execute_pinned keep the isolate across
+    /// its awaits while the pool keeps its own handle.
     #[allow(clippy::arc_with_non_send_sync)]
     fn build(&mut self, owner_id: &str) -> AcquireResult {
         let config = get_config();
@@ -507,17 +507,9 @@ pub fn get_local_pool_stats() -> Option<LocalPoolStats> {
 
 /// Drop a value under V8 Locker, so any v8::Global it holds is released
 /// immediately instead of waiting for the next lock acquisition.
-fn drop_under_lock<T>(value: T, lmi_ptr: *mut LockerManagedIsolate) {
-    if lmi_ptr.is_null() {
-        drop(value);
-        return;
-    }
-
-    unsafe {
-        let lmi = &*lmi_ptr;
-        let _locker = lmi.isolate.lock();
-        drop(value);
-    }
+fn drop_under_lock<T>(value: T, pooled: &LockerManagedIsolate) {
+    let _locker = pooled.isolate.lock();
+    drop(value);
 }
 
 /// Execute a worker script using the isolate pool.
@@ -562,21 +554,13 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
         CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
     }
 
-    // Get raw pointer to isolate via UnsafeCell (no Mutex aliasing).
-    // SAFETY: Concurrency state prevents eviction. Arc keeps memory alive.
-    // Single-thread access via LocalSet.
-    let lmi_ptr = isolate_arc.isolate.get();
-
-    // Read immutable metadata from the isolate (no Mutex needed)
-    let (use_snapshot, platform, limits, memory_limit_hit) = unsafe {
-        let lmi = &*lmi_ptr;
-        (
-            lmi.use_snapshot,
-            lmi.platform,
-            lmi.limits.clone(),
-            Arc::clone(&lmi.memory_limit_hit),
-        )
-    };
+    let pooled = Arc::clone(&isolate_arc.isolate);
+    let (use_snapshot, platform, limits, memory_limit_hit) = (
+        pooled.use_snapshot,
+        pooled.platform,
+        pooled.limits.clone(),
+        Arc::clone(&pooled.memory_limit_hit),
+    );
 
     // Get async_waiter from concurrency state (None for simple, Some for multiplexed)
     let async_waiter = isolate_arc.concurrency.async_waiter();
@@ -646,7 +630,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
         // Reconstruct EC from cached parts
         let mut ec = ExecutionContext::from_cached(
             cached_isolate_ptr,
-            lmi_ptr,
+            Arc::clone(&pooled),
             platform,
             limits.clone(),
             memory_limit_hit.clone(),
@@ -704,10 +688,10 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
                     drop(inner);
 
                     if let Some(evicted) = evicted {
-                        drop_under_lock(evicted, lmi_ptr);
+                        drop_under_lock(evicted, &pooled);
                     }
                 } else {
-                    drop_under_lock(ec, lmi_ptr);
+                    drop_under_lock(ec, &pooled);
                 }
 
                 release_to_local_pool(&isolate_arc);
@@ -719,7 +703,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
                     &worker_id[..8.min(worker_id.len())],
                     e,
                 );
-                drop_under_lock(ec, lmi_ptr);
+                drop_under_lock(ec, &pooled);
                 // Fall through to cold path
             }
         }
@@ -733,12 +717,11 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
 
     // Acquire the lock to enter the isolate and create the context
     let ctx_result = {
-        let lmi = unsafe { &*lmi_ptr };
-        let (mut locker, _js_lock) = lmi.lock();
+        let (mut locker, _js_lock) = pooled.lock();
 
         ExecutionContext::new_with_pooled_isolate(
             &mut locker,
-            lmi_ptr,
+            Arc::clone(&pooled),
             use_snapshot,
             platform,
             limits,
@@ -780,7 +763,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
                             &worker_id[..8.min(worker_id.len())],
                             reason,
                         );
-                        drop_under_lock(ctx, lmi_ptr);
+                        drop_under_lock(ctx, &pooled);
                         (Ok(()), None)
                     }
                 }
@@ -790,7 +773,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
                     &worker_id[..8.min(worker_id.len())],
                     result.as_ref().err(),
                 );
-                drop_under_lock(ctx, lmi_ptr);
+                drop_under_lock(ctx, &pooled);
                 (result, None)
             }
         }
@@ -809,7 +792,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
         drop(inner);
 
         if let Some(evicted) = evicted {
-            drop_under_lock(evicted, lmi_ptr);
+            drop_under_lock(evicted, &pooled);
         }
     }
 

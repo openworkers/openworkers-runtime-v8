@@ -30,45 +30,19 @@ use openworkers_core::{
     TerminationReason, WorkerCode,
 };
 
-/// Acquire the V8 lock for a pooled isolate (null check + deref + lock).
-///
-/// Returns `None` for the Worker path (null pointer = OwnedIsolate, auto-entered).
-///
-/// # Safety
-///
-/// When non-null, `lmi_ptr` must point to a valid `LockerManagedIsolate` that
-/// outlives the returned Locker. This is guaranteed by the pool architecture:
-/// the LMI is pinned to its thread and outlives all ExecutionContexts.
-unsafe fn try_lock_v8(
-    lmi_ptr: *mut LockerManagedIsolate,
-) -> Option<(v8::Locker<'static>, crate::gc::JsLock)> {
-    if lmi_ptr.is_null() {
-        return None;
-    }
-
-    // SAFETY: caller guarantees lmi_ptr is valid when non-null and outliving
-    // the guard, so borrowing it for 'static is sound here.
-    let lmi: &'static LockerManagedIsolate = unsafe { &*lmi_ptr };
-    Some(lmi.lock())
-}
-
 /// A disposable execution context for running a worker script
 ///
 /// This includes:
 /// - Per-isolate state: isolate pointer, platform, limits, memory tracking
 /// - Per-request state (via RequestContext): V8 Context, event loop, callbacks
 pub struct ExecutionContext {
-    /// The pooled isolate this context belongs to. Not owned.
-    ///
-    /// The raw V8 pointer, because `v8::Isolate` is a wrapper around it and the
-    /// cell a `v8::Locker` hands out dies with the guard.
+    /// The raw V8 pointer of `pooled`, because `v8::Isolate` is a wrapper
+    /// around it and the cell a `v8::Locker` hands out dies with the guard.
     isolate: v8::UnsafeRawIsolatePtr,
 
-    /// Pointer to the LockerManagedIsolate for on-demand Locker creation.
-    /// Non-null for both pool modes (simple and multiplexed).
-    /// Null only for the Worker path (OwnedIsolate, auto-entered).
-    /// When non-null, await_event_loop acquires/releases V8 locker per poll cycle.
-    pub(crate) lmi_ptr: *mut LockerManagedIsolate,
+    /// The pooled isolate this context runs in. `await_event_loop` takes its
+    /// lock for each poll and releases it across I/O waits.
+    pub(crate) pooled: Arc<LockerManagedIsolate>,
 
     /// Platform reference (from shared isolate)
     pub platform: &'static v8::SharedRef<v8::Platform>,
@@ -102,7 +76,7 @@ impl ExecutionContext {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_pooled_isolate(
         isolate: &mut v8::Isolate,
-        lmi_ptr: *mut LockerManagedIsolate,
+        pooled: Arc<LockerManagedIsolate>,
         use_snapshot: bool,
         platform: &'static v8::SharedRef<v8::Platform>,
         limits: RuntimeLimits,
@@ -220,7 +194,7 @@ impl ExecutionContext {
         });
 
         // SAFETY: the isolate is locked here, and every later use re-acquires
-        // the lock through `lmi_ptr` before rebuilding a `v8::Isolate`.
+        // the lock through `pooled` before rebuilding a `v8::Isolate`.
         let isolate_ptr = unsafe { isolate.as_raw_isolate_ptr() };
 
         let request = RequestContext::new(
@@ -242,7 +216,7 @@ impl ExecutionContext {
 
         Ok(Self {
             isolate: isolate_ptr,
-            lmi_ptr,
+            pooled,
             platform,
             limits,
             memory_limit_hit,
@@ -257,7 +231,7 @@ impl ExecutionContext {
     /// per-isolate metadata for the next request.
     pub(crate) fn from_cached(
         isolate: v8::UnsafeRawIsolatePtr,
-        lmi_ptr: *mut LockerManagedIsolate,
+        pooled: Arc<LockerManagedIsolate>,
         platform: &'static v8::SharedRef<v8::Platform>,
         limits: RuntimeLimits,
         memory_limit_hit: Arc<AtomicBool>,
@@ -266,7 +240,7 @@ impl ExecutionContext {
     ) -> Self {
         Self {
             isolate,
-            lmi_ptr,
+            pooled,
             platform,
             limits,
             memory_limit_hit,
@@ -841,7 +815,7 @@ impl ExecutionContext {
 
         let mut abort_signaled_at: Option<tokio::time::Instant> = None;
         let mut pending_callbacks: Vec<crate::runtime::CallbackMessage> = Vec::with_capacity(16);
-        let lmi_ptr = self.lmi_ptr; // Copy raw pointer (no persistent borrow on self)
+        let pooled = Arc::clone(&self.pooled); // Its own handle, so the closure can borrow self
         let async_waiter = self.async_waiter.clone(); // Clone Rc (cheap) to avoid borrow on self
 
         let mut deadline = wall_guard
@@ -871,12 +845,9 @@ impl ExecutionContext {
                 return Poll::Pending; // Not our turn, will be woken in FIFO order
             }
 
-            // -- Acquire V8 lock (if pooled isolate) --
-            // For the LockerManagedIsolate path, we create a Locker + JsLock
-            // that will be dropped when this closure returns (including Pending),
-            // releasing the V8 mutex for other tasks during I/O waits.
-            // SAFETY: lmi_ptr valid for request lifetime (pool-managed)
-            let _lock_guard = unsafe { try_lock_v8(lmi_ptr) };
+            // The Locker and JsLock drop when this closure returns, Pending
+            // included, so the V8 mutex is free for other tasks during I/O waits.
+            let _lock_guard = pooled.lock();
 
             // 1. Check termination (CPU/wall-clock guards)
             if self.is_terminated(wall_guard, cpu_guard) {
@@ -975,7 +946,7 @@ impl ExecutionContext {
 
         // -- Phase 1: Trigger fetch handler (fair queue + lock) --
         {
-            let lmi_ptr = self.lmi_ptr;
+            let pooled = Arc::clone(&self.pooled);
             let async_waiter = self.async_waiter.clone();
 
             std::future::poll_fn(|cx| {
@@ -985,8 +956,7 @@ impl ExecutionContext {
                     return std::task::Poll::Pending;
                 }
 
-                // SAFETY: lmi_ptr valid for request lifetime (pool-managed)
-                let _lock = unsafe { try_lock_v8(lmi_ptr) };
+                let _lock = pooled.lock();
 
                 use std::pin::pin;
                 let result = {
@@ -1021,7 +991,7 @@ impl ExecutionContext {
 
         // -- Phase 3: Read response (fair queue + lock) --
         let (status, response) = {
-            let lmi_ptr = self.lmi_ptr;
+            let pooled = Arc::clone(&self.pooled);
             let async_waiter = self.async_waiter.clone();
 
             std::future::poll_fn(|cx| {
@@ -1031,8 +1001,7 @@ impl ExecutionContext {
                     return std::task::Poll::Pending;
                 }
 
-                // SAFETY: lmi_ptr valid for request lifetime (pool-managed)
-                let _lock = unsafe { try_lock_v8(lmi_ptr) };
+                let _lock = pooled.lock();
 
                 use std::pin::pin;
                 let result = {
@@ -1092,7 +1061,7 @@ impl ExecutionContext {
 
         // -- Phase 1: Trigger task handler (fair queue + lock) --
         {
-            let lmi_ptr = self.lmi_ptr;
+            let pooled = Arc::clone(&self.pooled);
             let async_waiter = self.async_waiter.clone();
 
             std::future::poll_fn(|cx| {
@@ -1102,8 +1071,7 @@ impl ExecutionContext {
                     return std::task::Poll::Pending;
                 }
 
-                // SAFETY: lmi_ptr valid for request lifetime (pool-managed)
-                let _lock = unsafe { try_lock_v8(lmi_ptr) };
+                let _lock = pooled.lock();
 
                 use std::pin::pin;
                 let result: Result<(), String> = {
@@ -1200,7 +1168,7 @@ impl ExecutionContext {
 
         // -- Phase 3: Read task result (fair queue + lock) --
         let task_result = {
-            let lmi_ptr = self.lmi_ptr;
+            let pooled = Arc::clone(&self.pooled);
             let async_waiter = self.async_waiter.clone();
 
             std::future::poll_fn(|cx| {
@@ -1210,8 +1178,7 @@ impl ExecutionContext {
                     return std::task::Poll::Pending;
                 }
 
-                // SAFETY: lmi_ptr valid for request lifetime (pool-managed)
-                let _lock = unsafe { try_lock_v8(lmi_ptr) };
+                let _lock = pooled.lock();
 
                 use std::pin::pin;
                 let result = {
@@ -1289,10 +1256,8 @@ impl ExecutionContext {
     /// Does NOT touch the event loop (it persists across requests).
     /// Does NOT reset `__nextTimerId` (monotonically increasing to avoid ID collisions).
     pub fn reset(&mut self) -> Result<(), String> {
-        // Acquire lock if pooled isolate (evaluate accesses V8 directly)
-        let lmi_ptr = self.lmi_ptr;
-        // SAFETY: lmi_ptr valid for request lifetime (pool-managed)
-        let _lock_guard = unsafe { try_lock_v8(lmi_ptr) };
+        let pooled = Arc::clone(&self.pooled);
+        let _lock_guard = pooled.lock();
 
         // 0. Cancel any lingering terminate_execution flag from a previous timeout/abort.
         // Without this, evaluate() below would fail immediately if the flag is still set.
