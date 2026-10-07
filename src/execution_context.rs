@@ -19,7 +19,7 @@ use crate::LockerManagedIsolate;
 use crate::async_waiter::AsyncWaiter;
 use crate::execution_helpers::{
     AbortConfig, EventLoopExit, check_exit_condition, get_completion_state, get_response_stream_id,
-    read_response_object, signal_client_disconnect, trigger_fetch_handler,
+    read_response_object, signal_client_disconnect, trigger_fetch_handler, trigger_task_handler,
 };
 use crate::request_context::RequestContext;
 use crate::runtime::stream_manager;
@@ -1054,11 +1054,6 @@ impl ExecutionContext {
         wall_guard: &TimeoutGuard,
         cpu_guard: &Option<CpuEnforcer>,
     ) -> Result<(), String> {
-        let scheduled_time = match &task_init.source {
-            Some(openworkers_core::TaskSource::Schedule { time, .. }) => Some(*time),
-            _ => None,
-        };
-
         // -- Phase 1: Trigger task handler (fair queue + lock) --
         {
             let pooled = Arc::clone(&self.pooled);
@@ -1081,76 +1076,7 @@ impl ExecutionContext {
                     let context = v8::Local::new(&scope, &self.request.context);
                     let scope = &mut v8::ContextScope::new(&mut scope, context);
 
-                    let global = context.global(scope);
-
-                    let task_handler_key = v8::String::new(scope, "__taskHandler").unwrap();
-                    let scheduled_handler_key =
-                        v8::String::new(scope, "__scheduledHandler").unwrap();
-
-                    if let Some(handler_val) = global.get(scope, task_handler_key.into())
-                        && handler_val.is_function()
-                    {
-                        let handler_fn: v8::Local<v8::Function> = handler_val.try_into().unwrap();
-
-                        let event_obj = v8::Object::new(scope);
-
-                        let id_key = v8::String::new(scope, "taskId").unwrap();
-                        let id_val = v8::String::new(scope, &task_init.task_id).unwrap();
-                        event_obj.set(scope, id_key.into(), id_val.into());
-
-                        let attempt_key = v8::String::new(scope, "attempt").unwrap();
-                        let attempt_val = v8::Number::new(scope, task_init.attempt as f64);
-                        event_obj.set(scope, attempt_key.into(), attempt_val.into());
-
-                        if let Some(payload) = &task_init.payload {
-                            let payload_key = v8::String::new(scope, "payload").unwrap();
-                            let payload_str = serde_json::to_string(payload).unwrap_or_default();
-                            let payload_json = v8::String::new(scope, &payload_str).unwrap();
-
-                            if let Some(parsed) = v8::json::parse(scope, payload_json) {
-                                event_obj.set(scope, payload_key.into(), parsed);
-                            }
-                        }
-
-                        if let Some(time) = scheduled_time {
-                            let time_key = v8::String::new(scope, "scheduledTime").unwrap();
-                            let time_val = v8::Number::new(scope, time as f64);
-                            event_obj.set(scope, time_key.into(), time_val.into());
-                        }
-
-                        let call_result =
-                            handler_fn.call(scope, global.into(), &[event_obj.into()]);
-
-                        if call_result.is_none() {
-                            Err("Execution terminated".to_string())
-                        } else {
-                            Ok(())
-                        }
-                    } else if let Some(handler_val) =
-                        global.get(scope, scheduled_handler_key.into())
-                        && handler_val.is_function()
-                    {
-                        let handler_fn: v8::Local<v8::Function> = handler_val.try_into().unwrap();
-
-                        let event_obj = v8::Object::new(scope);
-
-                        if let Some(time) = scheduled_time {
-                            let time_key = v8::String::new(scope, "scheduledTime").unwrap();
-                            let time_val = v8::Number::new(scope, time as f64);
-                            event_obj.set(scope, time_key.into(), time_val.into());
-                        }
-
-                        let call_result =
-                            handler_fn.call(scope, global.into(), &[event_obj.into()]);
-
-                        if call_result.is_none() {
-                            Err("Execution terminated".to_string())
-                        } else {
-                            Ok(())
-                        }
-                    } else {
-                        Ok(())
-                    }
+                    trigger_task_handler(scope, &task_init)
                 };
 
                 if let Some(ref waiter) = async_waiter {

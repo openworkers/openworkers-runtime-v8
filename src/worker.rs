@@ -2,7 +2,7 @@
 
 use crate::execution_helpers::{
     AbortConfig, EventLoopExit, check_exit_condition, get_completion_state, get_response_stream_id,
-    read_response_object, signal_client_disconnect, trigger_fetch_handler,
+    read_response_object, signal_client_disconnect, trigger_fetch_handler, trigger_task_handler,
 };
 use crate::runtime::{Runtime, run_event_loop};
 use crate::security::{CpuEnforcer, TimeoutGuard};
@@ -284,13 +284,6 @@ impl WorkerBuilder {
                     "TaskInit already consumed".to_string(),
                 ))?;
 
-                // Extract scheduled time if this is a schedule-triggered task
-                let scheduled_time = match &task_init.source {
-                    Some(openworkers_core::TaskSource::Schedule { time, .. }) => Some(*time),
-                    _ => None,
-                };
-
-                // Trigger task handler
                 {
                     use std::pin::pin;
                     let scope = pin!(v8::HandleScope::new(isolate));
@@ -298,59 +291,8 @@ impl WorkerBuilder {
                     let ctx = v8::Local::new(&scope, &context);
                     let scope = &mut v8::ContextScope::new(&mut scope, ctx);
 
-                    let global = ctx.global(scope);
-
-                    // Try __taskHandler first (new unified handler)
-                    let handler_key = v8::String::new(scope, "__taskHandler").unwrap();
-                    let scheduled_handler_key =
-                        v8::String::new(scope, "__scheduledHandler").unwrap();
-
-                    if let Some(handler_val) = global.get(scope, handler_key.into())
-                        && handler_val.is_function()
-                    {
-                        let handler_fn: v8::Local<v8::Function> = handler_val.try_into().unwrap();
-
-                        let event_obj = v8::Object::new(scope);
-
-                        // Set taskId
-                        let id_key = v8::String::new(scope, "taskId").unwrap();
-                        let id_val = v8::String::new(scope, &task_init.task_id).unwrap();
-                        event_obj.set(scope, id_key.into(), id_val.into());
-
-                        // Set payload if present
-                        if let Some(payload) = &task_init.payload {
-                            let payload_key = v8::String::new(scope, "payload").unwrap();
-                            let payload_str = serde_json::to_string(payload).unwrap_or_default();
-                            let payload_json = v8::String::new(scope, &payload_str).unwrap();
-                            if let Some(parsed) = v8::json::parse(scope, payload_json) {
-                                event_obj.set(scope, payload_key.into(), parsed);
-                            }
-                        }
-
-                        // Set scheduledTime for backward compat
-                        if let Some(time) = scheduled_time {
-                            let time_key = v8::String::new(scope, "scheduledTime").unwrap();
-                            let time_val = v8::Number::new(scope, time as f64);
-                            event_obj.set(scope, time_key.into(), time_val.into());
-                        }
-
-                        handler_fn.call(scope, global.into(), &[event_obj.into()]);
-                    } else if let Some(handler_val) =
-                        global.get(scope, scheduled_handler_key.into())
-                        && handler_val.is_function()
-                    {
-                        // Fallback to __scheduledHandler for backward compat
-                        let handler_fn: v8::Local<v8::Function> = handler_val.try_into().unwrap();
-
-                        let event_obj = v8::Object::new(scope);
-                        if let Some(time) = scheduled_time {
-                            let time_key = v8::String::new(scope, "scheduledTime").unwrap();
-                            let time_val = v8::Number::new(scope, time as f64);
-                            event_obj.set(scope, time_key.into(), time_val.into());
-                        }
-
-                        handler_fn.call(scope, global.into(), &[event_obj.into()]);
-                    }
+                    // A terminated call shows in the completion wait below.
+                    trigger_task_handler(scope, &task_init).ok();
                 }
 
                 // Wait for completion
@@ -970,13 +912,6 @@ impl Worker {
         wall_guard: &TimeoutGuard,
         cpu_guard: &Option<CpuEnforcer>,
     ) -> Result<(), String> {
-        // Extract scheduled time if this is a schedule-triggered task
-        let scheduled_time = match &task_init.source {
-            Some(openworkers_core::TaskSource::Schedule { time, .. }) => Some(*time),
-            _ => None,
-        };
-
-        // Trigger task handler
         {
             use std::pin::pin;
             let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
@@ -984,71 +919,7 @@ impl Worker {
             let context = v8::Local::new(&scope, &self.runtime.context);
             let scope = &mut v8::ContextScope::new(&mut scope, context);
 
-            let global = context.global(scope);
-
-            // Try __taskHandler first (new unified handler)
-            let task_handler_key = v8::String::new(scope, "__taskHandler").unwrap();
-            let scheduled_handler_key = v8::String::new(scope, "__scheduledHandler").unwrap();
-
-            if let Some(handler_val) = global.get(scope, task_handler_key.into())
-                && handler_val.is_function()
-            {
-                let handler_fn: v8::Local<v8::Function> = handler_val.try_into().unwrap();
-
-                // Create event object with full task info
-                let event_obj = v8::Object::new(scope);
-
-                // Set taskId
-                let id_key = v8::String::new(scope, "taskId").unwrap();
-                let id_val = v8::String::new(scope, &task_init.task_id).unwrap();
-                event_obj.set(scope, id_key.into(), id_val.into());
-
-                // Set attempt
-                let attempt_key = v8::String::new(scope, "attempt").unwrap();
-                let attempt_val = v8::Number::new(scope, task_init.attempt as f64);
-                event_obj.set(scope, attempt_key.into(), attempt_val.into());
-
-                // Set payload if present
-                if let Some(payload) = &task_init.payload {
-                    let payload_key = v8::String::new(scope, "payload").unwrap();
-                    let payload_str = serde_json::to_string(payload).unwrap_or_default();
-                    let payload_json = v8::String::new(scope, &payload_str).unwrap();
-                    if let Some(parsed) = v8::json::parse(scope, payload_json) {
-                        event_obj.set(scope, payload_key.into(), parsed);
-                    }
-                }
-
-                // Set scheduledTime for backward compat
-                if let Some(time) = scheduled_time {
-                    let time_key = v8::String::new(scope, "scheduledTime").unwrap();
-                    let time_val = v8::Number::new(scope, time as f64);
-                    event_obj.set(scope, time_key.into(), time_val.into());
-                }
-
-                let result = handler_fn.call(scope, global.into(), &[event_obj.into()]);
-
-                if result.is_none() {
-                    return Err("Execution terminated".to_string());
-                }
-            } else if let Some(handler_val) = global.get(scope, scheduled_handler_key.into())
-                && handler_val.is_function()
-            {
-                // Fallback to __scheduledHandler for backward compat
-                let handler_fn: v8::Local<v8::Function> = handler_val.try_into().unwrap();
-
-                let event_obj = v8::Object::new(scope);
-                if let Some(time) = scheduled_time {
-                    let time_key = v8::String::new(scope, "scheduledTime").unwrap();
-                    let time_val = v8::Number::new(scope, time as f64);
-                    event_obj.set(scope, time_key.into(), time_val.into());
-                }
-
-                let result = handler_fn.call(scope, global.into(), &[event_obj.into()]);
-
-                if result.is_none() {
-                    return Err("Execution terminated".to_string());
-                }
-            }
+            trigger_task_handler(scope, &task_init)?;
         }
 
         // Wait for handler to complete (including async work and waitUntil promises)
@@ -1607,7 +1478,11 @@ pub(crate) fn setup_event_listener(
                 globalThis.__scheduledHandler = async function(event) {
                     // Collect promises passed to waitUntil
                     const waitUntilPromises = [];
+                    globalThis.__taskResult = { success: true };
 
+                    event.type = 'scheduled';
+                    // The runner never retries a scheduled event, so there is nothing to turn off.
+                    event.noRetry = function() {};
                     event.waitUntil = function(promise) {
                         waitUntilPromises.push(Promise.resolve(promise));
                     };
@@ -1619,6 +1494,12 @@ pub(crate) fn setup_event_listener(
                         if (waitUntilPromises.length > 0) {
                             await Promise.all(waitUntilPromises);
                         }
+                    } catch (error) {
+                        console.error('[scheduled] Handler error:', error);
+                        globalThis.__taskResult = {
+                            success: false,
+                            error: error.message || String(error)
+                        };
                     } finally {
                         globalThis.__requestComplete = true;
                     }
@@ -1757,12 +1638,17 @@ pub(crate) fn setup_es_modules_handler(
             globalThis.__scheduledHandler = async function(event) {
                 // Collect promises passed to waitUntil
                 const waitUntilPromises = [];
+                globalThis.__taskResult = { success: true };
 
                 const ctx = {
                     waitUntil: (promise) => {
                         waitUntilPromises.push(Promise.resolve(promise));
                     }
                 };
+
+                event.type = 'scheduled';
+                // The runner never retries a scheduled event, so there is nothing to turn off.
+                event.noRetry = function() {};
 
                 try {
                     await moduleScheduled(event, globalThis.env, ctx);
@@ -1771,16 +1657,26 @@ pub(crate) fn setup_es_modules_handler(
                     if (waitUntilPromises.length > 0) {
                         await Promise.all(waitUntilPromises);
                     }
+                } catch (error) {
+                    console.error('[scheduled] Handler error:', error);
+                    globalThis.__taskResult = {
+                        success: false,
+                        error: error.message || String(error)
+                    };
                 } finally {
                     globalThis.__requestComplete = true;
                 }
             };
         }
 
-        // If export default exists but no scheduled, and no addEventListener handler, create a handler that throws
+        // If export default exists but no scheduled, and no addEventListener handler, fail the task
         if (typeof globalThis.default === 'object' && globalThis.default !== null && typeof globalThis.default.scheduled !== 'function' && typeof globalThis.__scheduledHandler !== 'function') {
             globalThis.__scheduledHandler = async function(event) {
-                throw new Error('Worker does not implement scheduled handler');
+                globalThis.__taskResult = {
+                    success: false,
+                    error: 'Worker does not implement scheduled handler'
+                };
+                globalThis.__requestComplete = true;
             };
         }
 

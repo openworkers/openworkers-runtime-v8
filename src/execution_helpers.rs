@@ -4,7 +4,7 @@
 //! ExecutionContext for task execution, event loop management, and response handling.
 
 use crate::runtime::stream_manager::{StreamChunk, StreamManager};
-use openworkers_core::{HttpResponse, RequestBody, ResponseBody};
+use openworkers_core::{HttpResponse, RequestBody, ResponseBody, TaskInit, TaskSource};
 use std::collections::HashMap;
 use std::sync::Arc;
 use v8;
@@ -241,6 +241,74 @@ pub fn signal_client_disconnect(scope: &mut v8::ContextScope<v8::HandleScope>) {
         && let Ok(func) = v8::Local::<v8::Function>::try_from(fn_val)
     {
         let _ = func.call(scope, global.into(), &[]);
+    }
+}
+
+/// Calls the task handler with the event it reads: `taskId`, `attempt`,
+/// `payload`, and `scheduledTime` with `cron` when a schedule fired the task.
+/// `__taskHandler` serves every task; a worker that listens for `scheduled`
+/// alone has only `__scheduledHandler`. No handler is not an error here: the
+/// completion check reports it.
+pub fn trigger_task_handler(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    task: &TaskInit,
+) -> Result<(), String> {
+    let global = scope.get_current_context().global(scope);
+
+    let handler = ["__taskHandler", "__scheduledHandler"]
+        .into_iter()
+        .find_map(|name| {
+            let key = v8::String::new(scope, name).unwrap();
+            let value = global.get(scope, key.into())?;
+            v8::Local::<v8::Function>::try_from(value).ok()
+        });
+
+    let Some(handler) = handler else {
+        return Ok(());
+    };
+
+    let event = v8::Object::new(scope);
+    set_task_fields(scope, event, task);
+
+    match handler.call(scope, global.into(), &[event.into()]) {
+        Some(_) => Ok(()),
+        None => Err("Execution terminated".to_string()),
+    }
+}
+
+fn set_task_fields(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    event: v8::Local<v8::Object>,
+    task: &TaskInit,
+) {
+    let key = v8::String::new(scope, "taskId").unwrap();
+    let value = v8::String::new(scope, &task.task_id).unwrap();
+    event.set(scope, key.into(), value.into());
+
+    let key = v8::String::new(scope, "attempt").unwrap();
+    let value = v8::Number::new(scope, task.attempt as f64);
+    event.set(scope, key.into(), value.into());
+
+    if let Some(payload) = &task.payload {
+        let key = v8::String::new(scope, "payload").unwrap();
+        let json = serde_json::to_string(payload).expect("a JSON value serialises");
+        let json = v8::String::new(scope, &json).unwrap();
+
+        if let Some(parsed) = v8::json::parse(scope, json) {
+            event.set(scope, key.into(), parsed);
+        }
+    }
+
+    if let Some(TaskSource::Schedule { time, cron }) = &task.source {
+        let key = v8::String::new(scope, "scheduledTime").unwrap();
+        let value = v8::Number::new(scope, *time as f64);
+        event.set(scope, key.into(), value.into());
+
+        if let Some(cron) = cron {
+            let key = v8::String::new(scope, "cron").unwrap();
+            let value = v8::String::new(scope, cron).unwrap();
+            event.set(scope, key.into(), value.into());
+        }
     }
 }
 
