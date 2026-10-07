@@ -714,9 +714,10 @@ pub(crate) fn setup_env(
     evaluate_in_context(isolate, context, &code)
 }
 
-/// Installs `addEventListener` and answers the `{ fetch, task }` object
-/// `js/dispatch.js` evaluates to, which the host keeps out of the guest's
-/// reach.
+/// Installs `addEventListener` and answers the `{ fetch, task }` object the
+/// host keeps out of the guest's reach. The dispatch is openworkers-wintertc's
+/// DISPATCH, shared by every engine; `js/stream_body.js` gives it V8's part,
+/// the response body streaming.
 pub(crate) fn install_dispatch(
     isolate: &mut v8::Isolate,
     context: &v8::Global<v8::Context>,
@@ -728,12 +729,22 @@ pub(crate) fn install_dispatch(
     let ctx = v8::Local::new(&scope, context);
     let scope = &mut v8::ContextScope::new(&mut scope, ctx);
 
-    let code = v8::String::new(scope, include_str!("js/dispatch.js")).unwrap();
-    let script = v8::Script::compile(scope, code, None).ok_or("dispatch.js does not compile")?;
-    let dispatch = script
-        .run(scope)
+    let code = v8::String::new(scope, openworkers_wintertc::DISPATCH).unwrap();
+    let install = v8::Script::compile(scope, code, None)
+        .and_then(|script| script.run(scope))
+        .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
+        .ok_or("the wintertc dispatch does not evaluate to a function")?;
+
+    let code = v8::String::new(scope, include_str!("js/stream_body.js")).unwrap();
+    let engine = v8::Script::compile(scope, code, None)
+        .and_then(|script| script.run(scope))
+        .ok_or("stream_body.js does not run")?;
+
+    let receiver = v8::undefined(scope).into();
+    let dispatch = install
+        .call(scope, receiver, &[engine])
         .and_then(|value| value.to_object(scope))
-        .ok_or("dispatch.js did not answer an object")?;
+        .ok_or("the dispatch did not answer an object")?;
 
     Ok(v8::Global::new(scope, dispatch))
 }
