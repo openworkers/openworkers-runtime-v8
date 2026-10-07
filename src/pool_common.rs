@@ -63,6 +63,9 @@ pub struct LocalPoolStats {
     pub total: usize,
     /// Currently in use
     pub in_use: usize,
+    /// Contexts held for warm reuse. An isolate whose bookkeeping is locked
+    /// at that moment counts none.
+    pub cached_contexts: usize,
     /// Maximum capacity
     pub capacity: usize,
 }

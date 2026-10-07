@@ -142,6 +142,13 @@ pub fn warm_hit(
         .position(|(key, reuses)| *key == wanted && *reuses < max_reuses)
 }
 
+/// Whether a context that has served `reuses` requests goes back to the cache:
+/// only when a later [`warm_hit`] can take it. Past `max_reuses`, or with no
+/// room at all, it is dropped at once instead of left to age out.
+pub fn keep_context(reuses: u32, max_reuses: u32, max_cached: usize) -> bool {
+    max_cached > 0 && reuses < max_reuses
+}
+
 /// The cached context to drop before another is added: the one unused for
 /// longest, and only when the cache is full.
 pub fn cache_evict(last_used: &[Instant], max_cached: usize) -> Option<usize> {
@@ -330,6 +337,18 @@ mod tests {
                     prop_assert!(!keys.iter().any(|(key, reuses)| *key == wanted && *reuses < max_reuses));
                 }
             }
+        }
+
+        #[test]
+        fn a_kept_context_is_one_a_warm_hit_can_take(
+            reuses in 0u32..5,
+            max_reuses in 0u32..5,
+            max_cached in 0usize..3,
+        ) {
+            let key = ContextKey { worker_id: "w", version: 1, env_updated_at: None };
+            let reachable = max_cached > 0 && warm_hit(&[(key, reuses)], key, max_reuses).is_some();
+
+            prop_assert_eq!(keep_context(reuses, max_reuses, max_cached), reachable);
         }
 
         #[test]

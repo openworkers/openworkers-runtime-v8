@@ -363,10 +363,17 @@ impl ThreadLocalPool {
     fn stats(&self) -> LocalPoolStats {
         let total = self.isolates.len();
         let in_use = self.isolates.iter().filter(|i| !i.is_free()).count();
+        let cached_contexts = self
+            .isolates
+            .iter()
+            .filter_map(|i| i.inner.try_lock().ok())
+            .map(|inner| inner.cached_contexts.len())
+            .sum();
 
         LocalPoolStats {
             total,
             in_use,
+            cached_contexts,
             capacity: self.policy.max_isolates,
         }
     }
@@ -619,7 +626,13 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
                     );
                     false
                 } else {
-                    true
+                    let config = get_config();
+
+                    pool_policy::keep_context(
+                        reuse_cnt,
+                        config.max_context_reuses,
+                        config.max_cached_contexts,
+                    )
                 };
 
                 if save_to_cache {
@@ -695,8 +708,16 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
             ctx.begin_request(abort);
             let result = ctx.exec(task).await;
 
+            let config = get_config();
+            let keep =
+                pool_policy::keep_context(1, config.max_context_reuses, config.max_cached_contexts);
+
             if result.is_ok() {
                 match ctx.drain_waituntil().await {
+                    Ok(()) if !keep => {
+                        drop_under_lock(ctx, &pooled);
+                        (result, None)
+                    }
                     Ok(()) => {
                         let (request, isolate_ptr) = ctx.into_parts();
                         (
