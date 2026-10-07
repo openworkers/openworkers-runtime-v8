@@ -1253,5 +1253,4 @@ impl crate::event_loop::EventLoopRuntime for ExecutionContext {
     }
 }
 
-// Tests for ExecutionContext are in pool_multiplexed.rs (pool integration tests)
-// and in Worker tests (worker.rs).
+// ExecutionContext is tested through execute_pinned, in tests/.
