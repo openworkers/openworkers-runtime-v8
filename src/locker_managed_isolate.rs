@@ -49,16 +49,8 @@ impl LockerManagedIsolate {
 
         let heap_max = limits.heap_max_mb * 1024 * 1024;
 
-        // Load snapshot (centralized, handles empty file case)
-        let snapshot_ref = crate::platform::get_snapshot();
-
-        let mut params = crate::v8_helpers::worker_create_params(&limits, &memory_limit_hit);
-
-        if let Some(snapshot_data) = snapshot_ref {
-            params = params.snapshot_blob((*snapshot_data).into());
-        }
-
-        let mut isolate = v8::Isolate::new(params);
+        let params = crate::v8_helpers::worker_create_params(&limits, &memory_limit_hit);
+        let mut isolate = crate::v8_helpers::new_isolate(params);
 
         // Install heap limit callback to prevent V8 OOM from crashing the process
         let heap_limit_state =
@@ -69,7 +61,7 @@ impl LockerManagedIsolate {
         let isolate = unsafe { isolate.try_into_shared() }
             .unwrap_or_else(|e| panic!("isolate cannot be shared: {e}"));
 
-        let use_snapshot = snapshot_ref.is_some();
+        let use_snapshot = crate::platform::get_snapshot().is_some();
 
         Self {
             isolate,

@@ -97,3 +97,17 @@ pub(crate) fn throw_error(scope: &mut v8::PinScope, message: &str) {
     let exception = v8::Exception::error(scope, message);
     scope.throw_exception(exception);
 }
+
+/// Creates an isolate from the process snapshot. Every isolate alive in a
+/// process has to come from the same snapshot: they share one read-only heap,
+/// and an isolate from another snapshot reads it out of bounds (a libc++
+/// hardening abort in `ReadReadOnlyHeapRef`).
+pub(crate) fn new_isolate(params: v8::CreateParams) -> v8::OwnedIsolate {
+    let params = match crate::platform::get_snapshot() {
+        Some(snapshot) => params.snapshot_blob(snapshot.into()),
+        None => params,
+    };
+
+    #[allow(clippy::disallowed_methods)]
+    v8::Isolate::new(params)
+}

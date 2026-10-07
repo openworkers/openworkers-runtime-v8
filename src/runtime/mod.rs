@@ -188,48 +188,23 @@ impl Runtime {
 
         let heap_max = limits.heap_max_mb * 1024 * 1024;
 
-        // Load runtime snapshot (pre-compiled JS APIs)
-        let snapshot_ref = crate::platform::get_snapshot();
-
+        let has_snapshot = crate::platform::get_snapshot().is_some();
         #[cfg(feature = "unsafe-worker-snapshot")]
-        let has_worker_snapshot = worker_snapshot.is_some();
-        #[cfg(feature = "unsafe-worker-snapshot")]
-        let has_snapshot = has_worker_snapshot || snapshot_ref.is_some();
-        #[cfg(not(feature = "unsafe-worker-snapshot"))]
-        let has_snapshot = snapshot_ref.is_some();
+        let has_snapshot = has_snapshot || worker_snapshot.is_some();
 
-        let mut params = crate::v8_helpers::worker_create_params(&limits, &memory_limit_hit);
-
-        #[cfg(feature = "unsafe-worker-snapshot")]
-        if let Some(ws) = worker_snapshot {
-            // Worker snapshot: includes runtime APIs + evaluated worker code
-            params = params.snapshot_blob(ws.into());
-        } else if let Some(snapshot_data) = snapshot_ref {
-            // Runtime snapshot: includes only runtime APIs
-            params = params.snapshot_blob((*snapshot_data).into());
-        }
-
-        #[cfg(not(feature = "unsafe-worker-snapshot"))]
-        if let Some(snapshot_data) = snapshot_ref {
-            params = params.snapshot_blob((*snapshot_data).into());
-        }
-
-        // Worker heap snapshots require serialized isolate creation due to
-        // V8's SharedHeapDeserializer::DeserializeStringTable not being thread-safe.
-        #[cfg(feature = "unsafe-worker-snapshot")]
-        let _lock = {
-            use std::sync::Mutex;
-            static ISOLATE_INIT_MUTEX: Mutex<()> = Mutex::new(());
-
-            if has_worker_snapshot {
-                Some(ISOLATE_INIT_MUTEX.lock().unwrap())
-            } else {
-                None
-            }
-        };
+        let params = crate::v8_helpers::worker_create_params(&limits, &memory_limit_hit);
 
         let (isolate, heap_limit_state, context, slots) = {
-            let mut isolate = v8::Isolate::new(params);
+            // A worker snapshot is a second snapshot in the process, which is
+            // what makes the feature unsafe: see v8_helpers::new_isolate.
+            #[cfg(feature = "unsafe-worker-snapshot")]
+            #[allow(clippy::disallowed_methods)]
+            let mut isolate = match worker_snapshot {
+                Some(ws) => v8::Isolate::new(params.snapshot_blob(ws.into())),
+                None => crate::v8_helpers::new_isolate(params),
+            };
+            #[cfg(not(feature = "unsafe-worker-snapshot"))]
+            let mut isolate = crate::v8_helpers::new_isolate(params);
 
             // Install heap limit callback to prevent V8 OOM from crashing the process
             let heap_limit_state =

@@ -241,18 +241,10 @@ pub fn create_worker_snapshot(
 pub fn create_code_cache(js_code: &str) -> Result<Vec<u8>, String> {
     let _platform = crate::platform::get_platform();
 
-    // Use the runtime snapshot (if available) so that APIs like Response, Headers etc.
-    // are available during compilation. This doesn't affect the code cache output —
-    // it only ensures the compilation context has the right globals for type feedback.
-    let snapshot_ref = crate::platform::get_snapshot();
-
-    let mut params = v8::CreateParams::default();
-
-    if let Some(snapshot_data) = snapshot_ref {
-        params = params.snapshot_blob((*snapshot_data).into());
-    }
-
-    let mut isolate = v8::Isolate::new(params);
+    // new_isolate starts from the runtime snapshot, so Response, Headers and the
+    // other APIs exist during compilation. The code cache output does not change;
+    // the context only has the right globals for type feedback.
+    let mut isolate = crate::v8_helpers::new_isolate(v8::CreateParams::default());
 
     let scope = pin!(v8::HandleScope::new(&mut isolate));
     let mut scope = scope.init();

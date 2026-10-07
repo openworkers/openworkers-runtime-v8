@@ -1,7 +1,11 @@
 # Configuration reaches the runtime through PinnedPoolConfig and RuntimeLimits,
-# so a read of the environment elsewhere hides a knob from the runner. The two
-# reads that stay carry an allow and its reason.
+# so a read of the environment elsewhere hides a knob from the runner. The read
+# that stays, OW_V8_FLAGS, carries an allow and its reason.
+#
+# Every isolate of a process has to come from the same snapshot, so isolates
+# are created through v8_helpers::new_isolate, which applies it.
 disallowed-methods = [
   { path = "std::env::var", reason = "configuration arrives through PinnedPoolConfig and RuntimeLimits" },
   { path = "std::env::var_os", reason = "configuration arrives through PinnedPoolConfig and RuntimeLimits" },
+  { path = "v8::Isolate::new", reason = "use v8_helpers::new_isolate: an isolate from another snapshot aborts the process" },
 ]

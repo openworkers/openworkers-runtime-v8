@@ -143,7 +143,7 @@ mod tests {
     fn test_intl_datetimeformat_owned_isolate() {
         crate::platform::get_platform();
 
-        let mut isolate = v8::Isolate::new(Default::default());
+        let mut isolate = crate::v8_helpers::new_isolate(Default::default());
 
         let scope = pin!(v8::HandleScope::new(&mut isolate));
         let mut scope = scope.init();
@@ -175,7 +175,7 @@ mod tests {
     fn test_intl_numberformat_owned_isolate() {
         crate::platform::get_platform();
 
-        let mut isolate = v8::Isolate::new(Default::default());
+        let mut isolate = crate::v8_helpers::new_isolate(Default::default());
 
         let scope = pin!(v8::HandleScope::new(&mut isolate));
         let mut scope = scope.init();

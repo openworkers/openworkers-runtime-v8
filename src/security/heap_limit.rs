@@ -205,7 +205,7 @@ mod tests {
         let memory_limit_hit = Arc::new(AtomicBool::new(false));
 
         // Create a minimal isolate to get an IsolateHandle
-        let isolate = v8::Isolate::new(Default::default());
+        let isolate = crate::v8_helpers::new_isolate(Default::default());
         let handle = isolate.thread_safe_handle();
 
         let state = HeapLimitState::new(handle, memory_limit_hit.clone(), 128 * 1024 * 1024);
@@ -226,7 +226,7 @@ mod tests {
 
         // Create isolate with heap limits
         let params = v8::CreateParams::default().heap_limits(4 * 1024 * 1024, 32 * 1024 * 1024);
-        let mut isolate = v8::Isolate::new(params);
+        let mut isolate = crate::v8_helpers::new_isolate(params);
 
         // Install heap limit callback
         let heap_state = install_heap_limit_callback(
