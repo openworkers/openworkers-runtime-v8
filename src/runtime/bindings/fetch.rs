@@ -470,40 +470,57 @@ pub fn setup_fetch(
             return { body: result, boundary: boundary };
         }
 
-        globalThis.fetch = async function(input, options) {
-            // Normalize input (handles Request, URL, string)
-            const normalized = __normalizeFetchInput(input, options);
-            let { url, method, headers, body } = normalized;
+        // The bytes a fetch body carries, as the native ops take them. Sets the
+        // content type a FormData or URLSearchParams body implies when the
+        // caller set none. The global fetch and the assets and worker bindings
+        // all send their body through it.
+        globalThis.__encodeFetchBody = async function(body, headers) {
             let contentType = null;
 
-            // Handle ReadableStream body - buffer it first (returns Uint8Array)
             if (body instanceof ReadableStream) {
-                console.warn('[fetch] ReadableStream body detected - buffering entire stream before sending');
                 body = await __bufferBody(body);
             }
 
-            // Handle FormData body - serialize to multipart/form-data
             if (body instanceof FormData) {
                 const serialized = await __serializeFormData(body);
                 body = serialized.body;
                 contentType = 'multipart/form-data; boundary=' + serialized.boundary;
             }
 
-            // Handle URLSearchParams body - serialize to form-encoded string
             if (body instanceof URLSearchParams) {
                 body = new TextEncoder().encode(body.toString());
-                if (!contentType) contentType = 'application/x-www-form-urlencoded;charset=UTF-8';
+                contentType = 'application/x-www-form-urlencoded;charset=UTF-8';
             }
 
-            // Convert string/primitive body to Uint8Array for native consumption
-            if (body !== null && typeof body !== 'object') {
+            if (body instanceof Blob) {
+                body = new Uint8Array(await body.arrayBuffer());
+            }
+
+            if (body instanceof ArrayBuffer) {
+                body = new Uint8Array(body);
+            }
+
+            if (body !== null && body !== undefined && typeof body !== 'object') {
                 body = new TextEncoder().encode(String(body));
             }
 
-            // Set Content-Type if not already set (FormData or URLSearchParams)
             if (contentType && !headers['Content-Type'] && !headers['content-type']) {
                 headers['Content-Type'] = contentType;
             }
+
+            return body ?? null;
+        };
+
+        globalThis.fetch = async function(input, options) {
+            // Normalize input (handles Request, URL, string)
+            const normalized = __normalizeFetchInput(input, options);
+            let { url, method, headers, body } = normalized;
+
+            if (body instanceof ReadableStream) {
+                console.warn('[fetch] ReadableStream body detected - buffering entire stream before sending');
+            }
+
+            body = await __encodeFetchBody(body, headers);
 
             // Check for WebSocket upgrade
             const upgradeKey = Object.keys(headers).find(

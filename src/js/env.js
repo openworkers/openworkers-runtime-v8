@@ -2,17 +2,22 @@
 // per binding, which wins over a variable of the same name. The host calls
 // this function with both as JSON data.
 (function installEnv(vars, bindings) {
+    // A request through a binding's fetch, with its body encoded as the
+    // global fetch encodes one.
+    const bindingFetch = async (nativeFn, name, input, options) => {
+        const { url, method, headers, body } = __normalizeFetchInput(input, options);
+        const bytes = await __encodeFetchBody(body, headers);
+
+        return new Promise((resolve, reject) => {
+            nativeFn(name, { url, method, headers, body: bytes }, (meta) => {
+                resolve(__responseFromMeta(meta));
+            }, reject);
+        });
+    };
+
     const make = {
         assets: (name) => ({
-            fetch(input, options) {
-                return new Promise((resolve, reject) => {
-                    const { url, method, headers, body } = __normalizeFetchInput(input, options);
-                    const fetchOptions = { url, method, headers, body };
-                    __nativeBindingFetch(name, fetchOptions, (meta) => {
-                        resolve(__responseFromMeta(meta));
-                    }, reject);
-                });
-            },
+            fetch: (input, options) => bindingFetch(__nativeBindingFetch, name, input, options),
         }),
 
         storage: (name) => ({
@@ -57,22 +62,7 @@
         }),
 
         worker: (name) => ({
-            fetch(input, options) {
-                return new Promise((resolve, reject) => {
-                    const processRequest = async () => {
-                        const normalized = __normalizeFetchInput(input, options);
-                        // Buffer ReadableStream body for serialization
-                        normalized.body = await __bufferBody(normalized.body);
-                        return normalized;
-                    };
-
-                    processRequest().then((fetchOptions) => {
-                        __nativeBindingWorker(name, fetchOptions, (meta) => {
-                            resolve(__responseFromMeta(meta));
-                        }, reject);
-                    }).catch(reject);
-                });
-            },
+            fetch: (input, options) => bindingFetch(__nativeBindingWorker, name, input, options),
         }),
 
         // No native handler yet, so the binding exists only to say so
