@@ -118,6 +118,32 @@ throws!(
     "TypeError: kv: unknown operation \"frob\""
 );
 
+// database
+
+throws!(
+    database_without_callbacks,
+    "__nativeBindingDatabase('DB', 'query', { sql: 'SELECT 1' })",
+    "TypeError: the resolve and reject callbacks are not functions"
+);
+
+throws!(
+    database_without_sql,
+    "__nativeBindingDatabase('DB', 'query', { params: [] }, () => {}, () => {})",
+    "TypeError: database: bad parameters"
+);
+
+throws!(
+    database_unknown_operation,
+    "__nativeBindingDatabase('DB', 'frob', { sql: 'SELECT 1' }, () => {}, () => {})",
+    "TypeError: database: unknown operation \"frob\""
+);
+
+throws!(
+    database_name_not_a_string,
+    "__nativeBindingDatabase(1, 'query', { sql: 'SELECT 1' }, () => {}, () => {})",
+    "TypeError: database: the binding name is not a string"
+);
+
 // websocket
 
 throws!(
