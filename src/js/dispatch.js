@@ -142,181 +142,208 @@ async function __streamResponseBody(response) {
     return response;
 }
 
+// One dispatch for every event. The handler is looked up when the event
+// arrives, so a handler the script declares through `export default` wins
+// over one it registers through addEventListener, whatever the order.
+const __listeners = Object.create(null);
+
 globalThis.addEventListener = function(type, handler) {
-    if (type === 'fetch') {
-        globalThis.__fetchHandler = handler;
-        globalThis.__triggerFetch = function(request) {
-            // Collect promises passed to waitUntil
-            const waitUntilPromises = [];
-            let responsePromise = null;
+    __listeners[type] = handler;
+};
 
-            const event = {
-                request: request,
-                waitUntil: function(promise) {
-                    waitUntilPromises.push(Promise.resolve(promise));
-                },
-                respondWith: function(responseOrPromise) {
-                    // Handle both direct Response and Promise<Response>
-                    if (responseOrPromise && typeof responseOrPromise.then === 'function') {
-                        responsePromise = responseOrPromise
-                            .then(response => __streamResponseBody(response))
-                            .then(response => {
-                                globalThis.__lastResponse = response;
-                            })
-                            .catch(error => {
-                                console.error('[respondWith] Promise rejected:', error);
-                                globalThis.__lastResponse = new Response(
-                                    'Promise rejected: ' + (error.message || error),
-                                    { status: 500 }
-                                );
-                            });
-                    } else {
-                        responsePromise = __streamResponseBody(responseOrPromise)
-                            .then(response => {
-                                globalThis.__lastResponse = response;
-                            });
-                    }
-                }
-            };
+// The handler `export default` declares under `name`, called as a method of
+// the module object.
+function __moduleHandler(name) {
+    const module = globalThis.default;
 
-            // Run async to track completion
-            (async () => {
-                try {
-                    // Call handler and capture return value
-                    const result = handler(event);
+    if (module === null || typeof module !== 'object' || typeof module[name] !== 'function') {
+        return null;
+    }
 
-                    // If handler returns a Response or Promise<Response>, use it
-                    // ONLY if respondWith() was not already called (respondWith has priority)
-                    // (Service Worker / Cloudflare Workers compatibility)
-                    if (!responsePromise && result instanceof Response) {
-                        responsePromise = __streamResponseBody(result)
-                            .then(response => {
-                                globalThis.__lastResponse = response;
-                            });
-                    } else if (!responsePromise && result && typeof result.then === 'function') {
-                        // Handler returned a Promise - could be Promise<Response>
-                        responsePromise = result
-                            .then(response => {
-                                if (response instanceof Response) {
-                                    return __streamResponseBody(response)
-                                        .then(processed => {
-                                            globalThis.__lastResponse = processed;
-                                        });
-                                }
-                            })
-                            .catch(error => {
-                                console.error('[addEventListener] Handler promise rejected:', error);
-                                globalThis.__lastResponse = new Response(
-                                    'Handler promise rejected: ' + (error.message || error),
-                                    { status: 500 }
-                                );
-                            });
-                    }
+    return (...args) => module[name](...args);
+}
 
-                    // Wait for response to be set first
-                    if (responsePromise) {
-                        await responsePromise;
-                    }
+function __errorMessage(error) {
+    return (error && error.message) || String(error);
+}
 
-                    // Then wait for all waitUntil promises to complete
-                    if (waitUntilPromises.length > 0) {
-                        await Promise.all(waitUntilPromises);
-                    }
-                } catch (error) {
-                    console.error('[addEventListener] Error in fetch handler:', error);
-                    // Only set a 500 response if no response was already produced.
-                    // A rejected waitUntil promise must NOT overwrite a valid response.
-                    if (!globalThis.__lastResponse) {
-                        globalThis.__lastResponse = new Response('Handler exception: ' + (error.message || error), { status: 500 });
-                    }
-                } finally {
-                    globalThis.__requestComplete = true;
-                }
-            })();
+// The promises an event passes to waitUntil, awaited after its answer.
+function __lifetime() {
+    const pending = [];
+
+    return {
+        waitUntil(promise) {
+            pending.push(Promise.resolve(promise));
+        },
+        settled() {
+            return Promise.all(pending);
+        },
+    };
+}
+
+// The response a fetch listener gives: the one it passes to respondWith, or
+// else a Response it returns, directly or through a promise. respondWith
+// may run at any time, from a timer or a callback included, so a listener
+// that returns without either still has time to answer. A second
+// respondWith throws and leaves the first response.
+function __listenerResponse(listener, request, life) {
+    let answered = false;
+    let answer;
+    const response = new Promise((resolve) => {
+        answer = (value) => {
+            answered = true;
+            resolve(value);
         };
-    } else if (type === 'scheduled') {
-        globalThis.__scheduledHandler = async function(event) {
-            // Collect promises passed to waitUntil
-            const waitUntilPromises = [];
-            globalThis.__taskResult = { success: true };
+    });
 
-            event.type = 'scheduled';
-            // The runner never retries a scheduled event, so there is nothing to turn off.
-            event.noRetry = function() {};
-            event.waitUntil = function(promise) {
-                waitUntilPromises.push(Promise.resolve(promise));
-            };
-
-            try {
-                await handler(event);
-
-                // Wait for all waitUntil promises to complete
-                if (waitUntilPromises.length > 0) {
-                    await Promise.all(waitUntilPromises);
-                }
-            } catch (error) {
-                console.error('[scheduled] Handler error:', error);
-                globalThis.__taskResult = {
-                    success: false,
-                    error: error.message || String(error)
-                };
-            } finally {
-                globalThis.__requestComplete = true;
+    const event = {
+        request,
+        waitUntil: life.waitUntil,
+        respondWith(value) {
+            if (answered) {
+                throw new TypeError('respondWith was already called');
             }
-        };
-    } else if (type === 'task') {
-        globalThis.__taskHandler = async function(event) {
-            // Collect promises passed to waitUntil
-            const waitUntilPromises = [];
 
-            // Default result (success with no data)
-            globalThis.__taskResult = { success: true };
+            answer(value);
+        },
+    };
 
-            event.waitUntil = function(promise) {
-                waitUntilPromises.push(Promise.resolve(promise));
-            };
+    let returned;
 
-            event.respondWith = function(result) {
-                if (result && typeof result === 'object') {
-                    globalThis.__taskResult = {
-                        success: result.success !== false,
-                        data: result.data,
-                        error: result.error
-                    };
-                } else {
-                    globalThis.__taskResult = { success: true, data: result };
-                }
-            };
+    try {
+        returned = listener(event);
+    } catch (error) {
+        returned = Promise.reject(error);
+    }
 
-            try {
-                const result = await handler(event);
-
-                // If handler returns a value and respondWith wasn't called, use it
-                if (result !== undefined && globalThis.__taskResult.data === undefined) {
-                    if (result && typeof result === 'object' && 'success' in result) {
-                        globalThis.__taskResult = {
-                            success: result.success !== false,
-                            data: result.data,
-                            error: result.error
-                        };
-                    } else {
-                        globalThis.__taskResult = { success: true, data: result };
-                    }
-                }
-
-                // Wait for all waitUntil promises to complete
-                if (waitUntilPromises.length > 0) {
-                    await Promise.all(waitUntilPromises);
-                }
-            } catch (error) {
-                console.error('[task] Handler error:', error);
-                globalThis.__taskResult = {
-                    success: false,
-                    error: error.message || String(error)
-                };
-            } finally {
-                globalThis.__requestComplete = true;
+    Promise.resolve(returned).then(
+        (value) => {
+            if (!answered && value instanceof Response) {
+                answer(value);
             }
+        },
+        (error) => {
+            if (answered) {
+                console.error('[fetch] Handler error after respondWith:', error);
+            } else {
+                answer(Promise.reject(error));
+            }
+        }
+    );
+
+    return response;
+}
+
+globalThis.__triggerFetch = function(request) {
+    const life = __lifetime();
+    const module = __moduleHandler('fetch');
+    const listener = __listeners.fetch;
+
+    (async () => {
+        try {
+            let response;
+
+            if (module) {
+                const ctx = { waitUntil: life.waitUntil, passThroughOnException() {} };
+                response = await module(request, globalThis.env, ctx);
+            } else if (listener) {
+                response = await __listenerResponse(listener, request, life);
+            } else {
+                response = new Response('Worker does not implement fetch handler', { status: 501 });
+            }
+
+            if (!(response instanceof Response)) {
+                throw new TypeError(
+                    response === undefined
+                        ? 'the fetch handler did not respond'
+                        : 'the fetch handler did not answer with a Response'
+                );
+            }
+
+            globalThis.__lastResponse = await __streamResponseBody(response);
+        } catch (error) {
+            console.error('[fetch] Handler error:', error);
+            globalThis.__lastResponse = new Response('Handler exception: ' + __errorMessage(error), { status: 500 });
+        }
+
+        try {
+            await life.settled();
+        } catch (error) {
+            // The response is already out; a background failure cannot change it.
+            console.error('[fetch] waitUntil rejected:', error);
+        } finally {
+            globalThis.__requestComplete = true;
+        }
+    })();
+};
+
+// A task result from what a task handler answers: an object with a
+// `success` field is the result, anything else is its data.
+function __taskEnvelope(value) {
+    if (value !== null && typeof value === 'object' && 'success' in value) {
+        return { success: value.success !== false, data: value.data, error: value.error };
+    }
+
+    return { success: true, data: value };
+}
+
+// Runs the handler for a task and answers its result. A `task` handler gets
+// every task; without one, a `scheduled` handler gets them as cron events and
+// its return value is not a result.
+async function __runTask(event, life) {
+    const moduleTask = __moduleHandler('task');
+    const task = moduleTask ?? __listeners.task;
+
+    if (task) {
+        let responded = null;
+
+        event.waitUntil = life.waitUntil;
+        event.respondWith = (value) => {
+            responded = __taskEnvelope(value);
         };
+
+        const returned = moduleTask
+            ? await moduleTask(event, globalThis.env, { waitUntil: life.waitUntil })
+            : await task(event);
+
+        return responded ?? __taskEnvelope(returned);
+    }
+
+    const moduleScheduled = __moduleHandler('scheduled');
+    const scheduled = moduleScheduled ?? __listeners.scheduled;
+
+    if (scheduled) {
+        event.type = 'scheduled';
+        // The runner never retries a scheduled event, so there is nothing to turn off.
+        event.noRetry = function() {};
+
+        if (moduleScheduled) {
+            await moduleScheduled(event, globalThis.env, { waitUntil: life.waitUntil });
+        } else {
+            event.waitUntil = life.waitUntil;
+            await scheduled(event);
+        }
+
+        return { success: true };
+    }
+
+    throw new Error(
+        event.scheduledTime === undefined
+            ? 'Worker does not implement task handler'
+            : 'Worker does not implement scheduled handler'
+    );
+}
+
+globalThis.__taskHandler = async function(event) {
+    const life = __lifetime();
+
+    try {
+        globalThis.__taskResult = await __runTask(event, life);
+        await life.settled();
+    } catch (error) {
+        console.error('[task] Handler error:', error);
+        globalThis.__taskResult = { success: false, error: __errorMessage(error) };
+    } finally {
+        globalThis.__requestComplete = true;
     }
 };

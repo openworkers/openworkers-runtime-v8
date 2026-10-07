@@ -198,15 +198,6 @@ impl Worker {
             TerminationReason::Exception(format!("Script evaluation failed: {}", e))
         })?;
 
-        // Setup ES Modules handler if `export default { fetch }` is used
-        // This takes priority over addEventListener('fetch', ...)
-        setup_es_modules_handler(&mut runtime.isolate, &runtime.context).map_err(|e| {
-            TerminationReason::InitializationError(format!(
-                "Failed to setup ES modules handler: {}",
-                e
-            ))
-        })?;
-
         // Get stream_manager for event loop
         let stream_manager = runtime.stream_manager.clone();
         let cancel = CancellationToken::new();
@@ -760,23 +751,13 @@ pub(crate) fn setup_env(
     evaluate_in_context(isolate, context, &code)
 }
 
-/// Installs `addEventListener` and the response streaming from
-/// `js/dispatch.js`.
+/// Installs `addEventListener`, the dispatch of events to the guest's
+/// handlers and the response streaming from `js/dispatch.js`.
 pub(crate) fn setup_event_listener(
     isolate: &mut v8::Isolate,
     context: &v8::Global<v8::Context>,
 ) -> Result<(), String> {
     evaluate_in_context(isolate, context, include_str!("js/dispatch.js"))
-}
-
-/// Installs the `export default { fetch, scheduled, task }` handlers from
-/// `js/modules.js`. It runs after the user script, so a module handler takes
-/// priority over `addEventListener`.
-pub(crate) fn setup_es_modules_handler(
-    isolate: &mut v8::Isolate,
-    context: &v8::Global<v8::Context>,
-) -> Result<(), String> {
-    evaluate_in_context(isolate, context, include_str!("js/modules.js"))
 }
 
 impl openworkers_core::Worker for Worker {

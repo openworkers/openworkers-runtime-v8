@@ -168,9 +168,6 @@ impl ExecutionContext {
         // Evaluate user script (placeholder)
         Self::evaluate_script(isolate, &context, &script.code)?;
 
-        // Setup ES Modules handler (placeholder)
-        Self::setup_es_modules_handler(isolate, &context)?;
-
         // Start event loop in background (with optional Operations handle)
         // Use tokio::spawn (not spawn_local) so the event loop survives LocalSet drops.
         // This is critical for warm context reuse: the LocalSet is dropped between
@@ -406,21 +403,6 @@ impl ExecutionContext {
                 "V8 runtime only supports JavaScript code".to_string(),
             )),
         }
-    }
-
-    /// Helper: Setup ES modules handler
-    ///
-    /// Uses the shared implementation from worker module.
-    fn setup_es_modules_handler(
-        isolate: &mut v8::Isolate,
-        context: &v8::Global<v8::Context>,
-    ) -> Result<(), TerminationReason> {
-        crate::worker::setup_es_modules_handler(isolate, context).map_err(|e| {
-            TerminationReason::InitializationError(format!(
-                "Failed to setup ES modules handler: {}",
-                e
-            ))
-        })
     }
 
     /// Evaluate JavaScript code in this context

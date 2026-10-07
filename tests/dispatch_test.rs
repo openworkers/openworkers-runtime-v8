@@ -119,17 +119,14 @@ async fn a_throwing_listener_answers_500() {
 async fn a_rejected_respond_with_answers_500() {
     let code = "addEventListener('fetch', e => e.respondWith(Promise.reject(new Error('boom'))));";
 
-    assert_eq!(fetch(code).await, (500, "Promise rejected: boom".into()));
+    assert_eq!(fetch(code).await, (500, "Handler exception: boom".into()));
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_rejected_returned_promise_answers_500() {
     let code = "addEventListener('fetch', async () => { throw new Error('boom'); });";
 
-    assert_eq!(
-        fetch(code).await,
-        (500, "Handler promise rejected: boom".into())
-    );
+    assert_eq!(fetch(code).await, (500, "Handler exception: boom".into()));
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -343,4 +340,82 @@ async fn a_module_with_scheduled_alone_serves_an_invoked_task() {
     let result = task(code, json!(null)).await;
 
     assert!(result.success, "{:?}", result.error);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn respond_with_from_a_timer_answers() {
+    let code = "addEventListener('fetch', e => { setTimeout(() => e.respondWith(new Response('late')), 20); });";
+
+    assert_eq!(fetch(code).await, (200, "late".into()));
+}
+
+// what the dispatch refuses, at once rather than at the wall clock
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_module_fetch_that_returns_nothing_answers_500() {
+    assert_eq!(
+        fetch("globalThis.default = { fetch() {} };").await,
+        (
+            500,
+            "Handler exception: the fetch handler did not respond".into()
+        )
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn respond_with_something_else_than_a_response_answers_500() {
+    assert_eq!(
+        fetch("addEventListener('fetch', e => e.respondWith('text'));").await,
+        (
+            500,
+            "Handler exception: the fetch handler did not answer with a Response".into()
+        )
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_second_respond_with_keeps_the_first_response() {
+    let code = r#"
+        addEventListener('fetch', e => {
+            e.respondWith(new Response('first'));
+            e.respondWith(new Response('second'));
+        });
+    "#;
+
+    assert_eq!(fetch(code).await, (200, "first".into()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_task_without_a_task_handler_fails_at_once() {
+    let started = std::time::Instant::now();
+    let code = "addEventListener('fetch', e => e.respondWith(new Response('x')));";
+    let result = task(code, json!(null)).await;
+
+    assert!(!result.success);
+    assert_eq!(
+        result.error.as_deref(),
+        Some("Worker does not implement task handler")
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_module_with_fetch_alone_refuses_a_task() {
+    let code = "globalThis.default = { fetch: () => new Response('x') };";
+    let result = task(code, json!(null)).await;
+
+    assert!(!result.success);
+    assert_eq!(
+        result.error.as_deref(),
+        Some("Worker does not implement task handler")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_task_respond_with_keeps_plain_data() {
+    let code = "addEventListener('task', e => e.respondWith({ rows: 3 }));";
+    let result = task(code, json!(null)).await;
+
+    assert!(result.success, "{:?}", result.error);
+    assert_eq!(result.data, Some(json!({ "rows": 3 })));
 }
