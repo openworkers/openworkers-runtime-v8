@@ -19,7 +19,8 @@ use crate::LockerManagedIsolate;
 use crate::async_waiter::AsyncWaiter;
 use crate::execution_helpers::{
     AbortConfig, EventLoopExit, check_exit_condition, get_completion_state, get_response_stream_id,
-    read_response_object, signal_client_disconnect, trigger_fetch_handler, trigger_task_handler,
+    read_response_object, read_task_result, signal_client_disconnect, trigger_fetch_handler,
+    trigger_task_handler,
 };
 use crate::request_context::RequestContext;
 use crate::runtime::stream_manager;
@@ -159,8 +160,9 @@ impl ExecutionContext {
             v8::Global::new(scope.as_ref(), context)
         };
 
-        // Setup addEventListener (placeholder - actual setup done during context creation)
-        Self::setup_event_listener(isolate, &context)?;
+        let dispatch = crate::worker::install_dispatch(isolate, &context).map_err(|e| {
+            TerminationReason::InitializationError(format!("Failed to install the dispatch: {e}"))
+        })?;
 
         // Setup environment variables and bindings (placeholder)
         Self::setup_env(isolate, &context, &script.env, &script.bindings)?;
@@ -197,6 +199,7 @@ impl ExecutionContext {
         let request = RequestContext::new(
             context,
             slots,
+            dispatch,
             scheduler_tx,
             callback_rx,
             callback_notify,
@@ -260,21 +263,6 @@ impl ExecutionContext {
         // SAFETY: the pointer comes from a live isolate owned by the pool, and
         // callers hold its lock.
         unsafe { v8::Isolate::from_raw_isolate_ptr(self.isolate) }
-    }
-
-    /// Helper: Setup addEventListener in the context
-    ///
-    /// Uses the shared implementation from worker module.
-    fn setup_event_listener(
-        isolate: &mut v8::Isolate,
-        context: &v8::Global<v8::Context>,
-    ) -> Result<(), TerminationReason> {
-        crate::worker::setup_event_listener(isolate, context).map_err(|e| {
-            TerminationReason::InitializationError(format!(
-                "Failed to setup addEventListener: {}",
-                e
-            ))
-        })
     }
 
     /// Helper: Setup environment
@@ -582,23 +570,27 @@ impl ExecutionContext {
             let mut scope = scope.init();
             let context = v8::Local::new(&scope, &self.request.context);
             let scope = &mut v8::ContextScope::new(&mut scope, context);
-            let global = context.global(scope);
+            let handle = self
+                .request
+                .pending
+                .as_ref()
+                .map(|handle| v8::Local::new(scope, handle));
 
             // Basic exit condition check
-            let base_exit = check_exit_condition(scope, global, exit_condition);
+            let base_exit = check_exit_condition(scope, handle, exit_condition);
 
             // If abort detection is enabled, handle client disconnects
             if let Some(config) = abort_config {
-                let (request_complete, active_streams) = get_completion_state(scope, global);
+                let (request_complete, streaming) = get_completion_state(scope, handle);
 
                 // Detect client disconnect and signal abort to JS
-                if active_streams > 0
+                if streaming
                     && abort_signaled_at.is_none()
-                    && let Some(stream_id) = get_response_stream_id(scope, global)
+                    && let Some(stream_id) = get_response_stream_id(scope, handle)
                     && !self.request.stream_manager.has_sender(stream_id)
                 {
                     *abort_signaled_at = Some(tokio::time::Instant::now());
-                    signal_client_disconnect(scope);
+                    signal_client_disconnect(scope, handle);
                 }
 
                 // Check grace period
@@ -950,12 +942,16 @@ impl ExecutionContext {
 
                     trigger_fetch_handler(
                         scope,
+                        &self.request.dispatch,
                         &req.url,
                         req.method.as_str(),
                         &req.headers,
                         &mut req.body,
                         body_stream_id,
                     )
+                    .map(|handle| {
+                        self.request.pending = Some(handle);
+                    })
                 };
 
                 if let Some(ref waiter) = async_waiter {
@@ -992,9 +988,15 @@ impl ExecutionContext {
                     let mut scope = scope.init();
                     let context = v8::Local::new(&scope, &self.request.context);
                     let scope = &mut v8::ContextScope::new(&mut scope, context);
+                    let handle = self
+                        .request
+                        .pending
+                        .as_ref()
+                        .map(|handle| v8::Local::new(scope, handle));
 
                     read_response_object(
                         scope,
+                        handle,
                         &self.request.stream_manager,
                         self.limits.stream_buffer_size,
                     )
@@ -1058,7 +1060,9 @@ impl ExecutionContext {
                     let context = v8::Local::new(&scope, &self.request.context);
                     let scope = &mut v8::ContextScope::new(&mut scope, context);
 
-                    trigger_task_handler(scope, &task_init)
+                    trigger_task_handler(scope, &self.request.dispatch, &task_init).map(|handle| {
+                        self.request.pending = Some(handle);
+                    })
                 };
 
                 if let Some(ref waiter) = async_waiter {
@@ -1095,51 +1099,13 @@ impl ExecutionContext {
                     let mut scope = scope.init();
                     let context = v8::Local::new(&scope, &self.request.context);
                     let scope = &mut v8::ContextScope::new(&mut scope, context);
+                    let handle = self
+                        .request
+                        .pending
+                        .as_ref()
+                        .map(|handle| v8::Local::new(scope, handle));
 
-                    let global = context.global(scope);
-                    let result_key = v8::String::new(scope, "__taskResult").unwrap();
-
-                    if let Some(result_val) = global.get(scope, result_key.into()) {
-                        if result_val.is_object() {
-                            let result_obj: v8::Local<v8::Object> = result_val.try_into().unwrap();
-
-                            let success_key = v8::String::new(scope, "success").unwrap();
-                            let success = result_obj
-                                .get(scope, success_key.into())
-                                .map(|v| v.is_true())
-                                .unwrap_or(true);
-
-                            let data_key = v8::String::new(scope, "data").unwrap();
-                            let data = result_obj.get(scope, data_key.into()).and_then(|v| {
-                                if v.is_undefined() || v.is_null() {
-                                    None
-                                } else {
-                                    let json_str = v8::json::stringify(scope, v)?;
-                                    let json_string = json_str.to_rust_string_lossy(scope);
-                                    serde_json::from_str(&json_string).ok()
-                                }
-                            });
-
-                            let error_key = v8::String::new(scope, "error").unwrap();
-                            let error = result_obj.get(scope, error_key.into()).and_then(|v| {
-                                if v.is_undefined() || v.is_null() {
-                                    None
-                                } else {
-                                    Some(v.to_rust_string_lossy(scope))
-                                }
-                            });
-
-                            openworkers_core::TaskResult {
-                                success,
-                                data,
-                                error,
-                            }
-                        } else {
-                            openworkers_core::TaskResult::success()
-                        }
-                    } else {
-                        openworkers_core::TaskResult::success()
-                    }
+                    read_task_result(scope, handle)
                 };
 
                 if let Some(ref waiter) = async_waiter {
@@ -1157,8 +1123,9 @@ impl ExecutionContext {
 
     /// Reset per-request JS and Rust state for context reuse.
     ///
-    /// Must be called between requests (warm isolate path). Clears response state,
-    /// completion flag, stream state, timer callbacks, stale callbacks, and V8 Global handles.
+    /// Must be called between requests (warm isolate path). Clears the previous
+    /// event's handle, stream state, timer callbacks, stale callbacks, and V8
+    /// Global handles.
     ///
     /// Cancels any lingering `terminate_execution` flag before evaluating JS.
     /// Does NOT touch the event loop (it persists across requests).
@@ -1173,14 +1140,11 @@ impl ExecutionContext {
             self.isolate().cancel_terminate_execution();
         }
 
-        // 1. Reset JS globals (response, completion, streams, task result, timers)
+        // 1. Drop the previous event's handle, under the lock, and its timers
+        self.request.pending = None;
+
         self.evaluate(&WorkerCode::JavaScript(
             r#"
-            globalThis.__lastResponse = undefined;
-            globalThis.__requestComplete = false;
-            globalThis.__lastResponseStreamId = undefined;
-            globalThis.__activeResponseStreams = 0;
-            globalThis.__taskResult = undefined;
             globalThis.__timerCallbacks.clear();
             globalThis.__intervalIds.clear();
             "#

@@ -9,16 +9,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use v8;
 
-/// Condition to check for exiting the event loop
+/// Condition to check for exiting the event loop, read from the handle
+/// src/js/dispatch.js answers for the event in flight.
 #[derive(Debug, Clone, Copy)]
 pub enum EventLoopExit {
-    /// Wait for __lastResponse to be a valid Response object (has status property)
+    /// `answer` is fulfilled: the Response, or the task result
     ResponseReady,
-    /// Wait for __requestComplete to be true (handler finished, including async work)
+    /// `done` is fulfilled: the answer and every waitUntil promise
     HandlerComplete,
-    /// Wait for __activeResponseStreams == 0 only (don't wait for waitUntil)
+    /// `streamed` is fulfilled: the response body is out
     StreamsComplete,
-    /// Wait for __requestComplete && __activeResponseStreams == 0 (fully complete)
+    /// `done` and `streamed` are both fulfilled
     FullyComplete,
 }
 
@@ -48,111 +49,102 @@ impl Default for AbortConfig {
     }
 }
 
-/// Check if the specified exit condition is met (free function to avoid borrow conflicts)
+/// The state of the promise the handle holds under `name`. dispatch.js sets
+/// all three, so `None` means the handle is not one of its own.
+fn promise_state(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    handle: v8::Local<v8::Object>,
+    name: &str,
+) -> Option<v8::PromiseState> {
+    let key = v8::String::new(scope, name).unwrap();
+    let value = handle.get(scope, key.into())?;
+
+    v8::Local::<v8::Promise>::try_from(value)
+        .ok()
+        .map(|promise| promise.state())
+}
+
+/// A promise of the handle that no longer waits. dispatch.js fulfils every
+/// one; a rejection counts as settled, so a fault in the glue ends the wait
+/// instead of holding it to the wall clock.
+fn settled(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    handle: v8::Local<v8::Object>,
+    name: &str,
+) -> bool {
+    !matches!(
+        promise_state(scope, handle, name),
+        Some(v8::PromiseState::Pending)
+    )
+}
+
+/// Whether `condition` holds for the event in flight. With no event in
+/// flight there is nothing to wait for.
 pub fn check_exit_condition(
     scope: &mut v8::ContextScope<v8::HandleScope>,
-    global: v8::Local<v8::Object>,
+    handle: Option<v8::Local<v8::Object>>,
     condition: EventLoopExit,
 ) -> bool {
+    let Some(handle) = handle else {
+        return true;
+    };
+
     match condition {
-        EventLoopExit::ResponseReady => {
-            // Check __lastResponse is a valid Response object (not undefined, not a Promise)
-            let resp_key = v8::String::new(scope, "__lastResponse").unwrap();
-
-            if let Some(resp_val) = global.get(scope, resp_key.into())
-                && !resp_val.is_undefined()
-                && !resp_val.is_null()
-                && !resp_val.is_promise()
-                && let Some(resp_obj) = resp_val.to_object(scope)
-            {
-                // Check if it has a 'status' property (indicates it's a Response)
-                let status_key = v8::String::new(scope, "status").unwrap();
-                return resp_obj.get(scope, status_key.into()).is_some();
-            }
-
-            false
-        }
-
-        EventLoopExit::HandlerComplete => {
-            // Check __requestComplete == true
-            let complete_key = v8::String::new(scope, "__requestComplete").unwrap();
-            global
-                .get(scope, complete_key.into())
-                .map(|v| v.is_true())
-                .unwrap_or(false)
-        }
-
-        EventLoopExit::StreamsComplete => {
-            // Only wait for active response streams to finish (not waitUntil).
-            // Used after sending the response so streaming bodies complete,
-            // while waitUntil promises continue in the background.
-            let streams_key = v8::String::new(scope, "__activeResponseStreams").unwrap();
-            let active_streams = global
-                .get(scope, streams_key.into())
-                .and_then(|v| v.uint32_value(scope))
-                .unwrap_or(0);
-
-            active_streams == 0
-        }
-
+        EventLoopExit::ResponseReady => settled(scope, handle, "answer"),
+        EventLoopExit::HandlerComplete => settled(scope, handle, "done"),
+        EventLoopExit::StreamsComplete => settled(scope, handle, "streamed"),
         EventLoopExit::FullyComplete => {
-            // Check __requestComplete && __activeResponseStreams == 0
-            let complete_key = v8::String::new(scope, "__requestComplete").unwrap();
-            let request_complete = global
-                .get(scope, complete_key.into())
-                .map(|v| v.is_true())
-                .unwrap_or(false);
-
-            if !request_complete {
-                return false;
-            }
-
-            let streams_key = v8::String::new(scope, "__activeResponseStreams").unwrap();
-            let active_streams = global
-                .get(scope, streams_key.into())
-                .and_then(|v| v.uint32_value(scope))
-                .unwrap_or(0);
-
-            active_streams == 0
+            settled(scope, handle, "done") && settled(scope, handle, "streamed")
         }
     }
 }
 
-/// Get the completion state: (request_complete, active_streams)
-#[inline]
+/// Whether the event is done, and whether its response body is still going
+/// out.
 pub fn get_completion_state(
     scope: &mut v8::ContextScope<v8::HandleScope>,
-    global: v8::Local<v8::Object>,
-) -> (bool, u32) {
-    let complete_key = v8::String::new(scope, "__requestComplete").unwrap();
-    let request_complete = global
-        .get(scope, complete_key.into())
-        .map(|v| v.is_true())
-        .unwrap_or(false);
+    handle: Option<v8::Local<v8::Object>>,
+) -> (bool, bool) {
+    let Some(handle) = handle else {
+        return (true, false);
+    };
 
-    let streams_key = v8::String::new(scope, "__activeResponseStreams").unwrap();
-    let active_streams = global
-        .get(scope, streams_key.into())
-        .and_then(|v| v.uint32_value(scope))
-        .unwrap_or(0);
-
-    (request_complete, active_streams)
+    (
+        settled(scope, handle, "done"),
+        !settled(scope, handle, "streamed"),
+    )
 }
 
-/// Get the response stream ID if present
-#[inline]
-pub fn get_response_stream_id(
-    scope: &mut v8::ContextScope<v8::HandleScope>,
-    global: v8::Local<v8::Object>,
-) -> Option<u64> {
-    let stream_id_key = v8::String::new(scope, "__lastResponseStreamId").unwrap();
-    let stream_id_val = global.get(scope, stream_id_key.into())?;
+/// The Response the handle answered, once it has.
+fn answered_response<'s>(
+    scope: &mut v8::ContextScope<'_, 's, v8::HandleScope>,
+    handle: v8::Local<v8::Object>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    let key = v8::String::new(scope, "answer").unwrap();
+    let value = handle.get(scope, key.into())?;
+    let promise = v8::Local::<v8::Promise>::try_from(value).ok()?;
 
-    if stream_id_val.is_undefined() || stream_id_val.is_null() {
+    if promise.state() != v8::PromiseState::Fulfilled {
         return None;
     }
 
-    stream_id_val.uint32_value(scope).map(|id| id as u64)
+    promise.result(scope).to_object(scope)
+}
+
+/// The id of the stream the response body goes out on, if it streams.
+pub fn get_response_stream_id(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    handle: Option<v8::Local<v8::Object>>,
+) -> Option<u64> {
+    let response = answered_response(scope, handle?)?;
+    let key = v8::String::new(scope, "_responseStreamId").unwrap();
+    let id = response.get(scope, key.into())?;
+
+    if id.is_undefined() || id.is_null() {
+        return None;
+    }
+
+    id.uint32_value(scope).map(u64::from)
 }
 
 /// Extract headers from a Response object.
@@ -230,49 +222,108 @@ pub fn extract_headers_from_response(
     headers
 }
 
-/// Signal to JS that the client has disconnected.
-/// Calls __signalClientDisconnect() which is always defined in setup_event_listener.
-#[inline]
-pub fn signal_client_disconnect(scope: &mut v8::ContextScope<v8::HandleScope>) {
-    let global = scope.get_current_context().global(scope);
-    let fn_key = v8::String::new(scope, "__signalClientDisconnect").unwrap();
+/// Tells the event in flight that the client hung up, so a streaming body
+/// stops.
+pub fn signal_client_disconnect(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    handle: Option<v8::Local<v8::Object>>,
+) {
+    let Some(handle) = handle else {
+        return;
+    };
 
-    if let Some(fn_val) = global.get(scope, fn_key.into())
-        && let Ok(func) = v8::Local::<v8::Function>::try_from(fn_val)
+    let key = v8::String::new(scope, "disconnect").unwrap();
+
+    if let Some(value) = handle.get(scope, key.into())
+        && let Ok(disconnect) = v8::Local::<v8::Function>::try_from(value)
     {
-        let _ = func.call(scope, global.into(), &[]);
+        disconnect.call(scope, handle.into(), &[]);
     }
 }
 
-/// Calls the task handler with the event it reads: `taskId`, `attempt`,
+/// Calls `dispatch[name](argument)` and keeps the handle it answers.
+fn dispatch(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    dispatch: &v8::Global<v8::Object>,
+    name: &str,
+    argument: v8::Local<v8::Value>,
+) -> Result<v8::Global<v8::Object>, String> {
+    let dispatch = v8::Local::new(scope, dispatch);
+    let key = v8::String::new(scope, name).unwrap();
+    let function = dispatch
+        .get(scope, key.into())
+        .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
+        .expect("dispatch.js answers { fetch, task }");
+
+    // None means V8 was terminated (CPU or wall-clock limit)
+    let handle = function
+        .call(scope, dispatch.into(), &[argument])
+        .ok_or("Execution terminated")?;
+    let handle = handle
+        .to_object(scope)
+        .expect("dispatch.js answers an object for every event");
+
+    Ok(v8::Global::new(scope, handle))
+}
+
+/// Hands a task to the guest with the event it reads: `taskId`, `attempt`,
 /// `payload`, and `scheduledTime` with `cron` when a schedule fired the task.
-/// `__taskHandler` serves every task; a worker that listens for `scheduled`
-/// alone has only `__scheduledHandler`. No handler is not an error here: the
-/// completion check reports it.
 pub fn trigger_task_handler(
     scope: &mut v8::ContextScope<v8::HandleScope>,
+    dispatcher: &v8::Global<v8::Object>,
     task: &TaskInit,
-) -> Result<(), String> {
-    let global = scope.get_current_context().global(scope);
-
-    let handler = ["__taskHandler", "__scheduledHandler"]
-        .into_iter()
-        .find_map(|name| {
-            let key = v8::String::new(scope, name).unwrap();
-            let value = global.get(scope, key.into())?;
-            v8::Local::<v8::Function>::try_from(value).ok()
-        });
-
-    let Some(handler) = handler else {
-        return Ok(());
-    };
-
+) -> Result<v8::Global<v8::Object>, String> {
     let event = v8::Object::new(scope);
     set_task_fields(scope, event, task);
 
-    match handler.call(scope, global.into(), &[event.into()]) {
-        Some(_) => Ok(()),
-        None => Err("Execution terminated".to_string()),
+    dispatch(scope, dispatcher, "task", event.into())
+}
+
+/// The task result the handle answered: what the guest returned, or the
+/// error that stopped it.
+pub fn read_task_result(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    handle: Option<v8::Local<v8::Object>>,
+) -> openworkers_core::TaskResult {
+    let result = handle.and_then(|handle| {
+        let key = v8::String::new(scope, "done").unwrap();
+        let value = handle.get(scope, key.into())?;
+        let promise = v8::Local::<v8::Promise>::try_from(value).ok()?;
+
+        (promise.state() == v8::PromiseState::Fulfilled)
+            .then(|| promise.result(scope))?
+            .to_object(scope)
+    });
+
+    let Some(result) = result else {
+        return openworkers_core::TaskResult::err("the task gave no result");
+    };
+
+    let key = v8::String::new(scope, "success").unwrap();
+    let success = result
+        .get(scope, key.into())
+        .map(|value| value.is_true())
+        .unwrap_or(false);
+
+    let key = v8::String::new(scope, "data").unwrap();
+    let data = result.get(scope, key.into()).and_then(|value| {
+        if value.is_undefined() || value.is_null() {
+            return None;
+        }
+
+        let json = v8::json::stringify(scope, value)?.to_rust_string_lossy(scope);
+        serde_json::from_str(&json).ok()
+    });
+
+    let key = v8::String::new(scope, "error").unwrap();
+    let error = result.get(scope, key.into()).and_then(|value| {
+        (!value.is_undefined() && !value.is_null()).then(|| value.to_rust_string_lossy(scope))
+    });
+
+    openworkers_core::TaskResult {
+        success,
+        data,
+        error,
     }
 }
 
@@ -312,29 +363,19 @@ fn set_task_fields(
     }
 }
 
-/// Trigger the fetch handler with a request created from the given parameters.
-///
-/// This is shared between Worker and ExecutionContext to avoid code duplication.
-/// Creates a Request object and calls __triggerFetch with it.
-///
-/// # Arguments
-/// * `scope` - V8 context scope
-/// * `url` - Request URL
-/// * `method` - HTTP method
-/// * `headers` - Request headers
-/// * `body` - Request body (will be consumed if Bytes)
-/// * `body_stream_id` - Optional stream ID for streaming bodies
-///
-/// # Returns
-/// Ok(()) if handler was triggered, Err if execution was terminated
+/// Hands a request to the guest as a `Request` built from these parts, and
+/// answers the handle for it. A streamed body arrives as `body_stream_id`, a
+/// buffered one is taken out of `body`.
+#[allow(clippy::too_many_arguments)]
 pub fn trigger_fetch_handler(
     scope: &mut v8::ContextScope<v8::HandleScope>,
+    dispatcher: &v8::Global<v8::Object>,
     url: &str,
     method: &str,
     headers: &HashMap<String, String>,
     body: &mut RequestBody,
     body_stream_id: Option<u64>,
-) -> Result<(), String> {
+) -> Result<v8::Global<v8::Object>, String> {
     let global = scope.get_current_context().global(scope);
 
     // Get Request constructor
@@ -417,48 +458,20 @@ pub fn trigger_fetch_handler(
         obj
     };
 
-    // Trigger fetch handler
-    let trigger_key = v8::String::new(scope, "__triggerFetch").unwrap();
-
-    if let Some(trigger_val) = global.get(scope, trigger_key.into())
-        && trigger_val.is_function()
-    {
-        let trigger_fn: v8::Local<v8::Function> = trigger_val.try_into().unwrap();
-        let result = trigger_fn.call(scope, global.into(), &[request_obj.into()]);
-
-        // If call returned None, V8 was terminated (CPU/wall-clock timeout)
-        if result.is_none() {
-            return Err("Execution terminated".to_string());
-        }
-    }
-
-    Ok(())
+    dispatch(scope, dispatcher, "fetch", request_obj.into())
 }
 
-/// Read the response object from `__lastResponse` and convert to HttpResponse.
-///
-/// This is shared between Worker and ExecutionContext to avoid code duplication.
-///
-/// # Arguments
-/// * `scope` - V8 context scope
-/// * `stream_manager` - StreamManager for handling streaming responses
-/// * `buffer_size` - Buffer size for response stream channel
-///
-/// # Returns
-/// A tuple of (status, HttpResponse) or an error
+/// The Response the handle answered, as an HttpResponse: its body streams
+/// when the guest streams it, and is buffered otherwise.
 pub fn read_response_object(
     scope: &mut v8::ContextScope<v8::HandleScope>,
+    handle: Option<v8::Local<v8::Object>>,
     stream_manager: &Arc<StreamManager>,
     buffer_size: usize,
 ) -> Result<(u16, HttpResponse), String> {
-    let global = scope.get_current_context().global(scope);
-
-    let resp_key = v8::String::new(scope, "__lastResponse").unwrap();
-    let resp_val = global
-        .get(scope, resp_key.into())
+    let resp_obj = handle
+        .and_then(|handle| answered_response(scope, handle))
         .ok_or("No response set")?;
-
-    let resp_obj = resp_val.to_object(scope).ok_or("Invalid response object")?;
 
     let status_key = v8::String::new(scope, "status").unwrap();
     let status = resp_obj

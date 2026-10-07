@@ -31,6 +31,13 @@ pub struct RequestContext {
     /// Binding state for `context`; must outlive it.
     _slots: Rc<crate::context_slots::ContextSlots>,
 
+    /// The `{ fetch, task }` object src/js/dispatch.js evaluates to in
+    /// `context`, kept here so the guest cannot reach it.
+    pub dispatch: v8::Global<v8::Object>,
+
+    /// The handle `dispatch` answered for the event in flight.
+    pub pending: Option<v8::Global<v8::Object>>,
+
     /// Channel to send messages to this request's event loop
     pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
 
@@ -78,6 +85,7 @@ impl RequestContext {
     pub fn new(
         context: v8::Global<v8::Context>,
         slots: Rc<crate::context_slots::ContextSlots>,
+        dispatch: v8::Global<v8::Object>,
         scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
         callback_rx: mpsc::UnboundedReceiver<CallbackMessage>,
         callback_notify: Arc<Notify>,
@@ -94,6 +102,8 @@ impl RequestContext {
         Self {
             context,
             _slots: slots,
+            dispatch,
+            pending: None,
             scheduler_tx,
             callback_rx,
             callback_notify,

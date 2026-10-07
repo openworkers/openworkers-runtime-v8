@@ -419,3 +419,52 @@ async fn a_task_respond_with_keeps_plain_data() {
     assert!(result.success, "{:?}", result.error);
     assert_eq!(result.data, Some(json!({ "rows": 3 })));
 }
+
+// what the guest can no longer reach
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_guest_sees_no_dispatch_internals() {
+    let code = r#"
+        addEventListener('fetch', e => {
+            const internals = [
+                '__triggerFetch', '__taskHandler', '__scheduledHandler', '__lastResponse',
+                '__requestComplete', '__taskResult', '__activeResponseStreams',
+                '__lastResponseStreamId', '__signalClientDisconnect', '__streamResponseBody',
+            ];
+            e.respondWith(new Response(internals.filter(name => name in globalThis).join(',') || 'none'));
+        });
+    "#;
+
+    assert_eq!(fetch(code).await, (200, "none".into()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn globals_the_guest_sets_do_not_answer_for_it() {
+    let code = r#"
+        addEventListener('fetch', e => {
+            globalThis.__lastResponse = new Response('fake', { status: 418 });
+            globalThis.__requestComplete = true;
+            setTimeout(() => e.respondWith(new Response('real')), 20);
+        });
+    "#;
+
+    assert_eq!(fetch(code).await, (200, "real".into()));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_replaced_text_encoder_does_not_break_a_streamed_body() {
+    let code = r#"
+        addEventListener('fetch', e => {
+            globalThis.TextEncoder = class { encode() { throw new Error('replaced'); } };
+            const body = new ReadableStream({
+                start(controller) {
+                    controller.enqueue('text chunk');
+                    controller.close();
+                },
+            });
+            e.respondWith(new Response(body));
+        });
+    "#;
+
+    assert_eq!(fetch(code).await, (200, "text chunk".into()));
+}

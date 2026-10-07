@@ -2,7 +2,8 @@
 
 use crate::execution_helpers::{
     AbortConfig, EventLoopExit, check_exit_condition, get_completion_state, get_response_stream_id,
-    read_response_object, signal_client_disconnect, trigger_fetch_handler, trigger_task_handler,
+    read_response_object, read_task_result, signal_client_disconnect, trigger_fetch_handler,
+    trigger_task_handler,
 };
 use crate::runtime::{Runtime, run_event_loop};
 use crate::security::{CpuEnforcer, TimeoutGuard};
@@ -24,6 +25,12 @@ use v8;
 ///
 /// **For production:** Use [`crate::execute_pinned`] instead for better performance.
 pub struct Worker {
+    // The two handles go before `runtime`, which owns the isolate: fields drop
+    // in order, and a handle has to drop while its isolate exists.
+    /// The handle `dispatch` answered for the event in flight.
+    pending: Option<v8::Global<v8::Object>>,
+    /// The `{ fetch, task }` object src/js/dispatch.js evaluates to.
+    dispatch: v8::Global<v8::Object>,
     pub(crate) runtime: Runtime,
     _event_loop_handle: AbortOnDropHandle<()>,
     aborted: Arc<AtomicBool>,
@@ -174,12 +181,8 @@ impl Worker {
             worker_snapshot,
         );
 
-        // Setup addEventListener
-        setup_event_listener(&mut runtime.isolate, &runtime.context).map_err(|e| {
-            TerminationReason::InitializationError(format!(
-                "Failed to setup addEventListener: {}",
-                e
-            ))
+        let dispatch = install_dispatch(&mut runtime.isolate, &runtime.context).map_err(|e| {
+            TerminationReason::InitializationError(format!("Failed to install the dispatch: {e}"))
         })?;
 
         // Setup environment variables and bindings
@@ -219,6 +222,8 @@ impl Worker {
         });
 
         Ok(Self {
+            pending: None,
+            dispatch,
             runtime,
             _event_loop_handle: AbortOnDropHandle::new(event_loop_handle),
             aborted: Arc::new(AtomicBool::new(false)),
@@ -248,17 +253,13 @@ impl Worker {
     /// Clear what the previous request left behind.
     ///
     /// A Worker keeps its isolate for its whole life, so a second `exec` would
-    /// otherwise answer with the previous response, and wait forever on a
-    /// stream counter that a client who hung up never brought back to zero.
+    /// otherwise fire the previous request's timers and read its callbacks.
     /// The pooled path does the same in `ExecutionContext::reset`.
     fn reset_request_state(&mut self) -> Result<(), String> {
+        self.pending = None;
+
         self.evaluate(
             r#"
-            globalThis.__lastResponse = undefined;
-            globalThis.__requestComplete = false;
-            globalThis.__lastResponseStreamId = undefined;
-            globalThis.__activeResponseStreams = 0;
-            globalThis.__taskResult = undefined;
             globalThis.__timerCallbacks.clear();
             globalThis.__intervalIds.clear();
             "#,
@@ -461,24 +462,26 @@ impl Worker {
                     let mut scope = scope.init();
                     let context = v8::Local::new(&scope, &self.runtime.context);
                     let scope = &mut v8::ContextScope::new(&mut scope, context);
-                    let global = context.global(scope);
+                    let handle = self
+                        .pending
+                        .as_ref()
+                        .map(|handle| v8::Local::new(scope, handle));
 
                     // Basic exit condition check
-                    let base_exit = check_exit_condition(scope, global, exit_condition);
+                    let base_exit = check_exit_condition(scope, handle, exit_condition);
 
                     // If abort detection is enabled, handle client disconnects
                     if let Some(ref config) = abort_config {
-                        let (request_complete, active_streams) =
-                            get_completion_state(scope, global);
+                        let (request_complete, streaming) = get_completion_state(scope, handle);
 
                         // Detect client disconnect and signal abort to JS
-                        if active_streams > 0
+                        if streaming
                             && abort_signaled_at.is_none()
-                            && let Some(stream_id) = get_response_stream_id(scope, global)
+                            && let Some(stream_id) = get_response_stream_id(scope, handle)
                             && !self.runtime.stream_manager.has_sender(stream_id)
                         {
                             abort_signaled_at = Some(tokio::time::Instant::now());
-                            signal_client_disconnect(scope);
+                            signal_client_disconnect(scope, handle);
                         }
 
                         // Check grace period
@@ -536,7 +539,7 @@ impl Worker {
             None
         };
 
-        // Trigger fetch handler using shared helper
+        // Hand the request to the guest
         {
             use std::pin::pin;
             let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
@@ -544,30 +547,35 @@ impl Worker {
             let context = v8::Local::new(&scope, &self.runtime.context);
             let scope = &mut v8::ContextScope::new(&mut scope, context);
 
-            trigger_fetch_handler(
+            self.pending = Some(trigger_fetch_handler(
                 scope,
+                &self.dispatch,
                 &req.url,
                 req.method.as_str(),
                 &req.headers,
                 &mut req.body,
                 body_stream_id,
-            )?;
+            )?);
         }
 
         // Wait for response to be ready (no abort detection needed yet)
         self.await_event_loop(wall_guard, cpu_guard, EventLoopExit::ResponseReady, None)
             .await?;
 
-        // Read response from global __lastResponse using shared helper
         let (status, response) = {
             use std::pin::pin;
             let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
             let mut scope = scope.init();
             let context = v8::Local::new(&scope, &self.runtime.context);
             let scope = &mut v8::ContextScope::new(&mut scope, context);
+            let handle = self
+                .pending
+                .as_ref()
+                .map(|handle| v8::Local::new(scope, handle));
 
             read_response_object(
                 scope,
+                handle,
                 &self.runtime.stream_manager,
                 self.runtime.limits.stream_buffer_size,
             )?
@@ -608,7 +616,7 @@ impl Worker {
             let context = v8::Local::new(&scope, &self.runtime.context);
             let scope = &mut v8::ContextScope::new(&mut scope, context);
 
-            trigger_task_handler(scope, &task_init)?;
+            self.pending = Some(trigger_task_handler(scope, &self.dispatch, &task_init)?);
         }
 
         // Wait for handler to complete (including async work and waitUntil promises)
@@ -616,69 +624,24 @@ impl Worker {
         self.await_event_loop(wall_guard, cpu_guard, EventLoopExit::HandlerComplete, None)
             .await?;
 
-        // Read __taskResult from JS and send it back
         let task_result = {
             use std::pin::pin;
             let scope = pin!(v8::HandleScope::new(&mut self.runtime.isolate));
             let mut scope = scope.init();
             let context = v8::Local::new(&scope, &self.runtime.context);
             let scope = &mut v8::ContextScope::new(&mut scope, context);
+            let handle = self
+                .pending
+                .as_ref()
+                .map(|handle| v8::Local::new(scope, handle));
 
-            let global = context.global(scope);
-            let result_key = v8::String::new(scope, "__taskResult").unwrap();
-
-            if let Some(result_val) = global.get(scope, result_key.into()) {
-                if result_val.is_object() {
-                    let result_obj: v8::Local<v8::Object> = result_val.try_into().unwrap();
-
-                    // Extract success
-                    let success_key = v8::String::new(scope, "success").unwrap();
-                    let success = result_obj
-                        .get(scope, success_key.into())
-                        .map(|v| v.is_true())
-                        .unwrap_or(true);
-
-                    // Extract data (serialize to JSON)
-                    let data_key = v8::String::new(scope, "data").unwrap();
-                    let data = result_obj.get(scope, data_key.into()).and_then(|v| {
-                        if v.is_undefined() || v.is_null() {
-                            None
-                        } else {
-                            let json_str = v8::json::stringify(scope, v)?;
-                            let json_string = json_str.to_rust_string_lossy(scope);
-                            serde_json::from_str(&json_string).ok()
-                        }
-                    });
-
-                    // Extract error
-                    let error_key = v8::String::new(scope, "error").unwrap();
-                    let error = result_obj.get(scope, error_key.into()).and_then(|v| {
-                        if v.is_undefined() || v.is_null() {
-                            None
-                        } else {
-                            Some(v.to_rust_string_lossy(scope))
-                        }
-                    });
-
-                    openworkers_core::TaskResult {
-                        success,
-                        data,
-                        error,
-                    }
-                } else {
-                    openworkers_core::TaskResult::success()
-                }
-            } else {
-                openworkers_core::TaskResult::success()
-            }
+            read_task_result(scope, handle)
         };
 
         let _ = task_init.res_tx.send(task_result);
         Ok(())
     }
 }
-
-// Helper functions are now in execution_helpers module
 
 /// Evaluate JavaScript code in a V8 context
 ///
@@ -751,13 +714,28 @@ pub(crate) fn setup_env(
     evaluate_in_context(isolate, context, &code)
 }
 
-/// Installs `addEventListener`, the dispatch of events to the guest's
-/// handlers and the response streaming from `js/dispatch.js`.
-pub(crate) fn setup_event_listener(
+/// Installs `addEventListener` and answers the `{ fetch, task }` object
+/// `js/dispatch.js` evaluates to, which the host keeps out of the guest's
+/// reach.
+pub(crate) fn install_dispatch(
     isolate: &mut v8::Isolate,
     context: &v8::Global<v8::Context>,
-) -> Result<(), String> {
-    evaluate_in_context(isolate, context, include_str!("js/dispatch.js"))
+) -> Result<v8::Global<v8::Object>, String> {
+    use std::pin::pin;
+
+    let scope = pin!(v8::HandleScope::new(isolate));
+    let mut scope = scope.init();
+    let ctx = v8::Local::new(&scope, context);
+    let scope = &mut v8::ContextScope::new(&mut scope, ctx);
+
+    let code = v8::String::new(scope, include_str!("js/dispatch.js")).unwrap();
+    let script = v8::Script::compile(scope, code, None).ok_or("dispatch.js does not compile")?;
+    let dispatch = script
+        .run(scope)
+        .and_then(|value| value.to_object(scope))
+        .ok_or("dispatch.js did not answer an object")?;
+
+    Ok(v8::Global::new(scope, dispatch))
 }
 
 impl openworkers_core::Worker for Worker {
