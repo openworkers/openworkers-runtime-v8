@@ -11,12 +11,6 @@ license = "MIT"
 default = []
 ptrcomp = ["v8/v8_enable_pointer_compression"]
 sandbox = ["v8/v8_enable_sandbox", "serde_v8/v8_enable_sandbox"]
-# Worker heap snapshots: full V8 heap serialization (skips parse+compile+eval).
-# Disabled by default: a worker snapshot is a second snapshot in the process,
-# and an isolate built from it while runtime-snapshot isolates are alive reads
-# their shared read-only heap out of bounds (see v8_helpers::new_isolate).
-# Code cache (always enabled) is the safe alternative (skips parse+compile only).
-unsafe-worker-snapshot = []
 
 [dependencies]
 

@@ -1,5 +1,3 @@
-#[cfg(feature = "unsafe-worker-snapshot")]
-use std::collections::HashMap;
 use std::pin::pin;
 use v8;
 
@@ -11,56 +9,6 @@ const CODE_CACHE_MAGIC: u32 = 0xC0DE_CA5E;
 #[derive(Debug)]
 pub struct SnapshotOutput {
     pub output: Vec<u8>,
-}
-
-#[cfg(feature = "unsafe-worker-snapshot")]
-/// Setup env vars on `globalThis.env` for snapshot creation.
-///
-/// Only injects plain env vars (key/value strings), not bindings (Storage, KV, etc.)
-/// which depend on native functions unavailable during snapshotting.
-/// At execution time, `setup_env` replaces this with the full env + bindings object.
-fn setup_snapshot_env(
-    scope: &mut v8::ContextScope<v8::HandleScope>,
-    env: &HashMap<String, String>,
-) {
-    let env_json = serde_json::to_string(env).unwrap_or_else(|_| "{}".to_string());
-    let code_str = format!(
-        r#"Object.defineProperty(globalThis, 'env', {{
-            value: Object.freeze({}),
-            writable: false,
-            enumerable: true,
-            configurable: true
-        }});"#,
-        env_json
-    );
-    let code = v8::String::new(scope, &code_str).unwrap();
-    let script = v8::Script::compile(scope, code, None).unwrap();
-    script.run(scope);
-}
-
-#[cfg(feature = "unsafe-worker-snapshot")]
-/// Setup no-op console stubs for snapshot creation.
-///
-/// During snapshotting, there's no log callback available, so we install
-/// stub console methods that silently discard output. These get replaced
-/// by real native-backed console bindings at execution time.
-fn setup_stub_console(scope: &mut v8::ContextScope<v8::HandleScope>) {
-    let code = v8::String::new(
-        scope,
-        r#"
-        globalThis.console = {
-            log() {},
-            info() {},
-            warn() {},
-            error() {},
-            debug() {},
-            trace() {}
-        };
-        "#,
-    )
-    .unwrap();
-    let script = v8::Script::compile(scope, code, None).unwrap();
-    script.run(scope);
 }
 
 /// Create a V8 runtime snapshot with pre-compiled runtime bindings
@@ -111,115 +59,6 @@ pub fn create_runtime_snapshot() -> Result<SnapshotOutput, String> {
     let snapshot_blob = snapshot_creator
         .create_blob(v8::FunctionCodeHandling::Keep)
         .ok_or("Failed to create snapshot blob")?;
-
-    Ok(SnapshotOutput {
-        output: snapshot_blob.to_vec(),
-    })
-}
-
-/// Create a V8 snapshot with worker code already evaluated.
-///
-/// **WARNING**: Concurrent loading of different worker snapshots crashes due to
-/// V8's `SharedHeapDeserializer::DeserializeStringTable` not being thread-safe.
-/// Use `create_code_cache` instead for production workloads.
-///
-/// Creates a standalone snapshot. The resulting blob is fully self-contained —
-/// V8's `create_blob()` re-serializes the entire heap.
-///
-/// At execution time, loading this snapshot skips transform + compile + eval,
-/// giving near-instant cold starts.
-///
-/// Uses `FunctionCodeHandling::Clear` to strip compiled bytecode from the blob.
-/// This avoids internal reference issues and produces smaller snapshots.
-/// V8 re-compiles from source on first execution (negligible cost).
-///
-/// Stub console bindings (no-ops) are installed so top-level `console.log()` calls
-/// don't crash during snapshotting. Real bindings replace them at execution time.
-#[cfg(feature = "unsafe-worker-snapshot")]
-pub fn create_worker_snapshot(
-    js_code: &str,
-    env: Option<&HashMap<String, String>>,
-) -> Result<SnapshotOutput, String> {
-    let _platform = crate::platform::get_platform();
-
-    // Always create standalone snapshots (not layered).
-    // Layered snapshots (snapshot_creator_from_existing_snapshot) corrupt V8's
-    // StringForwardingTable when multiple snapshots are created from the same
-    // base snapshot, causing "Check failed: index < size()" crashes on load.
-    let mut snapshot_creator = v8::Isolate::snapshot_creator(None, None);
-
-    // Track errors without early return — V8 requires create_blob() before dropping
-    // a snapshot creator, so we must never return early once it's created.
-    let mut eval_error: Option<String> = None;
-
-    {
-        let scope = pin!(v8::HandleScope::new(&mut snapshot_creator));
-        let mut scope = scope.init();
-        let context = v8::Context::new(&scope, Default::default());
-        let scope = &mut v8::ContextScope::new(&mut scope, context);
-
-        // Standalone snapshot — set up all pure JS APIs from scratch
-        crate::runtime::bindings::setup_global_aliases(scope);
-        crate::runtime::bindings::setup_surface(scope);
-        crate::runtime::bindings::setup_fetch_helpers(scope);
-
-        // Install no-op console stubs so top-level console.log() doesn't crash
-        setup_stub_console(scope);
-
-        // Inject env vars so top-level code can read globalThis.env
-        if let Some(env) = env {
-            setup_snapshot_env(scope, env);
-        }
-
-        // Compile and run the worker's code.
-        // Use TryCatch to capture JS exceptions without aborting.
-        let tc_scope = pin!(v8::TryCatch::new(scope));
-        let mut tc_scope = tc_scope.init();
-
-        if let Some(code_str) = v8::String::new(&tc_scope, js_code) {
-            if let Some(script) = v8::Script::compile(&tc_scope, code_str, None) {
-                if script.run(&tc_scope).is_none() {
-                    // Runtime error (throw, ReferenceError, etc.)
-                    let msg = tc_scope
-                        .exception()
-                        .and_then(|e| e.to_string(&tc_scope))
-                        .map(|s| s.to_rust_string_lossy(&tc_scope))
-                        .unwrap_or_else(|| "Unknown error".to_string());
-                    eval_error = Some(format!("Worker code threw during snapshotting: {}", msg));
-                }
-            } else {
-                let msg = tc_scope
-                    .exception()
-                    .and_then(|e| e.to_string(&tc_scope))
-                    .map(|s| s.to_rust_string_lossy(&tc_scope))
-                    .unwrap_or_else(|| "Unknown error".to_string());
-                eval_error = Some(format!("Failed to compile worker code: {}", msg));
-            }
-        } else {
-            eval_error = Some("Failed to create V8 string from worker code".to_string());
-        }
-
-        // Must always set default context before create_blob
-        tc_scope.set_default_context(context);
-    }
-
-    // Force a full GC to resolve any string forwarding indices before serialization.
-    // During execution, V8's GC may externalize strings, replacing their hash with a
-    // forwarding index into the StringForwardingTable. If these forwarding indices
-    // survive into the snapshot, the loading isolate (with an empty forwarding table)
-    // will crash with "Check failed: index < size()" in GetRawHash.
-    snapshot_creator.low_memory_notification();
-
-    // CRITICAL: Always call create_blob before dropping a snapshot creator.
-    // V8 panics if a snapshot creator is dropped without this call.
-    let snapshot_blob = snapshot_creator
-        .create_blob(v8::FunctionCodeHandling::Clear)
-        .ok_or("Failed to create worker snapshot blob")?;
-
-    // Now check if there was an eval error
-    if let Some(err) = eval_error {
-        return Err(err);
-    }
 
     Ok(SnapshotOutput {
         output: snapshot_blob.to_vec(),

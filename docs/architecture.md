@@ -7,23 +7,21 @@ V8-based JavaScript runtime for serverless workers.
 ```
 platform.rs                     ← V8 Platform (singleton, once per process)
     │
-    ├── Runtime                 ← Full V8 engine + context + event loop
-    │       └── Worker          ← Wrapper, creates isolate per request
-    │
-    └── LockerManagedIsolate    ← Reusable isolate (multi-thread safe)
-            └── Pool            ← Thread-local pool with warm context reuse
+    └── LockerManagedIsolate    ← Isolate behind a v8::Locker
+            └── ExecutionContext ← One context and its event loop
+                    ├── Pool    ← Shares isolates, keeps contexts warm
+                    └── Worker  ← One context on its own isolate
 ```
 
 ## Core Structures
 
-| Structure                | File                        | Purpose                              | Creates         |
-| ------------------------ | --------------------------- | ------------------------------------ | --------------- |
-| **Runtime**              | `runtime/mod.rs`            | V8 isolate + context + channels      | New isolate     |
-| **Worker**               | `worker.rs`                 | High-level API around Runtime        | New isolate/req |
-| **ExecutionContext**     | `execution_context.rs`      | Disposable context on pooled isolate | Tens of µs      |
-| **LockerManagedIsolate** | `locker_managed_isolate.rs` | Pool-compatible isolate              | Once/worker     |
-| **Pool**                 | `pool.rs`                   | Thread-local pool + warm cache       | Per thread      |
-| **RequestContext**       | `request_context.rs`        | Per-request V8 context state         | Per request     |
+| Structure                | File                        | Purpose                              | Creates     |
+| ------------------------ | --------------------------- | ------------------------------------ | ----------- |
+| **Worker**               | `worker.rs`                 | ExecutionContext on its own isolate  | New isolate |
+| **ExecutionContext**     | `execution_context.rs`      | Disposable context on pooled isolate | Tens of µs  |
+| **LockerManagedIsolate** | `locker_managed_isolate.rs` | Pool-compatible isolate              | Once/worker |
+| **Pool**                 | `pool.rs`                   | Thread-local pool + warm cache       | Per thread  |
+| **RequestContext**       | `request_context.rs`        | Per-request V8 context state         | Per request |
 
 ## Execution Modes
 
@@ -89,8 +87,7 @@ pub trait EventLoopRuntime {
     fn pump_and_checkpoint(&mut self);
 }
 
-// Implemented by Runtime and ExecutionContext
-// Used by Worker, ExecutionContext, WorkerFuture
+// Implemented by ExecutionContext, which Worker and the pool both run
 drain_and_process(cx, runtime, buffer) -> Result<()>
 ```
 
@@ -107,7 +104,7 @@ OwnedIsolate              UnenteredIsolate + Locker
 ─────────────             ─────────────────────────
 Auto-enters thread        No auto-enter
 Single-thread only        Any thread can lock
-Used by: Runtime          Used by: Pool
+Used by: tests           Used by: Worker, Pool
 ```
 
 **Why two types?** V8 isolates are single-threaded. `OwnedIsolate` binds to one thread. `UnenteredIsolate` + `v8::Locker` allows any thread to temporarily own the isolate—essential for pooling.
@@ -122,7 +119,7 @@ Used by: Runtime          Used by: Pool
                                     │ native call
                                     ▼
 ┌────────────────────────────────────────────────────────────────┐
-│                        Runtime                                 │
+│                  ExecutionContext / RequestContext             │
 │  scheduler_tx ─────────────────────────────► scheduler_rx      │
 │       │                                           │            │
 │       │  SchedulerMessage::Fetch(id, url)         │            │
@@ -149,17 +146,17 @@ Used by: Runtime          Used by: Pool
 
 | File                        | Lines | Purpose                              |
 | --------------------------- | ----- | ------------------------------------ |
-| `runtime/mod.rs`            | ~780  | V8 setup, callback processing        |
-| `runtime/bindings/`         | ~2600 | JS native functions (folder)         |
-| `worker.rs`                 | ~1800 | Worker API, event loop               |
-| `execution_context.rs`      | ~1500 | Pooled execution context, warm reuse |
+| `runtime/mod.rs`            | ~110  | Binding and WebSocket callbacks      |
+| `runtime/bindings/`         | ~2300 | JS native functions (folder)         |
+| `worker.rs`                 | ~350  | Worker API, env and dispatch setup   |
+| `execution_context.rs`      | ~1200 | Pooled execution context, warm reuse |
 | `pool.rs`                   | ~1090 | Thread-local pool, warm cache        |
-| `execution_helpers.rs`      | ~490  | Shared helpers, EventLoopExit        |
+| `execution_helpers.rs`      | ~580  | Shared helpers, EventLoopExit        |
 | `async_waiter.rs`           | ~210  | Fair FIFO queue (multiplexing)       |
-| `locker_managed_isolate.rs` | ~200  | UnenteredIsolate + Locker wrapper    |
-| `request_context.rs`        | ~100  | Per-request V8 context state         |
+| `locker_managed_isolate.rs` | ~160  | UnenteredIsolate + Locker wrapper    |
+| `request_context.rs`        | ~120  | Per-request V8 context state         |
 | `event_loop.rs`             | ~80   | Shared polling logic (trait)         |
-| `platform.rs`               | ~80   | V8 platform singleton                |
+| `platform.rs`               | ~300  | V8 platform, foreground task queues  |
 
 ## See Also
 

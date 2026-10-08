@@ -51,7 +51,6 @@ pub mod security;
 pub mod snapshot;
 pub mod v8_helpers;
 pub mod worker;
-pub mod worker_future;
 
 mod pool;
 
@@ -66,9 +65,7 @@ pub use locker_managed_isolate::LockerManagedIsolate;
 pub use pool_common::{
     LocalPoolStats, PinnedExecuteRequest, PinnedPoolConfig, PinnedPoolStats, WarmHitCallback,
 };
-pub use runtime::Runtime;
 pub use worker::Worker;
-pub use worker_future::WorkerFuture;
 
 pub use pool::{execute_pinned, get_local_pool_stats, get_pinned_pool_stats, init_pinned_pool};
 
@@ -77,9 +74,6 @@ pub use snapshot::{
     SnapshotOutput, create_code_cache, create_runtime_snapshot, is_code_cache, pack_code_cache,
     unpack_code_cache,
 };
-
-#[cfg(feature = "unsafe-worker-snapshot")]
-pub use snapshot::create_worker_snapshot;
 
 // Re-export common types from openworkers-core
 pub use openworkers_core::{

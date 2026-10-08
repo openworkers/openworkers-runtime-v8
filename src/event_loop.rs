@@ -1,7 +1,6 @@
 //! Generic event loop for V8 execution contexts.
 //!
-//! This module provides a unified polling mechanism used by Worker,
-//! ExecutionContext, and WorkerFuture. The core logic is:
+//! The polling step of ExecutionContext's event loop:
 //!
 //! 1. Poll callback channel (with waker registration)
 //! 2. Process callbacks in batch
@@ -29,9 +28,6 @@ pub trait EventLoopRuntime {
 }
 
 /// Drain and process all pending callbacks.
-///
-/// This is the core callback processing logic shared by Worker,
-/// ExecutionContext, and WorkerFuture.
 ///
 /// Steps:
 /// 1. Poll callback channel until Pending (registers waker)

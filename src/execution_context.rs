@@ -463,9 +463,6 @@ impl ExecutionContext {
     }
 
     /// Process pending callbacks (timers, fetch responses, etc.)
-    ///
-    /// NOTE: This method uses try_recv() polling. For true async behavior,
-    /// use WorkerFuture which polls the channel with a waker.
     pub fn process_callbacks(&mut self) {
         // Process our custom callbacks (timers, fetch, etc.)
         while let Ok(msg) = self.request.callback_rx.try_recv() {
@@ -478,9 +475,6 @@ impl ExecutionContext {
     }
 
     /// Process a single callback message in a V8 scope
-    ///
-    /// This is the core callback processing logic, extracted to be called
-    /// from both process_callbacks() and WorkerFuture::poll().
     pub fn process_single_callback(&mut self, msg: crate::runtime::CallbackMessage) {
         use crate::runtime::dispatch;
         use std::pin::pin;
@@ -511,8 +505,6 @@ impl ExecutionContext {
     /// This must be called regularly to:
     /// 1. Process V8 platform messages (GC, optimizations, etc.)
     /// 2. Execute microtasks (Promise.then, async/await continuations)
-    ///
-    /// Called from both process_callbacks() and WorkerFuture::poll()
     pub fn pump_and_checkpoint(&mut self) {
         use std::pin::pin;
 
@@ -548,7 +540,6 @@ impl ExecutionContext {
 
     /// Check exit condition with abort handling
     ///
-    /// This is used by WorkerFuture to check if the event loop should exit.
     /// Returns true if the loop should exit.
     pub fn check_exit_with_abort(
         &mut self,
@@ -760,16 +751,6 @@ impl ExecutionContext {
     ///
     /// This is the core loop for processing async operations (Promises, timers, fetch).
     /// Uses poll_fn for true async polling instead of sleep-based polling.
-    ///
-    /// ## Design: poll_fn vs WorkerFuture
-    ///
-    /// We use `poll_fn` here instead of `WorkerFuture` because:
-    /// - `await_event_loop` is a method on `&mut self`
-    /// - `WorkerFuture::new` also needs `&mut ExecutionContext`
-    /// - Rust's borrowing rules prevent creating WorkerFuture inside a method
-    ///
-    /// `poll_fn` solves this by letting us define the poll logic inline,
-    /// capturing `&mut self` without ownership conflicts.
     async fn await_event_loop(
         &mut self,
         wall_guard: &TimeoutGuard,

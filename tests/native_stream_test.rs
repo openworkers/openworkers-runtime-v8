@@ -86,14 +86,14 @@ async fn test_native_stream_bridge() {
             worker.process_callbacks();
         }
 
-        // Check results from JS using with_runtime
-        let (done, results, error) = worker.with_runtime(|runtime| {
+        // Check results from JS using with_isolate
+        let (done, results, error) = worker.with_isolate(|isolate, context| {
             use std::pin::pin;
             use v8;
 
-            let scope = pin!(v8::HandleScope::new(&mut runtime.isolate));
+            let scope = pin!(v8::HandleScope::new(isolate));
             let mut scope = scope.init();
-            let context = v8::Local::new(&scope, &runtime.context);
+            let context = v8::Local::new(&scope, context);
             let scope = &mut v8::ContextScope::new(&mut scope, context);
             let global = context.global(scope);
 
@@ -249,13 +249,13 @@ async fn test_native_stream_error() {
         }
 
         // Check that error was caught
-        let error = worker.with_runtime(|runtime| {
+        let error = worker.with_isolate(|isolate, context| {
             use std::pin::pin;
             use v8;
 
-            let scope = pin!(v8::HandleScope::new(&mut runtime.isolate));
+            let scope = pin!(v8::HandleScope::new(isolate));
             let mut scope = scope.init();
-            let context = v8::Local::new(&scope, &runtime.context);
+            let context = v8::Local::new(&scope, context);
             let scope = &mut v8::ContextScope::new(&mut scope, context);
             let global = context.global(scope);
 

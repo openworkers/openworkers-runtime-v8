@@ -157,12 +157,10 @@ async fn spawn(code: &WorkerCode, limits: RuntimeLimits) -> Worker {
         .await
         .expect("worker creation failed");
 
-    worker.with_runtime(|rt| {
+    worker.with_isolate(|isolate, _| {
         let null = std::ptr::null_mut();
-        rt.isolate
-            .add_gc_prologue_callback(gc_prologue, null, v8::GCType::kGCTypeAll);
-        rt.isolate
-            .add_gc_epilogue_callback(gc_epilogue, null, v8::GCType::kGCTypeAll);
+        isolate.add_gc_prologue_callback(gc_prologue, null, v8::GCType::kGCTypeAll);
+        isolate.add_gc_epilogue_callback(gc_epilogue, null, v8::GCType::kGCTypeAll);
     });
 
     worker
@@ -296,22 +294,22 @@ fn main() {
         let (warm_min, warm_med) = quantiles(warm);
 
         let (heap_limit, used, allocated, warm_new_space, warm_physical) =
-            warm_worker.with_runtime(|rt| {
-                let stats = rt.isolate.get_heap_statistics();
+            warm_worker.with_isolate(|isolate, _| {
+                let stats = isolate.get_heap_statistics();
 
                 (
                     stats.heap_size_limit(),
                     stats.used_heap_size(),
                     stats.total_allocated_bytes(),
-                    new_space(&mut rt.isolate).0,
+                    new_space(isolate).0,
                     stats.total_physical_size(),
                 )
             });
 
         // What the young space costs once the worker stops being saturated.
-        let warm_idle_physical = warm_worker.with_runtime(|rt| {
-            rt.isolate.low_memory_notification();
-            rt.isolate.get_heap_statistics().total_physical_size()
+        let warm_idle_physical = warm_worker.with_isolate(|isolate, _| {
+            isolate.low_memory_notification();
+            isolate.get_heap_statistics().total_physical_size()
         });
 
         drop(warm_worker);
@@ -343,9 +341,9 @@ fn main() {
         let (resident_physical, resident_new_space) = resident
             .last_mut()
             .expect("no resident worker")
-            .with_runtime(|rt| {
-                let physical = rt.isolate.get_heap_statistics().total_physical_size();
-                (physical, new_space(&mut rt.isolate).1)
+            .with_isolate(|isolate, _| {
+                let physical = isolate.get_heap_statistics().total_physical_size();
+                (physical, new_space(isolate).1)
             });
 
         // V8 requires isolates to be dropped in reverse creation order.
