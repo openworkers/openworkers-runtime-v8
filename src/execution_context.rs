@@ -516,14 +516,8 @@ impl ExecutionContext {
     pub fn pump_and_checkpoint(&mut self) {
         use std::pin::pin;
 
-        // Pump V8 platform message loop (GC, etc.)
-        {
-            let isolate = self.isolate();
-
-            while v8::Platform::pump_message_loop(self.platform, &isolate, false) {
-                // Continue pumping until no more messages
-            }
-        }
+        // Run the tasks V8 posted (GC, WebAssembly compilation)
+        self.pooled.foreground.run();
 
         // Process microtasks (Promises, async/await) - CRITICAL for Promise resolution!
         // Without this, .then() handlers and async/await continuations never execute.
@@ -791,6 +785,7 @@ impl ExecutionContext {
         let mut pending_callbacks: Vec<crate::runtime::CallbackMessage> = Vec::with_capacity(16);
         let pooled = Arc::clone(&self.pooled); // Its own handle, so the closure can borrow self
         let async_waiter = self.async_waiter.clone(); // Clone Rc (cheap) to avoid borrow on self
+        let mut foreground = self.pooled.foreground.waiter();
 
         let mut deadline = wall_guard
             .deadline()
@@ -800,6 +795,8 @@ impl ExecutionContext {
             // A client that hangs up is seen by the task pumping the body,
             // which wakes this loop through the stream manager.
             self.request.stream_manager.register_waker(cx.waker());
+            // So does a task V8 posts from a background thread.
+            foreground.register(cx.waker());
 
             // The watchdog only sets a flag; nothing else wakes a parked loop
             // to read it, so the deadline is polled here as well.

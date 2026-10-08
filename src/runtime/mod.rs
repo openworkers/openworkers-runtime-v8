@@ -128,8 +128,8 @@ pub struct Runtime {
     pub(crate) _next_callback_id: Rc<RefCell<CallbackId>>,
     /// Channel for fetch response (set during fetch event execution)
     pub(crate) fetch_response_tx: Rc<RefCell<Option<tokio::sync::oneshot::Sender<String>>>>,
-    /// V8 Platform (for pump_message_loop)
-    platform: &'static v8::SharedRef<v8::Platform>,
+    /// The foreground tasks V8 posts for `isolate`.
+    pub(crate) foreground: Arc<crate::platform::ForegroundTasks>,
     /// Stream manager for native streaming
     pub(crate) stream_manager: Arc<stream_manager::StreamManager>,
     /// Flag set when ArrayBuffer memory limit is hit
@@ -167,8 +167,8 @@ impl Runtime {
     ) {
         let limits = limits.unwrap_or_default();
 
-        // Get global V8 platform (initialized once, shared across all modules)
-        let platform = crate::platform::get_platform();
+        // V8 has to be initialized before the first isolate
+        crate::platform::get_platform();
 
         let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel();
         let (callback_tx, callback_rx) = mpsc::unbounded_channel();
@@ -194,7 +194,7 @@ impl Runtime {
 
         let params = crate::v8_helpers::worker_create_params(&limits, &memory_limit_hit);
 
-        let (isolate, heap_limit_state, context, slots) = {
+        let (isolate, heap_limit_state, foreground, context, slots) = {
             // A worker snapshot is a second snapshot in the process, which is
             // what makes the feature unsafe: see v8_helpers::new_isolate.
             #[cfg(feature = "unsafe-worker-snapshot")]
@@ -209,6 +209,8 @@ impl Runtime {
             // Install heap limit callback to prevent V8 OOM from crashing the process
             let heap_limit_state =
                 install_heap_limit_callback(&mut isolate, Arc::clone(&memory_limit_hit), heap_max);
+
+            let foreground = crate::platform::register(&isolate);
 
             let use_snapshot = has_snapshot;
 
@@ -267,7 +269,7 @@ impl Runtime {
                 v8::Global::new(scope.as_ref(), context)
             };
 
-            (isolate, heap_limit_state, context, slots)
+            (isolate, heap_limit_state, foreground, context, slots)
         };
 
         let runtime = Self {
@@ -282,7 +284,7 @@ impl Runtime {
             ws_event_callbacks,
             _next_callback_id: next_callback_id,
             fetch_response_tx,
-            platform,
+            foreground,
             stream_manager,
             memory_limit_hit,
             limits,
@@ -300,11 +302,8 @@ impl Runtime {
         let context = v8::Local::new(&scope, &self.context);
         let scope = &mut v8::ContextScope::new(&mut scope, context);
 
-        // 1. Pump V8 Platform message loop (like deno_core)
-        // This processes V8's internal task queue (e.g., Atomics.waitAsync, WebAssembly compilation)
-        while v8::Platform::pump_message_loop(self.platform, scope, false) {
-            // Keep pumping while there are messages
-        }
+        // 1. Run the tasks V8 posted (Atomics.waitAsync, WebAssembly compilation)
+        self.foreground.run();
 
         // 2. Process our custom callbacks (timers, fetch, etc.)
         while let Ok(msg) = self.callback_rx.try_recv() {
@@ -369,10 +368,8 @@ impl Runtime {
     pub fn pump_and_checkpoint(&mut self) {
         use std::pin::pin;
 
-        // Pump V8 platform message loop
-        while v8::Platform::pump_message_loop(self.platform, &self.isolate, false) {
-            // Continue pumping until no more messages
-        }
+        // Run the tasks V8 posted
+        self.foreground.run();
 
         // Process microtasks (Promises, async/await)
         let scope = pin!(v8::HandleScope::new(&mut self.isolate));
@@ -523,6 +520,7 @@ impl Runtime {
 
 impl Drop for Runtime {
     fn drop(&mut self) {
+        self.foreground.forget();
         let _ = self.scheduler_tx.send(SchedulerMessage::Shutdown);
     }
 }

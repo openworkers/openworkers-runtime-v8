@@ -420,6 +420,7 @@ impl Worker {
 
         let mut abort_signaled_at: Option<tokio::time::Instant> = None;
         let mut pending_callbacks: Vec<CallbackMessage> = Vec::with_capacity(16);
+        let mut foreground = self.runtime.foreground.waiter();
 
         let mut deadline = wall_guard
             .deadline()
@@ -429,6 +430,8 @@ impl Worker {
             // 0. A client that hangs up is seen by the task pumping the body,
             //    which wakes this loop through the stream manager.
             self.runtime.stream_manager.register_waker(cx.waker());
+            // So does a task V8 posts from a background thread.
+            foreground.register(cx.waker());
 
             // The watchdog only sets a flag; nothing else wakes a parked loop
             // to read it, so the deadline is polled here as well.

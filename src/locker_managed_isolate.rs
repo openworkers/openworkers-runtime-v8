@@ -30,6 +30,8 @@ pub struct LockerManagedIsolate {
     /// the adjustment is accumulated here and applied on next `JsLock::new()`.
     /// Per-isolate (not global) to prevent cross-isolate contamination.
     pub pending_memory_delta: Arc<AtomicI64>,
+    /// The foreground tasks V8 posts for this isolate.
+    pub(crate) foreground: Arc<crate::platform::ForegroundTasks>,
     /// Heap limit state - must be kept alive for the isolate's lifetime
     #[allow(dead_code)]
     _heap_limit_state: Box<HeapLimitState>,
@@ -51,6 +53,7 @@ impl LockerManagedIsolate {
 
         let params = crate::v8_helpers::worker_create_params(&limits, &memory_limit_hit);
         let mut isolate = crate::v8_helpers::new_isolate(params);
+        let foreground = crate::platform::register(&isolate);
 
         // Install heap limit callback to prevent V8 OOM from crashing the process
         let heap_limit_state =
@@ -70,6 +73,7 @@ impl LockerManagedIsolate {
             memory_limit_hit,
             use_snapshot,
             pending_memory_delta: Arc::new(AtomicI64::new(0)),
+            foreground,
             _heap_limit_state: heap_limit_state,
         }
     }
@@ -88,6 +92,12 @@ impl LockerManagedIsolate {
     pub fn memory_limit_hit(&self) -> bool {
         self.memory_limit_hit
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Drop for LockerManagedIsolate {
+    fn drop(&mut self) {
+        self.foreground.forget();
     }
 }
 
