@@ -18,9 +18,9 @@ const MAX_YOUNG_GENERATION: usize = 24 * 1024 * 1024;
 
 /// Isolate creation parameters for a worker heap.
 ///
-/// `heap_max_mb` does not bound the JS heap: `platform.rs` sets a process-wide
-/// `--max-old-space-size` that overrides it, so it only caps ArrayBuffers and
-/// feeds the near-heap-limit callback.
+/// `heap_max_mb` bounds the JS heap of the isolate, and its ArrayBuffers
+/// apart. A process-wide `--max-old-space-size` (OW_V8_FLAGS) overrides the
+/// JS heap part.
 pub fn worker_create_params(
     limits: &RuntimeLimits,
     memory_limit_hit: &Arc<AtomicBool>,

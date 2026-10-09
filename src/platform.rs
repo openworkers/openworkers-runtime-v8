@@ -33,10 +33,6 @@ pub fn get_platform() -> &'static v8::SharedRef<v8::Platform> {
         #[cfg(target_os = "macos")]
         v8::V8::set_flags_from_string("--single-threaded-gc");
 
-        // Increase old space size to give ICU more room for caching
-        // DateTimeFormat pattern generators use significant memory
-        v8::V8::set_flags_from_string("--max-old-space-size=512");
-
         // Applied last so an operator can override any flag above. V8 flags are
         // process-wide, so no config struct can carry them.
         #[allow(clippy::disallowed_methods)]
