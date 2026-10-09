@@ -306,6 +306,18 @@ pub(crate) fn setup_env(
     evaluate_in_context(isolate, context, &code)
 }
 
+/// Read by every context created after it is set, so a host sets it once,
+/// before the first worker.
+static STRICT_RESPOND_WITH: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Holds respondWith to the Service Worker spec: a fetch listener that calls
+/// it after it returned gets InvalidStateError, and one that returns without
+/// it fails at once. Off by default, which accepts the later call.
+pub fn set_strict_respond_with(strict: bool) {
+    STRICT_RESPOND_WITH.store(strict, Ordering::Relaxed);
+}
+
 /// Installs `addEventListener` and answers the `{ fetch, task }` object the
 /// host keeps out of the guest's reach. The dispatch is openworkers-wintertc's
 /// DISPATCH, shared by every engine; `js/stream_body.js` gives it V8's part,
@@ -332,9 +344,14 @@ pub(crate) fn install_dispatch(
         .and_then(|script| script.run(scope))
         .ok_or("stream_body.js does not run")?;
 
+    let options = v8::Object::new(scope);
+    let key = v8::String::new(scope, "strictRespondWith").unwrap();
+    let strict = v8::Boolean::new(scope, STRICT_RESPOND_WITH.load(Ordering::Relaxed));
+    options.set(scope, key.into(), strict.into());
+
     let receiver = v8::undefined(scope).into();
     let dispatch = install
-        .call(scope, receiver, &[engine])
+        .call(scope, receiver, &[engine, options.into()])
         .and_then(|value| value.to_object(scope))
         .ok_or("the dispatch did not answer an object")?;
 
