@@ -59,6 +59,16 @@ pub struct ExecutionContext {
 
     /// Fair FIFO queue for the V8 Locker; None when the isolate serves one request at a time
     pub(crate) async_waiter: Option<Arc<AsyncWaiter>>,
+
+    /// The guards of the event exec() ran last, kept for drain_waituntil.
+    budget: Option<Budget>,
+}
+
+/// The wall clock and CPU limits of one event, from its start to the end of
+/// its waitUntil work.
+struct Budget {
+    wall: TimeoutGuard,
+    cpu: Option<CpuEnforcer>,
 }
 
 impl ExecutionContext {
@@ -222,6 +232,7 @@ impl ExecutionContext {
             memory_limit_hit,
             request,
             async_waiter: None,
+            budget: None,
         })
     }
 
@@ -246,6 +257,7 @@ impl ExecutionContext {
             memory_limit_hit,
             request,
             async_waiter,
+            budget: None,
         }
     }
 
@@ -673,15 +685,25 @@ impl ExecutionContext {
         };
 
         // Determine termination reason by checking guards (in priority order)
-        self.check_termination_reason(
+        let outcome = self.check_termination_reason(
             result,
             cpu_guard
                 .as_ref()
                 .map(|g| g.was_terminated())
                 .unwrap_or(false),
             wall_guard.was_triggered(),
-        )
-        // Guards are dropped here, cancelling any pending watchdogs
+        );
+
+        // The waitUntil work drain_waituntil runs next spends what is left of
+        // this budget. On an error there is none to run, and the guards drop.
+        if outcome.is_ok() {
+            self.budget = Some(Budget {
+                wall: wall_guard,
+                cpu: cpu_guard,
+            });
+        }
+
+        outcome
     }
 
     /// Drain remaining background work (waitUntil promises) after exec().
@@ -690,15 +712,28 @@ impl ExecutionContext {
     /// and all response streams are closed, but waitUntil promises may still
     /// be pending. This method pumps V8 microtasks until `FullyComplete`.
     ///
-    /// Creates its own security guards so background work cannot run forever.
+    /// The work runs on what is left of the budget exec() started, so an
+    /// event and its waitUntil work share one wall clock and CPU limit.
     /// Returns Ok if all background work completed, or an error if it timed out.
     pub async fn drain_waituntil(&mut self) -> Result<(), TerminationReason> {
-        let isolate_handle = self.isolate().thread_safe_handle();
+        let Budget {
+            wall: wall_guard,
+            cpu: cpu_guard,
+        } = match self.budget.take() {
+            Some(budget) => budget,
+            // No event ran, so nothing has spent a budget yet
+            None => {
+                let isolate_handle = self.isolate().thread_safe_handle();
 
-        // Fresh guards for background work — same limits as exec()
-        let wall_guard =
-            TimeoutGuard::new(isolate_handle.clone(), self.limits.max_wall_clock_time_ms);
-        let cpu_guard = CpuEnforcer::new(isolate_handle, self.limits.max_cpu_time_ms);
+                Budget {
+                    wall: TimeoutGuard::new(
+                        isolate_handle.clone(),
+                        self.limits.max_wall_clock_time_ms,
+                    ),
+                    cpu: CpuEnforcer::new(isolate_handle, self.limits.max_cpu_time_ms),
+                }
+            }
+        };
 
         let result = self
             .await_event_loop(&wall_guard, &cpu_guard, EventLoopExit::FullyComplete, None)
@@ -1146,8 +1181,10 @@ impl ExecutionContext {
             self.isolate().cancel_terminate_execution();
         }
 
-        // 1. Drop the previous event's handle, under the lock, and its timers
+        // 1. Drop the previous event's handle, under the lock, its budget, and
+        // its timers
         self.request.pending = None;
+        self.budget = None;
 
         self.evaluate(&WorkerCode::JavaScript(
             r#"
