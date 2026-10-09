@@ -25,7 +25,7 @@ use crate::execution_helpers::{
 use crate::request_context::RequestContext;
 use crate::runtime::stream_manager;
 use crate::runtime::{bindings, crypto, text_encoding};
-use crate::security::{CpuEnforcer, TimeoutGuard};
+use crate::security::{CpuEnforcer, TimeoutGuard, TurnGuard, next_request_id};
 use openworkers_core::{
     Event, HttpResponse, OperationsHandle, RequestBody, ResponseBody, RuntimeLimits, Script,
     TerminationReason, WorkerCode,
@@ -65,6 +65,9 @@ pub struct ExecutionContext {
 
     /// How the fetch listener of the event exec() ran last called respondWith.
     marks: ListenerMarks,
+
+    /// The id of the event exec() ran last, for the isolate's turn.
+    request_id: u64,
 }
 
 /// The wall clock and CPU limits of one event, from its start to the end of
@@ -238,6 +241,7 @@ impl ExecutionContext {
             async_waiter: None,
             budget: None,
             marks: ListenerMarks::default(),
+            request_id: 0,
         })
     }
 
@@ -264,6 +268,7 @@ impl ExecutionContext {
             async_waiter,
             budget: None,
             marks: ListenerMarks::default(),
+            request_id: 0,
         }
     }
 
@@ -660,16 +665,15 @@ impl ExecutionContext {
             return Err(TerminationReason::Aborted);
         }
 
-        // Get isolate handle for security guards
-        let isolate_handle = self.isolate().thread_safe_handle();
-
-        // Setup security guards:
-        // 1. Wall-clock timeout (all platforms) - prevents hanging on I/O
-        let wall_guard =
-            TimeoutGuard::new(isolate_handle.clone(), self.limits.max_wall_clock_time_ms);
-
-        // 2. CPU time limit (Linux only) - prevents CPU-bound infinite loops
-        let cpu_guard = CpuEnforcer::new(isolate_handle, self.limits.max_cpu_time_ms);
+        // The guards stop this event only, not one that shares the isolate
+        self.request_id = next_request_id();
+        let turn = Arc::clone(&self.pooled.turn);
+        let wall_guard = TimeoutGuard::new(
+            Arc::clone(&turn),
+            self.request_id,
+            self.limits.max_wall_clock_time_ms,
+        );
+        let cpu_guard = CpuEnforcer::new(turn, self.request_id, self.limits.max_cpu_time_ms);
 
         // Execute the task
         let result = match task {
@@ -733,14 +737,16 @@ impl ExecutionContext {
             Some(budget) => budget,
             // No event ran, so nothing has spent a budget yet
             None => {
-                let isolate_handle = self.isolate().thread_safe_handle();
+                self.request_id = next_request_id();
+                let turn = Arc::clone(&self.pooled.turn);
 
                 Budget {
                     wall: TimeoutGuard::new(
-                        isolate_handle.clone(),
+                        Arc::clone(&turn),
+                        self.request_id,
                         self.limits.max_wall_clock_time_ms,
                     ),
-                    cpu: CpuEnforcer::new(isolate_handle, self.limits.max_cpu_time_ms),
+                    cpu: CpuEnforcer::new(turn, self.request_id, self.limits.max_cpu_time_ms),
                 }
             }
         };
@@ -804,7 +810,7 @@ impl ExecutionContext {
     /// Returns true if any termination condition is met:
     /// - V8 execution terminating
     /// - Wall-clock timeout triggered
-    /// - CPU time limit exceeded (Linux only)
+    /// - CPU time limit exceeded
     #[inline]
     pub fn is_terminated(
         &self,
@@ -840,6 +846,7 @@ impl ExecutionContext {
         let pooled = Arc::clone(&self.pooled); // Its own handle, so the closure can borrow self
         let async_waiter = self.async_waiter.clone(); // Clone Rc (cheap) to avoid borrow on self
         let mut foreground = self.pooled.foreground.waiter();
+        let request_id = self.request_id;
 
         let mut deadline = wall_guard
             .deadline()
@@ -873,6 +880,7 @@ impl ExecutionContext {
             // The Locker and JsLock drop when this closure returns, Pending
             // included, so the V8 mutex is free for other tasks during I/O waits.
             let _lock_guard = pooled.lock();
+            let turn = TurnGuard::begin(&pooled.turn, request_id, cpu_guard.as_ref());
 
             // 1. Check termination (CPU/wall-clock guards)
             if self.is_terminated(wall_guard, cpu_guard) {
@@ -925,10 +933,19 @@ impl ExecutionContext {
                 // during processing (e.g., promise chains, microtasks)
             }
 
+            // A guard that cut this turn's JS also cut what would wake this
+            // loop again, so the request ends here
+            drop(turn);
+            let terminated = self.is_terminated(wall_guard, cpu_guard);
+
             // 6. Not done yet — release fair queue and V8 lock.
             //    V8 mutex released, other requests can run on this isolate.
             if let Some(ref waiter) = async_waiter {
                 waiter.unlock();
+            }
+
+            if terminated {
+                return Poll::Ready(Err("Execution terminated".to_string()));
             }
 
             Poll::Pending
@@ -973,6 +990,7 @@ impl ExecutionContext {
         {
             let pooled = Arc::clone(&self.pooled);
             let async_waiter = self.async_waiter.clone();
+            let request_id = self.request_id;
 
             std::future::poll_fn(|cx| {
                 if let Some(ref waiter) = async_waiter
@@ -982,6 +1000,7 @@ impl ExecutionContext {
                 }
 
                 let _lock = pooled.lock();
+                let _turn = TurnGuard::begin(&pooled.turn, request_id, cpu_guard.as_ref());
 
                 use std::pin::pin;
                 let result = {
@@ -1022,6 +1041,7 @@ impl ExecutionContext {
         let ((status, response), marks) = {
             let pooled = Arc::clone(&self.pooled);
             let async_waiter = self.async_waiter.clone();
+            let request_id = self.request_id;
 
             std::future::poll_fn(|cx| {
                 if let Some(ref waiter) = async_waiter
@@ -1031,6 +1051,7 @@ impl ExecutionContext {
                 }
 
                 let _lock = pooled.lock();
+                let _turn = TurnGuard::begin(&pooled.turn, request_id, cpu_guard.as_ref());
 
                 use std::pin::pin;
                 let result = {
@@ -1097,6 +1118,7 @@ impl ExecutionContext {
         {
             let pooled = Arc::clone(&self.pooled);
             let async_waiter = self.async_waiter.clone();
+            let request_id = self.request_id;
 
             std::future::poll_fn(|cx| {
                 if let Some(ref waiter) = async_waiter
@@ -1106,6 +1128,7 @@ impl ExecutionContext {
                 }
 
                 let _lock = pooled.lock();
+                let _turn = TurnGuard::begin(&pooled.turn, request_id, cpu_guard.as_ref());
 
                 use std::pin::pin;
                 let result: Result<(), String> = {
@@ -1137,6 +1160,7 @@ impl ExecutionContext {
         let task_result = {
             let pooled = Arc::clone(&self.pooled);
             let async_waiter = self.async_waiter.clone();
+            let request_id = self.request_id;
 
             std::future::poll_fn(|cx| {
                 if let Some(ref waiter) = async_waiter
@@ -1146,6 +1170,7 @@ impl ExecutionContext {
                 }
 
                 let _lock = pooled.lock();
+                let _turn = TurnGuard::begin(&pooled.turn, request_id, cpu_guard.as_ref());
 
                 use std::pin::pin;
                 let result = {

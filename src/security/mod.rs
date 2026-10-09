@@ -8,24 +8,10 @@
 //! - [`array_buffer_allocator`]: Custom V8 ArrayBuffer allocator with memory limits
 //! - [`heap_limit`]: Near-heap-limit callback to prevent V8 OOM crashes
 //! - [`timeout_guard`]: Wall-clock timeout enforcement via watchdog thread
-//! - [`cpu_enforcer`]: CPU time limit enforcement via POSIX timers (Linux only)
-//!
-//! ## Usage
-//!
-//! ```rust,ignore
-//! use openworkers_runtime_v8::security::{
-//!     ArrayBufferAllocator, TimeoutGuard, CpuEnforcer
-//! };
-//!
-//! // Memory limits via custom allocator
-//! let allocator = ArrayBufferAllocator::new(128 * 1024 * 1024, memory_flag.clone());
-//!
-//! // Wall-clock timeout (all platforms)
-//! let _timeout = TimeoutGuard::new(isolate_handle.clone(), 30_000); // 30s
-//!
-//! // CPU time limit (Linux only)
-//! let _cpu = CpuEnforcer::new(isolate_handle.clone(), 50); // 50ms
-//! ```
+//! - [`cpu_enforcer`]: CPU time limit of one request, counted over its turns;
+//!   Linux also cuts a turn that runs past it, through a POSIX timer
+//! - [`turn`]: which request runs JS on an isolate, so a guard stops only
+//!   its own request
 
 #[cfg(not(feature = "sandbox"))]
 mod array_buffer_allocator;
@@ -33,6 +19,7 @@ mod cpu_enforcer;
 mod cpu_timer;
 mod heap_limit;
 mod timeout_guard;
+mod turn;
 
 #[cfg(not(feature = "sandbox"))]
 pub use array_buffer_allocator::CustomAllocator;
@@ -40,3 +27,4 @@ pub use cpu_enforcer::CpuEnforcer;
 pub use cpu_timer::{CpuTimer, get_thread_cpu_time};
 pub use heap_limit::{HeapLimitState, install_heap_limit_callback};
 pub use timeout_guard::TimeoutGuard;
+pub use turn::{Turn, TurnGuard, next_request_id};

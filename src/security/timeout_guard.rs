@@ -15,40 +15,22 @@
 //!
 //! 1. Guard spawns a watchdog thread with a timeout duration
 //! 2. Thread sleeps until timeout or cancellation
-//! 3. On timeout: calls `isolate.terminate_execution()` to abort V8
+//! 3. On timeout: sets the flag, and terminates V8 execution if its request
+//!    holds the isolate's turn (see `Turn`); a request that shares the
+//!    isolate keeps running
 //! 4. On drop: sends cancellation signal, joins thread
-//!
-//! ## Thread safety
-//!
-//! The `IsolateHandle` is thread-safe and can be used from the watchdog thread
-//! to terminate execution in the main thread.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+use super::Turn;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use tokio::time::Instant;
 
-/// RAII guard that spawns a watchdog thread to terminate V8 execution on timeout.
-///
-/// The watchdog thread monitors execution time and calls `isolate.terminate_execution()`
-/// if the timeout is exceeded. The guard automatically cancels the watchdog when dropped.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let handle = isolate.thread_safe_handle();
-/// {
-///     let _guard = TimeoutGuard::new(handle, 30_000); // 30s timeout
-///     // Execute JavaScript code
-///     // ...
-/// } // Guard dropped here, watchdog cancelled
-///
-/// if guard.was_triggered() {
-///     return TerminationReason::WallClockTimeout;
-/// }
-/// ```
+/// RAII guard that spawns a watchdog thread to terminate the V8 execution of
+/// one request on timeout. The guard cancels the watchdog when dropped.
 pub struct TimeoutGuard {
     /// Channel to send cancellation signal to watchdog
     cancel_tx: Option<mpsc::Sender<()>>,
@@ -61,18 +43,9 @@ pub struct TimeoutGuard {
 }
 
 impl TimeoutGuard {
-    /// Create a new timeout guard with the given V8 isolate handle and timeout.
-    ///
-    /// # Arguments
-    ///
-    /// * `isolate_handle` - Thread-safe handle to the V8 isolate
-    /// * `timeout_ms` - Timeout in milliseconds (0 = disabled)
-    ///
-    /// # Returns
-    ///
-    /// A guard that will terminate execution if the timeout is exceeded.
-    /// Drop the guard to cancel the watchdog.
-    pub fn new(isolate_handle: v8::IsolateHandle, timeout_ms: u64) -> Self {
+    /// A guard for `request` on the isolate of `turn`; a `timeout_ms` of 0
+    /// disables it.
+    pub fn new(turn: Arc<Turn>, request: u64, timeout_ms: u64) -> Self {
         let triggered = Arc::new(AtomicBool::new(false));
 
         // If timeout is 0, create disabled guard (no watchdog thread)
@@ -102,12 +75,9 @@ impl TimeoutGuard {
                     }
                     // Timeout expired - terminate execution
                     Err(mpsc::RecvTimeoutError::Timeout) => {
-                        tracing::warn!(
-                            "Wall-clock timeout after {}ms, terminating isolate",
-                            timeout_ms
-                        );
+                        tracing::warn!("Wall-clock timeout after {}ms", timeout_ms);
                         triggered_clone.store(true, Ordering::SeqCst);
-                        isolate_handle.terminate_execution();
+                        turn.terminate(request);
                     }
                     // Channel disconnected (guard dropped without explicit cancel)
                     Err(mpsc::RecvTimeoutError::Disconnected) => {

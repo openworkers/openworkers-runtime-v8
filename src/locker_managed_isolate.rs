@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use v8;
 
-use crate::security::{HeapLimitState, install_heap_limit_callback};
+use crate::security::{HeapLimitState, Turn, install_heap_limit_callback};
 use openworkers_core::RuntimeLimits;
 
 /// A reusable V8 isolate that requires explicit locking via v8::Locker
@@ -32,6 +32,8 @@ pub struct LockerManagedIsolate {
     pub pending_memory_delta: Arc<AtomicI64>,
     /// The foreground tasks V8 posts for this isolate.
     pub(crate) foreground: Arc<crate::platform::ForegroundTasks>,
+    /// The request that runs JS here, for the guards that stop one request.
+    pub(crate) turn: Arc<Turn>,
     /// Heap limit state - must be kept alive for the isolate's lifetime
     #[allow(dead_code)]
     _heap_limit_state: Box<HeapLimitState>,
@@ -54,6 +56,7 @@ impl LockerManagedIsolate {
         let params = crate::v8_helpers::worker_create_params(&limits, &memory_limit_hit);
         let mut isolate = crate::v8_helpers::new_isolate(params);
         let foreground = crate::platform::register(&isolate);
+        let turn = Arc::new(Turn::new(isolate.thread_safe_handle()));
 
         // Install heap limit callback to prevent V8 OOM from crashing the process
         let heap_limit_state =
@@ -74,6 +77,7 @@ impl LockerManagedIsolate {
             use_snapshot,
             pending_memory_delta: Arc::new(AtomicI64::new(0)),
             foreground,
+            turn,
             _heap_limit_state: heap_limit_state,
         }
     }
