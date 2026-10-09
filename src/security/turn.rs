@@ -5,21 +5,31 @@
 //! goes through the turn: it terminates only while its own request holds
 //! it. A termination left over from the previous holder is cancelled when
 //! the next turn begins.
+//!
+//! The heap and ArrayBuffer limits set one flag for the isolate. The JS that
+//! allocates is the JS of the turn, so the flag goes to the request that
+//! holds the turn when the turn ends.
 
+use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::CpuEnforcer;
 
 pub struct Turn {
     handle: v8::IsolateHandle,
     holder: Mutex<Option<u64>>,
+    memory_limit_hit: Arc<AtomicBool>,
 }
 
 impl Turn {
-    pub fn new(handle: v8::IsolateHandle) -> Self {
+    /// The turn of the isolate of `handle`, whose memory limits set
+    /// `memory_limit_hit`.
+    pub fn new(handle: v8::IsolateHandle, memory_limit_hit: Arc<AtomicBool>) -> Self {
         Self {
             handle,
             holder: Mutex::new(None),
+            memory_limit_hit,
         }
     }
 
@@ -30,8 +40,10 @@ impl Turn {
         self.handle.cancel_terminate_execution();
     }
 
-    pub fn end(&self) {
+    /// Ends the turn, and answers whether a memory limit was hit in it.
+    pub fn end(&self) -> bool {
         *self.holder.lock().unwrap() = None;
+        self.memory_limit_hit.swap(false, Ordering::SeqCst)
     }
 
     /// Terminates execution if `request` holds the turn, and answers whether
@@ -49,22 +61,33 @@ impl Turn {
     }
 }
 
-/// The turn of a request, from `begin` to drop, with its CPU counted. Take
-/// it right after the isolate lock, and drop it before the lock.
+/// The turn of a request, from `begin` to drop, with its CPU counted and its
+/// memory limit set in `memory_hit`. Take it right after the isolate lock,
+/// and drop it before the lock.
 pub struct TurnGuard<'a> {
     turn: &'a Turn,
     cpu: Option<&'a CpuEnforcer>,
+    memory_hit: &'a AtomicBool,
 }
 
 impl<'a> TurnGuard<'a> {
-    pub fn begin(turn: &'a Turn, request: u64, cpu: Option<&'a CpuEnforcer>) -> Self {
+    pub fn begin(
+        turn: &'a Turn,
+        request: u64,
+        cpu: Option<&'a CpuEnforcer>,
+        memory_hit: &'a AtomicBool,
+    ) -> Self {
         turn.begin(request);
 
         if let Some(cpu) = cpu {
             cpu.begin_turn();
         }
 
-        Self { turn, cpu }
+        Self {
+            turn,
+            cpu,
+            memory_hit,
+        }
     }
 }
 
@@ -74,7 +97,9 @@ impl Drop for TurnGuard<'_> {
             cpu.end_turn();
         }
 
-        self.turn.end();
+        if self.turn.end() {
+            self.memory_hit.store(true, Ordering::SeqCst);
+        }
     }
 }
 

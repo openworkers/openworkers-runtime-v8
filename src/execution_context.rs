@@ -51,8 +51,9 @@ pub struct ExecutionContext {
     /// Limits
     pub limits: RuntimeLimits,
 
-    /// Memory limit flag (shared with isolate)
-    pub memory_limit_hit: Arc<AtomicBool>,
+    /// Set when a turn of the current event hit the heap or ArrayBuffer
+    /// limit (see `Turn`).
+    memory_hit: Arc<AtomicBool>,
 
     /// Per-request state (V8 context, channels, callbacks, streams)
     pub request: RequestContext,
@@ -87,7 +88,6 @@ impl ExecutionContext {
     /// * `use_snapshot` - Whether the isolate was created with a snapshot
     /// * `platform` - V8 platform reference
     /// * `limits` - Runtime limits
-    /// * `memory_limit_hit` - Memory limit tracking flag
     /// * `script` - Worker script to load
     /// * `ops` - Operations handle for async ops
     #[allow(clippy::too_many_arguments)]
@@ -97,7 +97,6 @@ impl ExecutionContext {
         use_snapshot: bool,
         platform: &'static v8::SharedRef<v8::Platform>,
         limits: RuntimeLimits,
-        memory_limit_hit: Arc<AtomicBool>,
         script: Script,
         ops: OperationsHandle,
     ) -> Result<Self, TerminationReason> {
@@ -185,7 +184,15 @@ impl ExecutionContext {
         Self::setup_env(isolate, &context, &script.env, &script.bindings)?;
 
         // Evaluate user script (placeholder)
-        Self::evaluate_script(isolate, &context, &script.code)?;
+        let evaluated = Self::evaluate_script(isolate, &context, &script.code);
+
+        // No turn holds the isolate here: a memory limit hit while the script
+        // loads belongs to the event that loads it
+        if pooled.memory_limit_hit.swap(false, Ordering::SeqCst) {
+            return Err(TerminationReason::MemoryLimit);
+        }
+
+        evaluated?;
 
         // Start event loop in background (with optional Operations handle)
         // Use tokio::spawn (not spawn_local) so the event loop survives LocalSet drops.
@@ -236,7 +243,7 @@ impl ExecutionContext {
             pooled,
             platform,
             limits,
-            memory_limit_hit,
+            memory_hit: Arc::new(AtomicBool::new(false)),
             request,
             async_waiter: None,
             budget: None,
@@ -254,7 +261,6 @@ impl ExecutionContext {
         pooled: Arc<LockerManagedIsolate>,
         platform: &'static v8::SharedRef<v8::Platform>,
         limits: RuntimeLimits,
-        memory_limit_hit: Arc<AtomicBool>,
         request: RequestContext,
         async_waiter: Option<Arc<AsyncWaiter>>,
     ) -> Self {
@@ -263,7 +269,7 @@ impl ExecutionContext {
             pooled,
             platform,
             limits,
-            memory_limit_hit,
+            memory_hit: Arc::new(AtomicBool::new(false)),
             request,
             async_waiter,
             budget: None,
@@ -667,6 +673,7 @@ impl ExecutionContext {
 
         // The guards stop this event only, not one that shares the isolate
         self.request_id = next_request_id();
+        self.memory_hit.store(false, Ordering::SeqCst);
         let turn = Arc::clone(&self.pooled.turn);
         let wall_guard = TimeoutGuard::new(
             Arc::clone(&turn),
@@ -786,7 +793,7 @@ impl ExecutionContext {
         }
 
         // Check memory limit flag
-        if self.memory_limit_hit.load(Ordering::SeqCst) {
+        if self.memory_hit.load(Ordering::SeqCst) {
             return Err(TerminationReason::MemoryLimit);
         }
 
@@ -819,6 +826,7 @@ impl ExecutionContext {
     ) -> bool {
         {
             self.isolate().is_execution_terminating()
+                || self.memory_hit.load(Ordering::SeqCst)
                 || wall_guard.was_triggered()
                 || cpu_guard
                     .as_ref()
@@ -847,6 +855,7 @@ impl ExecutionContext {
         let async_waiter = self.async_waiter.clone(); // Clone Rc (cheap) to avoid borrow on self
         let mut foreground = self.pooled.foreground.waiter();
         let request_id = self.request_id;
+        let memory_hit = Arc::clone(&self.memory_hit);
 
         let mut deadline = wall_guard
             .deadline()
@@ -880,7 +889,7 @@ impl ExecutionContext {
             // The Locker and JsLock drop when this closure returns, Pending
             // included, so the V8 mutex is free for other tasks during I/O waits.
             let _lock_guard = pooled.lock();
-            let turn = TurnGuard::begin(&pooled.turn, request_id, cpu_guard.as_ref());
+            let turn = TurnGuard::begin(&pooled.turn, request_id, cpu_guard.as_ref(), &memory_hit);
 
             // 1. Check termination (CPU/wall-clock guards)
             if self.is_terminated(wall_guard, cpu_guard) {
@@ -991,6 +1000,7 @@ impl ExecutionContext {
             let pooled = Arc::clone(&self.pooled);
             let async_waiter = self.async_waiter.clone();
             let request_id = self.request_id;
+            let memory_hit = Arc::clone(&self.memory_hit);
 
             std::future::poll_fn(|cx| {
                 if let Some(ref waiter) = async_waiter
@@ -1000,7 +1010,8 @@ impl ExecutionContext {
                 }
 
                 let _lock = pooled.lock();
-                let _turn = TurnGuard::begin(&pooled.turn, request_id, cpu_guard.as_ref());
+                let _turn =
+                    TurnGuard::begin(&pooled.turn, request_id, cpu_guard.as_ref(), &memory_hit);
 
                 use std::pin::pin;
                 let result = {
@@ -1042,6 +1053,7 @@ impl ExecutionContext {
             let pooled = Arc::clone(&self.pooled);
             let async_waiter = self.async_waiter.clone();
             let request_id = self.request_id;
+            let memory_hit = Arc::clone(&self.memory_hit);
 
             std::future::poll_fn(|cx| {
                 if let Some(ref waiter) = async_waiter
@@ -1051,7 +1063,8 @@ impl ExecutionContext {
                 }
 
                 let _lock = pooled.lock();
-                let _turn = TurnGuard::begin(&pooled.turn, request_id, cpu_guard.as_ref());
+                let _turn =
+                    TurnGuard::begin(&pooled.turn, request_id, cpu_guard.as_ref(), &memory_hit);
 
                 use std::pin::pin;
                 let result = {
@@ -1119,6 +1132,7 @@ impl ExecutionContext {
             let pooled = Arc::clone(&self.pooled);
             let async_waiter = self.async_waiter.clone();
             let request_id = self.request_id;
+            let memory_hit = Arc::clone(&self.memory_hit);
 
             std::future::poll_fn(|cx| {
                 if let Some(ref waiter) = async_waiter
@@ -1128,7 +1142,8 @@ impl ExecutionContext {
                 }
 
                 let _lock = pooled.lock();
-                let _turn = TurnGuard::begin(&pooled.turn, request_id, cpu_guard.as_ref());
+                let _turn =
+                    TurnGuard::begin(&pooled.turn, request_id, cpu_guard.as_ref(), &memory_hit);
 
                 use std::pin::pin;
                 let result: Result<(), String> = {
@@ -1161,6 +1176,7 @@ impl ExecutionContext {
             let pooled = Arc::clone(&self.pooled);
             let async_waiter = self.async_waiter.clone();
             let request_id = self.request_id;
+            let memory_hit = Arc::clone(&self.memory_hit);
 
             std::future::poll_fn(|cx| {
                 if let Some(ref waiter) = async_waiter
@@ -1170,7 +1186,8 @@ impl ExecutionContext {
                 }
 
                 let _lock = pooled.lock();
-                let _turn = TurnGuard::begin(&pooled.turn, request_id, cpu_guard.as_ref());
+                let _turn =
+                    TurnGuard::begin(&pooled.turn, request_id, cpu_guard.as_ref(), &memory_hit);
 
                 use std::pin::pin;
                 let result = {

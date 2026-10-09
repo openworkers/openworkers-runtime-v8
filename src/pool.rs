@@ -527,12 +527,8 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
     }
 
     let pooled = Arc::clone(&isolate_arc.isolate);
-    let (use_snapshot, platform, limits, memory_limit_hit) = (
-        pooled.use_snapshot,
-        pooled.platform,
-        pooled.limits.clone(),
-        Arc::clone(&pooled.memory_limit_hit),
-    );
+    let (use_snapshot, platform, limits) =
+        (pooled.use_snapshot, pooled.platform, pooled.limits.clone());
 
     // None when the isolate serves one request at a time
     let async_waiter = isolate_arc.concurrency.async_waiter();
@@ -574,9 +570,6 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
 
     let warm_hit = cached_context.is_some();
 
-    // Reset memory limit flag
-    memory_limit_hit.store(false, Ordering::SeqCst);
-
     // ── Warm hit path ──────────────────────────────────────────────────
     if warm_hit {
         let CachedContext {
@@ -605,7 +598,6 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
             Arc::clone(&pooled),
             platform,
             limits.clone(),
-            memory_limit_hit.clone(),
             request,
             async_waiter.clone(),
         );
@@ -704,7 +696,6 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
             use_snapshot,
             platform,
             limits,
-            memory_limit_hit,
             script,
             ops.clone(),
         )

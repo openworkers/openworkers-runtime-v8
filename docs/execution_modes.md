@@ -28,17 +28,16 @@ Requests that share an isolate have the same `owner_id`. Each request has its
 own CPU and wall-clock limit: a guard terminates execution only while its own
 request runs JS (`security/turn.rs`).
 
-The heap limit is not per request. The V8 heap belongs to the isolate, so the
-near-heap-limit callback (`security/heap_limit.rs`) terminates the JS that runs
-when the heap is full, and sets `memory_limit_hit` for the isolate. Thus one
-request that fills the heap can stop the other requests on its isolate, and
-they can end with `MemoryLimit`. `execute_pinned` clears the flag when a
-request starts, so a request that starts at that time can also clear the flag
-of the request that filled the heap.
+The heap is not per request. The V8 heap and the ArrayBuffer budget belong to
+the isolate, so the request whose allocation crosses the limit ends with
+`MemoryLimit`, even when a neighbour holds most of the memory. Each turn hands
+the isolate's `memory_limit_hit` flag to the request that held it
+(`security/turn.rs`), so the other requests answer, and that request stops at
+the end of its turn.
 
-With `max_concurrent_per_isolate: 1`, a request that fills the heap stops only
-itself. Each value above 1 lets it stop up to that number of requests of the
-same owner.
+With `max_concurrent_per_isolate: 1`, the request that fills the heap is the
+one that stops. Above 1, the request that stops is the one that allocates
+when the heap is full, among the requests of the same owner.
 
 ```rust
 use openworkers_runtime_v8::{init_pinned_pool, execute_pinned, PinnedPoolConfig, PinnedExecuteRequest};

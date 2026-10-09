@@ -56,7 +56,10 @@ impl LockerManagedIsolate {
         let params = crate::v8_helpers::worker_create_params(&limits, &memory_limit_hit);
         let mut isolate = crate::v8_helpers::new_isolate(params);
         let foreground = crate::platform::register(&isolate);
-        let turn = Arc::new(Turn::new(isolate.thread_safe_handle()));
+        let turn = Arc::new(Turn::new(
+            isolate.thread_safe_handle(),
+            Arc::clone(&memory_limit_hit),
+        ));
 
         // Install heap limit callback to prevent V8 OOM from crashing the process
         let heap_limit_state =

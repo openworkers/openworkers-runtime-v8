@@ -114,7 +114,6 @@ impl Worker {
                 isolate.use_snapshot,
                 isolate.platform,
                 limits,
-                Arc::clone(&isolate.memory_limit_hit),
                 script,
                 ops,
             )?
