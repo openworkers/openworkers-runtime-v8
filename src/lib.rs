@@ -36,7 +36,6 @@
 
 pub mod async_waiter;
 pub mod context_slots;
-pub mod event_loop;
 pub mod execution_context;
 pub mod execution_helpers;
 pub mod gc;

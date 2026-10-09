@@ -462,6 +462,35 @@ impl ExecutionContext {
         }
     }
 
+    /// Takes every callback that has arrived, runs them, then runs V8's
+    /// tasks and microtasks. Polling the channel registers the waker.
+    /// Answers how many callbacks ran, or an error once the channel closed.
+    fn drain_and_process(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        pending_callbacks: &mut Vec<crate::runtime::CallbackMessage>,
+    ) -> Result<usize, String> {
+        loop {
+            match self.request.callback_rx.poll_recv(cx) {
+                std::task::Poll::Ready(Some(msg)) => pending_callbacks.push(msg),
+                std::task::Poll::Ready(None) => {
+                    return Err("Event loop channel closed".to_string());
+                }
+                std::task::Poll::Pending => break,
+            }
+        }
+
+        let count = pending_callbacks.len();
+
+        for msg in pending_callbacks.drain(..) {
+            self.process_single_callback(msg);
+        }
+
+        self.pump_and_checkpoint();
+
+        Ok(count)
+    }
+
     /// Process pending callbacks (timers, fetch responses, etc.)
     pub fn process_callbacks(&mut self) {
         // Process our custom callbacks (timers, fetch, etc.)
@@ -758,7 +787,6 @@ impl ExecutionContext {
         exit_condition: EventLoopExit,
         abort_config: Option<AbortConfig>,
     ) -> Result<(), String> {
-        use crate::event_loop::drain_and_process;
         use std::future::Future;
         use std::task::Poll;
 
@@ -817,7 +845,7 @@ impl ExecutionContext {
             const MAX_COALESCE_ROUNDS: usize = 4;
 
             for round in 0..MAX_COALESCE_ROUNDS {
-                let count = match drain_and_process(cx, self, &mut pending_callbacks) {
+                let count = match self.drain_and_process(cx, &mut pending_callbacks) {
                     Ok(c) => c,
                     Err(e) => {
                         if let Some(ref waiter) = async_waiter {
@@ -1158,22 +1186,6 @@ impl ExecutionContext {
             .aborted
             .store(true, std::sync::atomic::Ordering::SeqCst);
         self.isolate().terminate_execution();
-    }
-}
-
-impl crate::event_loop::EventLoopRuntime for ExecutionContext {
-    fn callback_rx_mut(
-        &mut self,
-    ) -> &mut tokio::sync::mpsc::UnboundedReceiver<crate::runtime::CallbackMessage> {
-        &mut self.request.callback_rx
-    }
-
-    fn process_callback(&mut self, msg: crate::runtime::CallbackMessage) {
-        self.process_single_callback(msg);
-    }
-
-    fn pump_and_checkpoint(&mut self) {
-        ExecutionContext::pump_and_checkpoint(self);
     }
 }
 

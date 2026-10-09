@@ -78,24 +78,14 @@ cargo test --test worker_vs_pool_bench -- --nocapture --test-threads=1
 
 ## Event Loop
 
-All execution modes share the same event loop logic via `event_loop.rs`:
-
-```rust
-pub trait EventLoopRuntime {
-    fn callback_rx_mut(&mut self) -> &mut Receiver<CallbackMessage>;
-    fn process_callback(&mut self, msg: CallbackMessage);
-    fn pump_and_checkpoint(&mut self);
-}
-
-// Implemented by ExecutionContext, which Worker and the pool both run
-drain_and_process(cx, runtime, buffer) -> Result<()>
-```
+Worker and the pool both run `ExecutionContext::await_event_loop`. Each poll
+calls `drain_and_process`:
 
 **Flow:**
 
 1. Poll callback channel (waker-based, true async)
 2. Batch process all received callbacks
-3. Pump V8 platform + microtask checkpoint
+3. Run the foreground tasks V8 posted, then a microtask checkpoint
 
 ## V8 Threading Model
 
@@ -155,7 +145,6 @@ Used by: tests           Used by: Worker, Pool
 | `async_waiter.rs`           | ~210  | Fair FIFO queue (multiplexing)       |
 | `locker_managed_isolate.rs` | ~160  | UnenteredIsolate + Locker wrapper    |
 | `request_context.rs`        | ~120  | Per-request V8 context state         |
-| `event_loop.rs`             | ~80   | Shared polling logic (trait)         |
 | `platform.rs`               | ~300  | V8 platform, foreground task queues  |
 
 ## See Also
