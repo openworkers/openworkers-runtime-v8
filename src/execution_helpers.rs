@@ -131,6 +131,53 @@ fn answered_response<'s>(
     promise.result(scope).to_object(scope)
 }
 
+/// How a fetch listener called respondWith, in the two ways the dispatch
+/// accepts and the Service Worker spec refuses (wintertc js/dispatch.js).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ListenerMarks {
+    /// respondWith ran after the listener returned
+    pub late: bool,
+    /// respondWith ran after an async listener's promise had settled
+    pub after_settle: bool,
+}
+
+impl ListenerMarks {
+    pub fn any(&self) -> bool {
+        self.late || self.after_settle
+    }
+}
+
+/// The marks the dispatch left on the handle of an answered fetch.
+pub fn read_marks(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    handle: Option<v8::Local<v8::Object>>,
+) -> ListenerMarks {
+    let Some(handle) = handle else {
+        return ListenerMarks::default();
+    };
+
+    let key = v8::String::new(scope, "marks").unwrap();
+    let Some(marks) = handle
+        .get(scope, key.into())
+        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+    else {
+        return ListenerMarks::default();
+    };
+
+    let flag = |name: &str| {
+        let key = v8::String::new(scope, name).unwrap();
+
+        marks
+            .get(scope, key.into())
+            .is_some_and(|value| value.is_true())
+    };
+
+    ListenerMarks {
+        late: flag("late"),
+        after_settle: flag("afterSettle"),
+    }
+}
+
 /// The id of the stream the response body goes out on, if it streams.
 pub fn get_response_stream_id(
     scope: &mut v8::ContextScope<v8::HandleScope>,

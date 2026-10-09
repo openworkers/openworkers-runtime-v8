@@ -158,6 +158,14 @@ impl Worker {
         context.drain_waituntil().await
     }
 
+    /// How the fetch listener of the last event called respondWith.
+    pub fn listener_marks(&self) -> crate::ListenerMarks {
+        self.context
+            .as_ref()
+            .expect("the context lives until drop")
+            .listener_marks()
+    }
+
     /// Abort the worker execution
     pub fn abort(&mut self) {
         self.context().abort();

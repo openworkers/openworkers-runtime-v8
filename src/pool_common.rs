@@ -31,6 +31,10 @@ pub struct PinnedPoolConfig {
 /// cached ops handle, which is shared with the still-running event loop.
 pub type WarmHitCallback = Box<dyn FnOnce(&OperationsHandle) + Send>;
 
+/// Called when the fetch listener called respondWith in a way the Service
+/// Worker spec refuses, for the runner to count which workers do.
+pub type MarksCallback = Box<dyn FnOnce(crate::execution_helpers::ListenerMarks) + Send>;
+
 /// Request parameters for `execute_pinned`.
 ///
 /// Groups all arguments into a single struct for readability and extensibility.
@@ -54,6 +58,8 @@ pub struct PinnedExecuteRequest {
     pub env_updated_at: Option<i64>,
     /// Cancelled by the caller to stop this request's ops, on client disconnect.
     pub abort: Option<tokio_util::sync::CancellationToken>,
+    /// Called once, after the event, if its fetch listener left a mark.
+    pub on_marks: Option<MarksCallback>,
 }
 
 /// Thread-local pool statistics.

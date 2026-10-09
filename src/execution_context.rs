@@ -18,9 +18,9 @@ use v8;
 use crate::LockerManagedIsolate;
 use crate::async_waiter::AsyncWaiter;
 use crate::execution_helpers::{
-    AbortConfig, EventLoopExit, check_exit_condition, get_completion_state, get_response_stream_id,
-    read_response_object, read_task_result, signal_client_disconnect, trigger_fetch_handler,
-    trigger_task_handler,
+    AbortConfig, EventLoopExit, ListenerMarks, check_exit_condition, get_completion_state,
+    get_response_stream_id, read_marks, read_response_object, read_task_result,
+    signal_client_disconnect, trigger_fetch_handler, trigger_task_handler,
 };
 use crate::request_context::RequestContext;
 use crate::runtime::stream_manager;
@@ -62,6 +62,9 @@ pub struct ExecutionContext {
 
     /// The guards of the event exec() ran last, kept for drain_waituntil.
     budget: Option<Budget>,
+
+    /// How the fetch listener of the event exec() ran last called respondWith.
+    marks: ListenerMarks,
 }
 
 /// The wall clock and CPU limits of one event, from its start to the end of
@@ -233,6 +236,7 @@ impl ExecutionContext {
             request,
             async_waiter: None,
             budget: None,
+            marks: ListenerMarks::default(),
         })
     }
 
@@ -258,6 +262,7 @@ impl ExecutionContext {
             request,
             async_waiter,
             budget: None,
+            marks: ListenerMarks::default(),
         }
     }
 
@@ -645,6 +650,8 @@ impl ExecutionContext {
 
     /// Execute a task in this context
     pub async fn exec(&mut self, mut task: Event) -> Result<(), TerminationReason> {
+        self.marks = ListenerMarks::default();
+
         // Check if aborted before starting
         if self.request.aborted.load(Ordering::SeqCst) {
             return Err(TerminationReason::Aborted);
@@ -1009,7 +1016,7 @@ impl ExecutionContext {
             .await?;
 
         // -- Phase 3: Read response (fair queue + lock) --
-        let (status, response) = {
+        let ((status, response), marks) = {
             let pooled = Arc::clone(&self.pooled);
             let async_waiter = self.async_waiter.clone();
 
@@ -1035,12 +1042,15 @@ impl ExecutionContext {
                         .as_ref()
                         .map(|handle| v8::Local::new(scope, handle));
 
+                    let marks = read_marks(scope, handle);
+
                     read_response_object(
                         scope,
                         handle,
                         &self.request.stream_manager,
                         self.limits.stream_buffer_size,
                     )
+                    .map(|answer| (answer, marks))
                 };
 
                 if let Some(ref waiter) = async_waiter {
@@ -1052,6 +1062,7 @@ impl ExecutionContext {
             .await?
         };
 
+        self.marks = marks;
         let _ = fetch_init.res_tx.send(response);
 
         // -- Phase 4: Wait for streams (lock-per-poll) --
@@ -1215,6 +1226,11 @@ impl ExecutionContext {
         // lands late must find no callback, not the next request's.
 
         Ok(())
+    }
+
+    /// How the fetch listener of the last event called respondWith.
+    pub fn listener_marks(&self) -> ListenerMarks {
+        self.marks
     }
 
     /// Abort execution

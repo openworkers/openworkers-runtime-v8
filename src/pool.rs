@@ -475,6 +475,14 @@ fn drop_under_lock<T>(value: T, pooled: &LockerManagedIsolate) {
     drop(value);
 }
 
+fn report_marks(on_marks: &mut Option<crate::MarksCallback>, marks: crate::ListenerMarks) {
+    if marks.any()
+        && let Some(callback) = on_marks.take()
+    {
+        callback(marks);
+    }
+}
+
 /// Execute a worker script using the isolate pool.
 ///
 /// This uses thread-local storage for zero-contention access to isolates.
@@ -501,6 +509,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
         on_warm_hit,
         env_updated_at,
         abort,
+        mut on_marks,
     } = req;
     TOTAL_REQUESTS.fetch_add(1, Ordering::Relaxed);
 
@@ -610,6 +619,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
             Ok(()) => {
                 ec.begin_request(abort);
                 let result = ec.exec(task).await;
+                report_marks(&mut on_marks, ec.listener_marks());
 
                 let save_to_cache = if result.is_err() {
                     tracing::debug!(
@@ -707,6 +717,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
             ctx.async_waiter = async_waiter;
             ctx.begin_request(abort);
             let result = ctx.exec(task).await;
+            report_marks(&mut on_marks, ctx.listener_marks());
 
             let config = get_config();
             let keep =

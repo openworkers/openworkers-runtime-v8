@@ -94,6 +94,7 @@ async fn the_pool_answers_after_webassembly_compile() {
             on_warm_hit: None,
             env_updated_at: None,
             abort: None,
+            on_marks: None,
         })
         .await
         .unwrap();

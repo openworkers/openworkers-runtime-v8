@@ -67,6 +67,7 @@ async fn a_parked_pooled_guest_is_cut_at_the_wall_clock() {
                 on_warm_hit: None,
                 env_updated_at: None,
                 abort: None,
+                on_marks: None,
             }),
         )
         .await

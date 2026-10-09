@@ -109,6 +109,7 @@ async fn cancelling_the_request_closes_the_socket_the_guest_awaits() {
                 on_warm_hit: None,
                 env_updated_at: None,
                 abort: Some(abort),
+                on_marks: None,
             }),
         )
         .await;

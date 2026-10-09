@@ -56,13 +56,15 @@ mod pool;
 // Core API
 pub use async_waiter::AsyncWaiter;
 pub use execution_context::ExecutionContext;
+pub use execution_helpers::ListenerMarks;
 pub use gc::{ExternalMemoryGuard, GcTraceable, JsLock, JsLockRef, Tracked, tracked_guard};
 
 // Re-export derive macro
 pub use gc_derive::GcTraceable as DeriveGcTraceable;
 pub use locker_managed_isolate::LockerManagedIsolate;
 pub use pool_common::{
-    LocalPoolStats, PinnedExecuteRequest, PinnedPoolConfig, PinnedPoolStats, WarmHitCallback,
+    LocalPoolStats, MarksCallback, PinnedExecuteRequest, PinnedPoolConfig, PinnedPoolStats,
+    WarmHitCallback,
 };
 pub use worker::Worker;
 

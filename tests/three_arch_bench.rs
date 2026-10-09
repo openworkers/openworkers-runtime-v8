@@ -182,6 +182,7 @@ async fn bench_pinned_standard() {
                 on_warm_hit: None,
                 env_updated_at: None,
                 abort: None,
+                on_marks: None,
             })
             .await
             .unwrap();
@@ -243,6 +244,7 @@ async fn bench_pinned_cpu_bound() {
                 on_warm_hit: None,
                 env_updated_at: None,
                 abort: None,
+                on_marks: None,
             })
             .await
             .unwrap();
@@ -294,6 +296,7 @@ async fn bench_pinned_warm_cache() {
                 on_warm_hit: None,
                 env_updated_at: None,
                 abort: None,
+                on_marks: None,
             })
             .await
             .unwrap();
@@ -316,6 +319,7 @@ async fn bench_pinned_warm_cache() {
                 on_warm_hit: None,
                 env_updated_at: None,
                 abort: None,
+                on_marks: None,
             })
             .await
             .unwrap();

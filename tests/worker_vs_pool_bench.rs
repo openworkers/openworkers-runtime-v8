@@ -123,6 +123,7 @@ async fn bench_pinned_cold_start() {
                 on_warm_hit: None,
                 env_updated_at: None,
                 abort: None,
+                on_marks: None,
             })
             .await
             .unwrap();
@@ -177,6 +178,7 @@ async fn bench_pinned_warm_start() {
                 on_warm_hit: None,
                 env_updated_at: None,
                 abort: None,
+                on_marks: None,
             })
             .await
             .unwrap();
@@ -199,6 +201,7 @@ async fn bench_pinned_warm_start() {
                 on_warm_hit: None,
                 env_updated_at: None,
                 abort: None,
+                on_marks: None,
             })
             .await
             .unwrap();
