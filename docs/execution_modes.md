@@ -22,6 +22,24 @@ Thread-local isolate pool with per-owner isolation. This is the production mode.
 serves at once: 1 gives each request the isolate to itself, and more lets requests
 share it through the `AsyncWaiter` fair FIFO queue.
 
+### Limits on a shared isolate
+
+Requests that share an isolate have the same `owner_id`. Each request has its
+own CPU and wall-clock limit: a guard terminates execution only while its own
+request runs JS (`security/turn.rs`).
+
+The heap limit is not per request. The V8 heap belongs to the isolate, so the
+near-heap-limit callback (`security/heap_limit.rs`) terminates the JS that runs
+when the heap is full, and sets `memory_limit_hit` for the isolate. Thus one
+request that fills the heap can stop the other requests on its isolate, and
+they can end with `MemoryLimit`. `execute_pinned` clears the flag when a
+request starts, so a request that starts at that time can also clear the flag
+of the request that filled the heap.
+
+With `max_concurrent_per_isolate: 1`, a request that fills the heap stops only
+itself. Each value above 1 lets it stop up to that number of requests of the
+same owner.
+
 ```rust
 use openworkers_runtime_v8::{init_pinned_pool, execute_pinned, PinnedPoolConfig, PinnedExecuteRequest};
 
