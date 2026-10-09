@@ -1355,8 +1355,8 @@ dependencies = [
 
 [[package]]
 name = "openworkers-wintertc"
-version = "0.1.9"
-source = "git+https://github.com/openworkers/openworkers-wintertc?tag=v0.1.9#b351464a93dc46429bfc8d2346b68a2dd9afa660"
+version = "0.1.10"
+source = "git+https://github.com/openworkers/openworkers-wintertc?tag=v0.1.10#7c4f48726c75755c45edee9157a6e667ae97f876"
 
 [[package]]
 name = "page_size"
