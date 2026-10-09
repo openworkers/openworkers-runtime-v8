@@ -63,8 +63,8 @@ pub use gc::{ExternalMemoryGuard, GcTraceable, JsLock, JsLockRef, Tracked, track
 pub use gc_derive::GcTraceable as DeriveGcTraceable;
 pub use locker_managed_isolate::LockerManagedIsolate;
 pub use pool_common::{
-    LocalPoolStats, MarksCallback, PinnedExecuteRequest, PinnedPoolConfig, PinnedPoolStats,
-    WarmHitCallback,
+    EventReport, LocalPoolStats, PinnedExecuteRequest, PinnedPoolConfig, PinnedPoolStats,
+    ReportCallback, WarmHitCallback,
 };
 pub use worker::{Worker, set_strict};
 

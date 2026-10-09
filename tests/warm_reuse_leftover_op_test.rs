@@ -79,7 +79,7 @@ async fn serve(path: &str) -> (u16, String) {
         on_warm_hit: None,
         env_updated_at: None,
         abort: None,
-        on_marks: None,
+        on_report: None,
     })
     .await
     .unwrap();

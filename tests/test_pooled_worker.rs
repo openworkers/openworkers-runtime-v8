@@ -69,7 +69,7 @@ async fn test_pinned_pool_stats_after_use() {
             on_warm_hit: None,
             env_updated_at: None,
             abort: None,
-            on_marks: None,
+            on_report: None,
         })
         .await
         .unwrap();
@@ -122,7 +122,7 @@ async fn test_execute_pinned_simple() {
             on_warm_hit: None,
             env_updated_at: None,
             abort: None,
-            on_marks: None,
+            on_report: None,
         })
         .await;
 

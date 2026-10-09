@@ -95,6 +95,13 @@ impl LockerManagedIsolate {
         (locker, js)
     }
 
+    /// The bytes the JS heap of this isolate uses. Takes the isolate lock.
+    pub fn heap_used_bytes(&self) -> usize {
+        let (mut locker, _js_lock) = self.lock();
+
+        locker.get_heap_statistics().used_heap_size()
+    }
+
     /// Check if memory limit was hit
     pub fn memory_limit_hit(&self) -> bool {
         self.memory_limit_hit

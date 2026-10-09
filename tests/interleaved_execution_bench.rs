@@ -145,7 +145,7 @@ async fn bench_concurrent_pool_with_io() {
                     on_warm_hit: None,
                     env_updated_at: None,
                     abort: None,
-                    on_marks: None,
+                    on_report: None,
                 })
                 .await
                 .unwrap();
@@ -246,7 +246,7 @@ async fn bench_high_concurrency_pool() {
                     on_warm_hit: None,
                     env_updated_at: None,
                     abort: None,
-                    on_marks: None,
+                    on_report: None,
                 })
                 .await
                 .unwrap();

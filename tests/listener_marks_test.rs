@@ -1,6 +1,6 @@
 //! The marks the dispatch leaves when a fetch listener calls respondWith
-//! after the dispatch ended, read through Worker and through the pool's
-//! callback. A microtask after the listener is still in the dispatch.
+//! after the dispatch ended, read through Worker and through the report the
+//! pool gives after each event. A microtask after the listener is still in the dispatch.
 
 mod common;
 
@@ -80,8 +80,8 @@ async fn a_worker_reports_how_its_listener_answered() {
     );
 }
 
-/// What the pool's callback received for one request, None if it was not
-/// called.
+/// The marks of the report the pool gave for one request, None if it gave
+/// none.
 async fn pool_marks(worker_id: &str, code: &str) -> Option<ListenerMarks> {
     let seen = Arc::new(Mutex::new(None));
     let sink = Arc::clone(&seen);
@@ -96,8 +96,8 @@ async fn pool_marks(worker_id: &str, code: &str) -> Option<ListenerMarks> {
         on_warm_hit: None,
         env_updated_at: None,
         abort: None,
-        on_marks: Some(Box::new(move |marks| {
-            *sink.lock().unwrap() = Some(marks);
+        on_report: Some(Box::new(move |report| {
+            *sink.lock().unwrap() = Some(report.marks);
         })),
     })
     .await
@@ -107,7 +107,7 @@ async fn pool_marks(worker_id: &str, code: &str) -> Option<ListenerMarks> {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn the_pool_calls_back_only_for_a_marked_listener() {
+async fn the_pool_reports_the_marks_of_each_event() {
     init_pinned_pool(PinnedPoolConfig {
         max_per_thread: 1,
         max_per_owner: None,
@@ -119,8 +119,14 @@ async fn the_pool_calls_back_only_for_a_marked_listener() {
     });
 
     run_in_local(|| async {
-        assert_eq!(pool_marks("in-time", IN_TIME).await, None);
-        assert_eq!(pool_marks("after-await", AFTER_AWAIT).await, None);
+        assert_eq!(
+            pool_marks("in-time", IN_TIME).await,
+            Some(ListenerMarks::default())
+        );
+        assert_eq!(
+            pool_marks("after-await", AFTER_AWAIT).await,
+            Some(ListenerMarks::default())
+        );
 
         assert_eq!(
             pool_marks("after-a-timer", AFTER_A_TIMER).await,

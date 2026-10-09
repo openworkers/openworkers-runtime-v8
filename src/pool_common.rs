@@ -31,9 +31,22 @@ pub struct PinnedPoolConfig {
 /// cached ops handle, which is shared with the still-running event loop.
 pub type WarmHitCallback = Box<dyn FnOnce(&OperationsHandle) + Send>;
 
-/// Called when the fetch listener called respondWith in a way the Service
-/// Worker spec refuses, for the runner to count which workers do.
-pub type MarksCallback = Box<dyn FnOnce(crate::execution_helpers::ListenerMarks) + Send>;
+/// What an event leaves for the caller to record.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EventReport {
+    /// How the fetch listener called respondWith; the Service Worker spec
+    /// refuses what `marks.any()` reports.
+    pub marks: crate::execution_helpers::ListenerMarks,
+    /// The bytes the JS heap of the isolate uses when the event ends. The
+    /// heap limit (`RuntimeLimits::heap_max_mb`) applies to the whole
+    /// isolate, which the requests of one owner can share. The value counts
+    /// garbage that no GC has collected yet, and not the peak the event
+    /// reached before it ended.
+    pub heap_used_bytes: usize,
+}
+
+/// Called once, after the event, with its report.
+pub type ReportCallback = Box<dyn FnOnce(EventReport) + Send>;
 
 /// Request parameters for `execute_pinned`.
 ///
@@ -58,8 +71,8 @@ pub struct PinnedExecuteRequest {
     pub env_updated_at: Option<i64>,
     /// Cancelled by the caller to stop this request's ops, on client disconnect.
     pub abort: Option<tokio_util::sync::CancellationToken>,
-    /// Called once, after the event, if its fetch listener left a mark.
-    pub on_marks: Option<MarksCallback>,
+    /// Called once, after the event, with its report.
+    pub on_report: Option<ReportCallback>,
 }
 
 /// Thread-local pool statistics.
