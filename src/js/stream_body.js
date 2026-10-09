@@ -1,9 +1,10 @@
 // How a response body reaches the host on V8: the engine part of the shared
-// dispatch (openworkers-wintertc's DISPATCH), which install_dispatch calls with
-// what this script evaluates to. TextEncoder and setTimeout are read before
-// the guest script runs, so a guest that replaces them changes nothing here.
+// dispatch (openworkers-wintertc's DISPATCH). The script evaluates to a
+// function of the dispatch options; install_dispatch passes what it answers
+// to the dispatch. TextEncoder and setTimeout are read before the guest
+// script runs, so a guest that replaces them changes nothing here.
 
-(() => {
+(function streamEngine(options) {
     'use strict';
 
     const TextEncoder = globalThis.TextEncoder;
@@ -11,13 +12,22 @@
 
     const errorMessage = (error) => (error && error.message) || String(error);
 
-    function toBytes(value, encoder) {
-        if (typeof value === 'string') {
-            return encoder.encode(value);
-        }
+    // Strict: a chunk is a Uint8Array, as the Fetch spec has it. Lax, the
+    // default: also a string or another view, which the OpenWorkers docs
+    // taught.
+    const strict = options?.strict === true;
 
+    function toBytes(value, encoder) {
         if (value instanceof Uint8Array) {
             return value;
+        }
+
+        if (strict) {
+            throw new TypeError('a response body chunk must be a Uint8Array');
+        }
+
+        if (typeof value === 'string') {
+            return encoder.encode(value);
         }
 
         if (ArrayBuffer.isView(value)) {
@@ -138,4 +148,4 @@
     }
 
     return { streamBody, disconnect };
-})()
+})

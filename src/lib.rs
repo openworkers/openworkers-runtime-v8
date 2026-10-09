@@ -66,7 +66,7 @@ pub use pool_common::{
     LocalPoolStats, MarksCallback, PinnedExecuteRequest, PinnedPoolConfig, PinnedPoolStats,
     WarmHitCallback,
 };
-pub use worker::{Worker, set_strict_respond_with};
+pub use worker::{Worker, set_strict};
 
 pub use pool::{execute_pinned, get_local_pool_stats, get_pinned_pool_stats, init_pinned_pool};
 

@@ -313,6 +313,20 @@ fn dispatch(
         .to_object(scope)
         .expect("dispatch.js answers an object for every event");
 
+    // The dispatch lasts through the microtask checkpoint after the call, so
+    // a respondWith from a microtask is in time (Service Worker spec).
+    scope.perform_microtask_checkpoint();
+
+    let key = v8::String::new(scope, "endDispatch").unwrap();
+
+    if let Some(value) = handle.get(scope, key.into())
+        && let Ok(end_dispatch) = v8::Local::<v8::Function>::try_from(value)
+    {
+        end_dispatch
+            .call(scope, handle.into(), &[])
+            .ok_or("Execution terminated")?;
+    }
+
     Ok(v8::Global::new(scope, handle))
 }
 

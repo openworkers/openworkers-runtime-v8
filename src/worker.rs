@@ -308,14 +308,15 @@ pub(crate) fn setup_env(
 
 /// Read by every context created after it is set, so a host sets it once,
 /// before the first worker.
-static STRICT_RESPOND_WITH: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static STRICT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Holds respondWith to the Service Worker spec: a fetch listener that calls
-/// it after it returned gets InvalidStateError, and one that returns without
-/// it fails at once. Off by default, which accepts the later call.
-pub fn set_strict_respond_with(strict: bool) {
-    STRICT_RESPOND_WITH.store(strict, Ordering::Relaxed);
+/// Holds the event model to the specs where it is lax by default. A fetch
+/// listener that calls respondWith after the dispatch gets
+/// InvalidStateError, and a dispatch that ends without it fails at once
+/// (Service Worker spec). A response body chunk that is not a Uint8Array
+/// errors the body (Fetch spec). Off by default, which accepts both.
+pub fn set_strict(strict: bool) {
+    STRICT.store(strict, Ordering::Relaxed);
 }
 
 /// Installs `addEventListener` and answers the `{ fetch, task }` object the
@@ -339,17 +340,20 @@ pub(crate) fn install_dispatch(
         .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
         .ok_or("the wintertc dispatch does not evaluate to a function")?;
 
-    let code = v8::String::new(scope, include_str!("js/stream_body.js")).unwrap();
-    let engine = v8::Script::compile(scope, code, None)
-        .and_then(|script| script.run(scope))
-        .ok_or("stream_body.js does not run")?;
-
     let options = v8::Object::new(scope);
-    let key = v8::String::new(scope, "strictRespondWith").unwrap();
-    let strict = v8::Boolean::new(scope, STRICT_RESPOND_WITH.load(Ordering::Relaxed));
+    let key = v8::String::new(scope, "strict").unwrap();
+    let strict = v8::Boolean::new(scope, STRICT.load(Ordering::Relaxed));
     options.set(scope, key.into(), strict.into());
 
     let receiver = v8::undefined(scope).into();
+
+    let code = v8::String::new(scope, include_str!("js/stream_body.js")).unwrap();
+    let engine = v8::Script::compile(scope, code, None)
+        .and_then(|script| script.run(scope))
+        .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
+        .and_then(|factory| factory.call(scope, receiver, &[options.into()]))
+        .ok_or("stream_body.js does not answer an engine")?;
+
     let dispatch = install
         .call(scope, receiver, &[engine, options.into()])
         .and_then(|value| value.to_object(scope))

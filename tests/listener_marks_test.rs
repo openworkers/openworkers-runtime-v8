@@ -1,5 +1,6 @@
 //! The marks the dispatch leaves when a fetch listener calls respondWith
-//! after it returned, read through Worker and through the pool's callback.
+//! after the dispatch ended, read through Worker and through the pool's
+//! callback. A microtask after the listener is still in the dispatch.
 
 mod common;
 
@@ -17,6 +18,13 @@ const IN_TIME: &str = "addEventListener('fetch', e => e.respondWith(new Response
 const AFTER_AWAIT: &str = r#"
     addEventListener('fetch', async (e) => {
         await Promise.resolve();
+        e.respondWith(new Response('ok'));
+    });
+"#;
+
+const AFTER_A_TIMER: &str = r#"
+    addEventListener('fetch', async (e) => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
         e.respondWith(new Response('ok'));
     });
 "#;
@@ -53,9 +61,10 @@ async fn worker_marks(code: &str) -> ListenerMarks {
 #[tokio::test(flavor = "current_thread")]
 async fn a_worker_reports_how_its_listener_answered() {
     assert_eq!(worker_marks(IN_TIME).await, ListenerMarks::default());
+    assert_eq!(worker_marks(AFTER_AWAIT).await, ListenerMarks::default());
 
     assert_eq!(
-        worker_marks(AFTER_AWAIT).await,
+        worker_marks(AFTER_A_TIMER).await,
         ListenerMarks {
             late: true,
             after_settle: false
@@ -111,9 +120,10 @@ async fn the_pool_calls_back_only_for_a_marked_listener() {
 
     run_in_local(|| async {
         assert_eq!(pool_marks("in-time", IN_TIME).await, None);
+        assert_eq!(pool_marks("after-await", AFTER_AWAIT).await, None);
 
         assert_eq!(
-            pool_marks("after-await", AFTER_AWAIT).await,
+            pool_marks("after-a-timer", AFTER_A_TIMER).await,
             Some(ListenerMarks {
                 late: true,
                 after_settle: false
@@ -122,7 +132,7 @@ async fn the_pool_calls_back_only_for_a_marked_listener() {
 
         // A warm hit on the same worker reports again
         assert_eq!(
-            pool_marks("after-await", AFTER_AWAIT).await,
+            pool_marks("after-a-timer", AFTER_A_TIMER).await,
             Some(ListenerMarks {
                 late: true,
                 after_settle: false
