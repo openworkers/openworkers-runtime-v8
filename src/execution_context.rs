@@ -158,6 +158,7 @@ impl ExecutionContext {
             bindings::setup_url_pattern_natives(scope);
             bindings::setup_compression_natives(scope);
             bindings::setup_navigator_natives(scope);
+            bindings::setup_async_context_natives(scope);
 
             bindings::seal_native_namespace(scope);
 
@@ -539,6 +540,8 @@ impl ExecutionContext {
         let context = v8::Local::new(&scope, &self.request.context);
         let scope = &mut v8::ContextScope::new(&mut scope, context);
 
+        // A callback restores its own frame, if it has one; none leaks in
+        bindings::clear_async_context(scope);
         dispatch::dispatch(scope, &tables, msg);
 
         // Note: Microtask checkpoint is NOT done here anymore.
@@ -1201,6 +1204,7 @@ impl ExecutionContext {
             r#"
             globalThis.__timerCallbacks.clear();
             globalThis.__intervalIds.clear();
+            globalThis.__ow.asyncContextSet(undefined);
             "#
             .to_string(),
         ))?;

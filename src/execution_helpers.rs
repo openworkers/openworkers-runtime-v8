@@ -302,6 +302,9 @@ fn dispatch(
         .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
         .expect("dispatch.js answers { fetch, task }");
 
+    // The event starts with no async context, whatever the last one left
+    crate::runtime::bindings::clear_async_context(scope);
+
     // None means V8 was terminated (CPU or wall-clock limit)
     let handle = function
         .call(scope, dispatch.into(), &[argument])

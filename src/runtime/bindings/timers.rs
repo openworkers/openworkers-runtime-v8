@@ -71,16 +71,32 @@ pub fn setup_timers(
             return Number.isFinite(delay) && delay > 0 ? Math.trunc(delay) : 0;
         }
 
+        // A timer runs in the async context of the code that set it.
+        function __inSettingFrame(callback, args) {
+            const frame = globalThis.__ow.asyncContextGet();
+
+            return () => {
+                const previous = globalThis.__ow.asyncContextGet();
+                globalThis.__ow.asyncContextSet(frame);
+
+                try {
+                    callback(...args);
+                } finally {
+                    globalThis.__ow.asyncContextSet(previous);
+                }
+            };
+        }
+
         globalThis.setTimeout = function(callback, delay, ...args) {
             const id = globalThis.__nextTimerId++;
-            globalThis.__timerCallbacks.set(id, args.length > 0 ? () => callback(...args) : callback);
+            globalThis.__timerCallbacks.set(id, __inSettingFrame(callback, args));
             __nativeScheduleTimeout(id, __coerceDelay(delay));
             return id;
         };
 
         globalThis.setInterval = function(callback, interval, ...args) {
             const id = globalThis.__nextTimerId++;
-            globalThis.__timerCallbacks.set(id, args.length > 0 ? () => callback(...args) : callback);
+            globalThis.__timerCallbacks.set(id, __inSettingFrame(callback, args));
             globalThis.__intervalIds.add(id);
             __nativeScheduleInterval(id, __coerceDelay(interval));
             return id;
