@@ -1,0 +1,42 @@
+name: CI
+
+# Format, clippy and the tests on Linux, for the default build and for
+# ptrcomp, the one the runner uses. The CPU limit cuts a running loop on
+# Linux only, so its tests run here and not on macOS. The tests read the
+# snapshot that the snapshot binary writes.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    name: Test (${{ matrix.features || 'default' }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        features: ["", "ptrcomp"]
+    steps:
+      - name: Check Out Repo
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.features }}
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --features "${{ matrix.features }}" --lib --tests -- -D warnings
+      - name: Snapshot
+        run: cargo run --features "${{ matrix.features }}" --bin snapshot
+      - name: Test
+        run: cargo test --features "${{ matrix.features }}"
