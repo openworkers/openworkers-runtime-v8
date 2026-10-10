@@ -272,3 +272,83 @@ async fn test_native_stream_error() {
     })
     .await;
 }
+
+/// Reads the globals `name` holds, through the isolate.
+fn global_string(worker: &mut Worker, name: &str) -> String {
+    worker.with_isolate(|isolate, context| {
+        use std::pin::pin;
+        use v8;
+
+        let scope = pin!(v8::HandleScope::new(isolate));
+        let mut scope = scope.init();
+        let context = v8::Local::new(&scope, context);
+        let scope = &mut v8::ContextScope::new(&mut scope, context);
+        let global = context.global(scope);
+
+        let key = v8::String::new(scope, name).unwrap();
+        let value = global.get(scope, key.into()).unwrap();
+        value.to_rust_string_lossy(scope)
+    })
+}
+
+/// Two reads in flight at once both settle: the host serves one read of a
+/// stream at a time, so the second pull waits for the first instead of
+/// racing it and erroring the whole stream.
+#[tokio::test(flavor = "current_thread")]
+async fn test_native_stream_concurrent_reads() {
+    run_in_local(|| async {
+        let script = Script::new(
+            r#"
+                globalThis.outcome = 'pending';
+
+                globalThis.testConcurrentReads = async function(streamId) {
+                    try {
+                        const reader = __createNativeStream(streamId).getReader();
+                        const [first, second] = await Promise.all([reader.read(), reader.read()]);
+                        const text = (r) => r.done ? 'done' : new TextDecoder().decode(r.value);
+                        globalThis.outcome = text(first) + '|' + text(second);
+                    } catch (error) {
+                        globalThis.outcome = 'threw ' + error.message;
+                    }
+                };
+
+                addEventListener('fetch', event => {
+                    event.respondWith(new Response('OK'));
+                });
+            "#,
+        );
+
+        let mut worker = Worker::new(script, None)
+            .await
+            .expect("Worker creation failed");
+
+        let stream_manager = worker.stream_manager();
+        let stream_id = stream_manager.create_stream("test://concurrent-reads".to_string());
+
+        worker
+            .evaluate(&format!("testConcurrentReads({});", stream_id))
+            .expect("Failed to start test");
+
+        // Both reads reach the host before any chunk exists, so the first one
+        // is still waiting when the second arrives.
+        for _ in 0..5 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            worker.process_callbacks();
+        }
+
+        for chunk in ["first", "second"] {
+            stream_manager
+                .write_chunk(stream_id, StreamChunk::Data(Bytes::from(chunk)))
+                .await
+                .expect("Failed to write chunk");
+        }
+
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            worker.process_callbacks();
+        }
+
+        assert_eq!(global_string(&mut worker, "outcome"), "first|second");
+    })
+    .await;
+}

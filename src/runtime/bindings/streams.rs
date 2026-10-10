@@ -78,25 +78,34 @@ pub fn setup_stream_ops(
         scope,
         r#"
         globalThis.__createNativeStream = function(streamId) {
+            // The host serves one read of a stream at a time, and the reader
+            // pulls on every read(): a second read while one is in flight
+            // waits for it here instead of racing it and erroring the stream.
+            let pending = Promise.resolve();
+
+            const readOne = (controller) => new Promise((resolve) => {
+                __nativeStreamRead(streamId, (result) => {
+                    // A stream cancelled with a read in flight refuses the
+                    // chunk that still lands; the read has to settle anyway.
+                    try {
+                        if (result.error) {
+                            controller.error(new Error(result.error));
+                        } else if (result.done) {
+                            controller.close();
+                        } else {
+                            controller.enqueue(result.value);
+                        }
+                    } catch (_) {}
+                    resolve();
+                });
+            });
+
             const stream = new ReadableStream({
                 type: 'bytes',
-                async pull(controller) {
-                    return new Promise((resolve) => {
-                        __nativeStreamRead(streamId, (result) => {
-                            // A stream cancelled with a read in flight refuses the
-                            // chunk that still lands; the read has to settle anyway.
-                            try {
-                                if (result.error) {
-                                    controller.error(new Error(result.error));
-                                } else if (result.done) {
-                                    controller.close();
-                                } else {
-                                    controller.enqueue(result.value);
-                                }
-                            } catch (_) {}
-                            resolve();
-                        });
-                    });
+                pull(controller) {
+                    const next = () => readOne(controller);
+                    pending = pending.then(next, next);
+                    return pending;
                 },
                 cancel(reason) {
                     __nativeStreamCancel(streamId);
