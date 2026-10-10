@@ -160,6 +160,53 @@ pub(super) fn setup_rsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
         const __ecdsaSign = crypto.subtle.sign;
         const __ecdsaVerify = crypto.subtle.verify;
 
+        // ring verifies against a bare RSAPublicKey (PKCS#1), while WebCrypto
+        // hands over a SubjectPublicKeyInfo: unwrap it, and pass anything that
+        // is not one through, as 'spki' has always taken a bare key here.
+        const __rsaPublicKeyOf = (bytes) => {
+            let at = 0;
+
+            const header = (tag) => {
+                if (bytes[at] !== tag) {
+                    return -1;
+                }
+
+                at++;
+                let length = bytes[at++];
+
+                if (length & 0x80) {
+                    const count = length & 0x7f;
+                    length = 0;
+
+                    for (let i = 0; i < count; i++) {
+                        length = length * 256 + bytes[at++];
+                    }
+                }
+
+                return length;
+            };
+
+            if (header(0x30) < 0) {
+                return bytes;
+            }
+
+            const algorithm = header(0x30);
+
+            if (algorithm < 0) {
+                return bytes;
+            }
+
+            at += algorithm;
+
+            const bits = header(0x03);
+
+            if (bits < 1 || bytes[at] !== 0 || at + bits > bytes.length) {
+                return bytes;
+            }
+
+            return bytes.subarray(at + 1, at + bits);
+        };
+
         // Extend importKey to support RSASSA-PKCS1-v1_5
         crypto.subtle.importKey = function(format, keyData, algorithm, extractable, keyUsages) {
             return new Promise((resolve, reject) => {
@@ -193,7 +240,8 @@ pub(super) fn setup_rsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
                             resolve(__createCryptoKey(
                                 'public', extractable,
                                 { name: 'RSASSA-PKCS1-v1_5', hash: { name: hashName } },
-                                keyUsages, keyBytes
+                                keyUsages,
+                                format === 'spki' ? __rsaPublicKeyOf(keyBytes) : keyBytes
                             ));
                         } else {
                             reject(new Error('Only "pkcs8" and "spki" formats are supported for RSA'));

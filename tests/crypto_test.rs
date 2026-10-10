@@ -641,3 +641,41 @@ async fn test_pbkdf2_refuses_a_huge_output() {
     })
     .await;
 }
+
+/// Keys as OpenSSL and WebCrypto write them: PKCS#8 private, SPKI public
+#[tokio::test(flavor = "current_thread")]
+async fn test_rsa_spki_and_pkcs8_keys() {
+    run_in_local(|| async {
+        let code = r#"
+            addEventListener('fetch', (event) => {
+                event.respondWith((async () => {
+                    const bytes = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+                    const algorithm = { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' };
+                    const priv = await crypto.subtle.importKey('pkcs8', bytes('MIIEpQIBAAKCAQEAqvpKGORObkDn7VLZTlrad4nbV4fWwXkwMd1N6KM9S6CVT/RD6OgVm1GnepjwFswv61KSqFxZ9vH4qy7kq4M9OCUL8CgYKMuWeMAwHuauBet9Dvn2ovstLD2WCwCOxDI5KCBdcVPTj4E0KN5WGHwOxtxB+A7WBo69LFy+u3lm7ckyDyCCNE59EH9oySDxduehl9uNo5Cur8uowos/j0A1DQsuiNzr6e3WdLO2Yd9OhsBYLYHlMgZYvYiWmh6QJfzja3xV0HcVuE9dHxcM8dE8U3jpZPvM7U+8Dwv2yB2+VJds2VW16NskO+rhdunXwYat1+L1WtxXBV759142r3bI1QIDAQABAoIBAAzVl+1Raf/FuIMslmpW0JJrkz75T+obBj6f/aKqakX8imjDjbt0fHa5xOgjhdY4QpqYCrE/qXMri76R2RF02woVYdWHtPSO/78VsicHquV/3VXb9qMaVrQ89T/jLVRV7stvzoPcxoM9sCQnOHBDE7riusL7nh5E5bdoSNr6zHqp4byV/4H+VUte6pda0/Xt7wg9bmajqnky6ap0SSUGHYFDdC6jjgT6rbigemS9c+W0vw7zGGgr+Rsxa/V2/R4oAhh+muGh4SrFUBBpLO/09h0iyoHZaNtnj9KR0WPCSyowPjjw+pULbcvr5gwpav2wtWKhGCDXBKlT0rjwQYYGLMECgYEA2ZQ8DDLePLWOwF5AhvYy0mkA9iMs4E53mS1+jOevAjgXZu1Sym0BNkAN6ow9E0br64/paxwMSJW6VnsCxq8/O+0kSQXuCVpv2uWD/zrGOlQW8hZOMiGmt5LFsRnUYeI6DF0VixDe+tDIn3Vw8bTjWp/SP8zDBalbWRAX2AUmdDUCgYEAyStrIUMyT7jHf3nDfhuM305Ctk3iOeW37a+/XVKMxhrrU471ye6/KQyYG/YdAevipJJzlu1KG9r4a1GdLLfpYQIX3icmKTAUsy5Lt7c0UngQNQr7NVTctIxsyEQEDPxmW6mKAf4ndyu3MRB2AKk8QqCcPDTSBqQjrmTD4w+YViECgYEAqd8Y7rE8X4ukkz5DBNvtG+fNT15xKAM7TwV8+0fblFD0vHBnphFq0884zjmFaaqCgRyPsgdo87aqj+Bkb3jdVs0z+is+CGFqWS2+W6OopluGuqV9kZhCUKqv3DB9Z5q3lXWLX1LhtFMTf6OydZOzucpz3UnhrWbnIeb1pruGpU0CgYEApJVjNnl1hgfVIBQMvvXnUSMELYaW2Wt6CXpKBB3vknyfn2NM8ALmXr0xDV9T6CiG6sHu08IbaaLCr3q8LsPgqj8+K8C31ebCaL4tsIawxe/4wozTbZSaZRSmQ0pyTfWKAOA6StsWisc3P2sKQAw1gwVIDXHhixFrJ9jE8tXlekECgYEAniAeyGicGrs0etC0BCPNcEFBsa4937RhUlO3dXwSygGYvHwOugRhfNEL2iHc+JYEcyTLByf6I2gRDJQbiWYtWRmpfvBJP8PxYBaXTCXUxHJvU6EmdIAZMIZ5nVEPu6mO1mKeRRCIdS6sHYcLghnZi1XZyFvx4dzlc3/E6keohHI='), algorithm, false, ['sign']);
+                    const pub = await crypto.subtle.importKey('spki', bytes('MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAqvpKGORObkDn7VLZTlrad4nbV4fWwXkwMd1N6KM9S6CVT/RD6OgVm1GnepjwFswv61KSqFxZ9vH4qy7kq4M9OCUL8CgYKMuWeMAwHuauBet9Dvn2ovstLD2WCwCOxDI5KCBdcVPTj4E0KN5WGHwOxtxB+A7WBo69LFy+u3lm7ckyDyCCNE59EH9oySDxduehl9uNo5Cur8uowos/j0A1DQsuiNzr6e3WdLO2Yd9OhsBYLYHlMgZYvYiWmh6QJfzja3xV0HcVuE9dHxcM8dE8U3jpZPvM7U+8Dwv2yB2+VJds2VW16NskO+rhdunXwYat1+L1WtxXBV759142r3bI1QIDAQAB'), algorithm, true, ['verify']);
+                    const data = new TextEncoder().encode('hi');
+                    const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', priv, data);
+                    const good = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', pub, sig, data);
+                    const bad = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', pub, sig, new TextEncoder().encode('no'));
+                    return new Response(good && !bad ? 'OK' : 'FAIL ' + good + ' ' + bad);
+                })());
+            });
+        "#;
+
+        let mut worker = Worker::new(Script::new(code), None).await.unwrap();
+        let req = HttpRequest {
+            method: HttpMethod::Get,
+            url: "http://localhost/".to_string(),
+            headers: HashMap::new(),
+            body: RequestBody::None,
+        };
+
+        let (task, rx) = Event::fetch(req);
+        worker.exec(task).await.unwrap();
+        let response = rx.await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
+
+        assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
+    })
+    .await;
+}
