@@ -76,82 +76,147 @@ impl CustomAllocator {
     }
 }
 
-/// Called by V8 when JS code does `new ArrayBuffer(n)` or `new Uint8Array(n)`.
-/// Returns a pointer to zeroed memory, or NULL if the limit is exceeded.
-// V8 calls this from inside its allocator, so the report stays off the tracing
-// subscriber and its locks.
-#[allow(clippy::unnecessary_cast)]
-unsafe extern "C" fn allocate(allocator: &CustomAllocator, n: usize) -> *mut c_void {
-    // Optimistically add n bytes to our running total (atomic, thread-safe)
-    allocator.count.fetch_add(n, Ordering::SeqCst);
+/// The layout of an allocation of `n` bytes, or None past what the
+/// allocator can address.
+fn layout(n: usize) -> Option<std::alloc::Layout> {
+    std::alloc::Layout::array::<u8>(n).ok()
+}
 
-    // Read the new total to check against the limit
-    let count_loaded = allocator.count.load(Ordering::SeqCst);
+/// Takes `n` bytes of the budget, or answers false with the budget as it was.
+fn reserve(allocator: &CustomAllocator, n: usize) -> bool {
+    let before = allocator.count.fetch_add(n, Ordering::SeqCst);
 
-    // If we've exceeded the limit, reject the allocation
-    if count_loaded > allocator.max {
-        eprintln!(
-            "[openworkers-runtime-v8] ArrayBuffer allocation denied: {}MB exceeds limit of {}MB",
-            count_loaded / 1024 / 1024,
-            allocator.max / 1024 / 1024
-        );
-        // Set flag so the runtime knows why we failed
-        allocator.memory_limit_hit.store(true, Ordering::SeqCst);
-        // IMPORTANT: rollback the count since we're not actually allocating
-        // Without this, failed allocations would permanently "use up" the quota
-        allocator.count.fetch_sub(n, Ordering::SeqCst);
-        // Return NULL - V8 will throw RangeError: Array buffer allocation failed
-        return std::ptr::null::<*mut [u8]>() as *mut c_void;
+    if before
+        .checked_add(n)
+        .is_some_and(|total| total <= allocator.max)
+    {
+        return true;
     }
 
-    // Allocate n bytes of zeroed memory:
-    // 1. vec![0u8; n] creates a Vec with n zero bytes
-    // 2. .into_boxed_slice() converts to Box<[u8]> (fixed size, no capacity overhead)
-    // 3. Box::into_raw() gives ownership to V8 (we get a raw pointer back)
-    // 4. Cast to *mut c_void for the C ABI
-    Box::into_raw(vec![0u8; n].into_boxed_slice()) as *mut [u8] as *mut c_void
+    // V8 calls this from inside its allocator, so the report stays off the
+    // tracing subscriber and its locks.
+    eprintln!(
+        "[openworkers-runtime-v8] ArrayBuffer allocation denied: {}MB exceeds limit of {}MB",
+        before.saturating_add(n) / 1024 / 1024,
+        allocator.max / 1024 / 1024
+    );
+    // Set flag so the runtime knows why we failed
+    allocator.memory_limit_hit.store(true, Ordering::SeqCst);
+    // Rollback the count since we're not actually allocating; without this,
+    // failed allocations would permanently "use up" the quota
+    allocator.count.fetch_sub(n, Ordering::SeqCst);
+
+    false
+}
+
+/// `n` bytes from the system, zeroed or not, or null when it has none: V8
+/// then throws a RangeError, where an abort here would take the process.
+fn allocate_bytes(allocator: &CustomAllocator, n: usize, zeroed: bool) -> *mut c_void {
+    if !reserve(allocator, n) {
+        return std::ptr::null_mut();
+    }
+
+    if n == 0 {
+        return std::ptr::NonNull::<u8>::dangling().as_ptr() as *mut c_void;
+    }
+
+    // SAFETY: the layout has a non-zero size.
+    let ptr = match layout(n) {
+        Some(layout) if zeroed => unsafe { std::alloc::alloc_zeroed(layout) },
+        Some(layout) => unsafe { std::alloc::alloc(layout) },
+        None => std::ptr::null_mut(),
+    };
+
+    if ptr.is_null() {
+        eprintln!(
+            "[openworkers-runtime-v8] ArrayBuffer allocation of {}MB failed: out of memory",
+            n / 1024 / 1024
+        );
+        allocator.count.fetch_sub(n, Ordering::SeqCst);
+    }
+
+    ptr as *mut c_void
+}
+
+/// Called by V8 when JS code does `new ArrayBuffer(n)` or `new Uint8Array(n)`.
+/// Returns a pointer to zeroed memory, or NULL if the limit is exceeded or the
+/// system has no memory for it.
+unsafe extern "C" fn allocate(allocator: &CustomAllocator, n: usize) -> *mut c_void {
+    allocate_bytes(allocator, n, true)
 }
 
 /// Called by V8 for uninitialized allocation (performance optimization).
 /// Same as `allocate` but doesn't zero the memory.
-// V8 calls this from inside its allocator, so the report stays off the tracing
-// subscriber and its locks.
-#[allow(clippy::unnecessary_cast)]
-#[allow(clippy::uninit_vec)]
 unsafe extern "C" fn allocate_uninitialized(allocator: &CustomAllocator, n: usize) -> *mut c_void {
-    allocator.count.fetch_add(n, Ordering::SeqCst);
-
-    let count_loaded = allocator.count.load(Ordering::SeqCst);
-
-    if count_loaded > allocator.max {
-        eprintln!(
-            "[openworkers-runtime-v8] ArrayBuffer allocation denied: {}MB exceeds limit of {}MB",
-            count_loaded / 1024 / 1024,
-            allocator.max / 1024 / 1024
-        );
-        allocator.memory_limit_hit.store(true, Ordering::SeqCst);
-        allocator.count.fetch_sub(n, Ordering::SeqCst);
-        return std::ptr::null::<*mut [u8]>() as *mut c_void;
-    }
-
-    // Allocate uninitialized memory (faster than zeroing)
-    let mut store = Vec::with_capacity(n);
-    // SAFETY: We just allocated capacity for n bytes, and V8 will initialize them
-    unsafe { store.set_len(n) };
-
-    Box::into_raw(store.into_boxed_slice()) as *mut [u8] as *mut c_void
+    allocate_bytes(allocator, n, false)
 }
 
 /// Called by V8 when an ArrayBuffer is garbage collected.
 /// We decrement our counter and free the memory.
 unsafe extern "C" fn free(allocator: &CustomAllocator, data: *mut c_void, n: usize) {
     allocator.count.fetch_sub(n, Ordering::SeqCst);
-    // SAFETY: data was allocated by allocate/allocate_uninitialized with size n
-    let _ = unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(data as *mut u8, n)) };
+
+    if n == 0 {
+        return;
+    }
+
+    // SAFETY: data was allocated by allocate_bytes with this layout.
+    if let Some(layout) = layout(n) {
+        unsafe { std::alloc::dealloc(data as *mut u8, layout) };
+    }
 }
 
 /// Called when the allocator itself is dropped (isolate destroyed).
 unsafe extern "C" fn drop(allocator: *const CustomAllocator) {
     // SAFETY: allocator was created via Arc::into_raw in into_v8_allocator
     let _ = unsafe { Arc::from_raw(allocator) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn allocator(max: usize) -> (Arc<CustomAllocator>, Arc<AtomicBool>) {
+        let hit = Arc::new(AtomicBool::new(false));
+        (CustomAllocator::new(max, Arc::clone(&hit)), hit)
+    }
+
+    #[test]
+    fn memory_the_system_refuses_is_null_not_an_abort() {
+        let (allocator, hit) = allocator(usize::MAX);
+
+        let ptr = unsafe { allocate(&allocator, usize::MAX / 2) };
+
+        assert!(ptr.is_null());
+        assert_eq!(allocator.current_usage(), 0);
+        assert!(
+            !hit.load(Ordering::SeqCst),
+            "the limit was not what refused it"
+        );
+    }
+
+    #[test]
+    fn the_limit_counts_what_is_live() {
+        let (allocator, hit) = allocator(100);
+
+        let first = unsafe { allocate(&allocator, 60) };
+        assert!(!first.is_null());
+        assert!(
+            unsafe { std::slice::from_raw_parts(first as *const u8, 60) }
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+
+        let second = unsafe { allocate(&allocator, 60) };
+        assert!(second.is_null());
+        assert!(hit.load(Ordering::SeqCst));
+        assert_eq!(allocator.current_usage(), 60);
+
+        unsafe { free(&allocator, first, 60) };
+        assert_eq!(allocator.current_usage(), 0);
+
+        let empty = unsafe { allocate_uninitialized(&allocator, 0) };
+        assert!(!empty.is_null());
+        unsafe { free(&allocator, empty, 0) };
+    }
 }
