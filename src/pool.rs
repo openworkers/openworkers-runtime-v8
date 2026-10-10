@@ -483,6 +483,15 @@ fn drop_under_lock<T>(value: T, pooled: &LockerManagedIsolate) {
     drop(value);
 }
 
+/// The first 8 characters of an id, for the logs. Cut on a character boundary:
+/// slicing bytes panics on an id that has a multibyte character there.
+fn short_id(id: &str) -> &str {
+    match id.char_indices().nth(8) {
+        Some((end, _)) => &id[..end],
+        None => id,
+    }
+}
+
 fn report_marks(on_marks: &mut Option<crate::MarksCallback>, marks: crate::ListenerMarks) {
     if marks.any()
         && let Some(callback) = on_marks.take()
@@ -597,7 +606,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
 
         tracing::debug!(
             "context WARM: worker={}, version={}, reuse_count={}",
-            &worker_id[..8.min(worker_id.len())],
+            short_id(&worker_id),
             version,
             reuse_cnt,
         );
@@ -626,14 +635,14 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
                 let save_to_cache = if result.is_err() {
                     tracing::debug!(
                         "context DISCARDED: worker={}, reason={:?}",
-                        &worker_id[..8.min(worker_id.len())],
+                        short_id(&worker_id),
                         result.as_ref().err(),
                     );
                     false
                 } else if let Err(reason) = ec.drain_waituntil().await {
                     tracing::debug!(
                         "context DISCARDED: worker={}, reason=drain_waituntil: {:?}",
-                        &worker_id[..8.min(worker_id.len())],
+                        short_id(&worker_id),
                         reason,
                     );
                     false
@@ -680,7 +689,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
             Err(e) => {
                 tracing::debug!(
                     "context DISCARDED: worker={}, reason=reset_failed: {}",
-                    &worker_id[..8.min(worker_id.len())],
+                    short_id(&worker_id),
                     e,
                 );
                 drop_under_lock(ec, &pooled);
@@ -692,7 +701,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
     // ── Cold path ──────────────────────────────────────────────────────
     tracing::debug!(
         "context COLD: worker={}, creating new context",
-        &worker_id[..8.min(worker_id.len())],
+        short_id(&worker_id),
     );
 
     // Acquire the lock to enter the isolate and create the context
@@ -748,7 +757,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
                     Err(reason) => {
                         tracing::debug!(
                             "context NOT CACHED: worker={}, reason=drain_waituntil: {:?}",
-                            &worker_id[..8.min(worker_id.len())],
+                            short_id(&worker_id),
                             reason,
                         );
                         drop_under_lock(ctx, &pooled);
@@ -758,7 +767,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
             } else {
                 tracing::debug!(
                     "context NOT CACHED: worker={}, reason={:?}",
-                    &worker_id[..8.min(worker_id.len())],
+                    short_id(&worker_id),
                     result.as_ref().err(),
                 );
                 drop_under_lock(ctx, &pooled);
@@ -1024,5 +1033,13 @@ mod tests {
         let stats = pool.stats();
         assert_eq!(stats.total, 2);
         assert_eq!(stats.in_use, 1);
+    }
+
+    #[test]
+    fn test_short_id_cuts_on_a_character_boundary() {
+        assert_eq!(short_id("abc"), "abc");
+        assert_eq!(short_id("0123456789"), "01234567");
+        // Byte 8 falls inside the last character here
+        assert_eq!(short_id("1234567é9"), "1234567é");
     }
 }
