@@ -183,12 +183,39 @@ impl ExecutionContext {
         // Setup environment variables and bindings (placeholder)
         Self::setup_env(isolate, &context, &script.env, &script.bindings)?;
 
-        // Evaluate user script (placeholder)
-        let evaluated = Self::evaluate_script(isolate, &context, &script.code);
+        // Evaluate the user script. Its top level is JS like any other, so it
+        // runs under the wall clock and CPU limits of its own, in a turn.
+        let load_id = next_request_id();
+        let load_memory_hit = AtomicBool::new(false);
+        let wall_guard = TimeoutGuard::new(
+            Arc::clone(&pooled.turn),
+            load_id,
+            limits.max_wall_clock_time_ms,
+        );
+        let cpu_guard = CpuEnforcer::new(Arc::clone(&pooled.turn), load_id, limits.max_cpu_time_ms);
 
-        // No turn holds the isolate here: a memory limit hit while the script
-        // loads belongs to the event that loads it
-        if pooled.memory_limit_hit.swap(false, Ordering::SeqCst) {
+        let evaluated = {
+            let _turn =
+                TurnGuard::begin(&pooled.turn, load_id, cpu_guard.as_ref(), &load_memory_hit);
+
+            Self::evaluate_script(isolate, &context, &script.code)
+        };
+
+        // A termination that landed at the end of the turn must not reach the
+        // next user of the isolate
+        isolate.cancel_terminate_execution();
+
+        if cpu_guard.as_ref().is_some_and(|g| g.was_terminated()) {
+            return Err(TerminationReason::CpuTimeLimit);
+        }
+
+        if wall_guard.was_triggered() {
+            return Err(TerminationReason::WallClockTimeout);
+        }
+
+        if load_memory_hit.load(Ordering::SeqCst)
+            || pooled.memory_limit_hit.swap(false, Ordering::SeqCst)
+        {
             return Err(TerminationReason::MemoryLimit);
         }
 

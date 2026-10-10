@@ -401,3 +401,22 @@ mod cpu_tests {
         .await;
     }
 }
+
+/// The top level of the script runs under the limits too, not only its handlers
+#[tokio::test(flavor = "current_thread")]
+async fn test_top_level_infinite_loop_is_terminated() {
+    run_in_local(|| async {
+        let limits = RuntimeLimits {
+            max_cpu_time_ms: 0,
+            max_wall_clock_time_ms: 300,
+            ..Default::default()
+        };
+
+        let started = std::time::Instant::now();
+        let result = Worker::new(Script::new("while (true) {}"), Some(limits)).await;
+
+        assert!(matches!(result, Err(TerminationReason::WallClockTimeout)));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    })
+    .await;
+}
