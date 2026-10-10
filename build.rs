@@ -5,8 +5,7 @@ const RUNTIME_SNAPSHOT_PATH: &str = env!("RUNTIME_SNAPSHOT_PATH");
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed=src/runtime/bindings.rs");
-    println!("cargo:rerun-if-changed=src/snapshot.rs");
+    println!("cargo:rerun-if-env-changed=RUNTIME_SNAPSHOT_PATH");
 
     let path = PathBuf::from(RUNTIME_SNAPSHOT_PATH);
 
