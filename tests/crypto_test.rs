@@ -384,117 +384,100 @@ async fn test_ecdsa_verify_with_private_key() {
     .await;
 }
 
-/// Test RSA PKCS#1 v1.5 sign and verify
+/// The RSA-2048 test key, as `openssl genpkey -algorithm RSA` made it:
+/// the private key as PKCS#8 (`openssl pkcs8 -topk8 -nocrypt -outform DER`),
+/// the public key as SubjectPublicKeyInfo (`openssl pkey -pubout -outform DER`)
+/// and bare (`openssl rsa -RSAPublicKey_out -outform DER`).
+const RSA_PKCS8_BASE64: &str = "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCny/+Fpl7ZcM0tQ/AmbtOY4QJij6UKeA58LNvjTi6usgHoTQaIsAtJTAIdZg3M2v2hhmQMRvOXAoox4MYfzPSbSMK9Z7kun0zYw5ziijjwq3y7B/pOUfRWYHy1dgZDeHeKu6Y2CYZeAEmCq1Ljtq8PPQAQO3VmE4SHRZq1rtcABpTul8YTgpGFmk+wnPByWsOHQvsO6BTbYoLTlBf9Ff5kUnblNJhmcfwjQGcTIFKEAQggJsr/tPLq3bMSdxYl05WjLuFHLonojioKpGNcI2LI8+kj8wQ0lXZm2rWSzcgR4KWLS2NYcQQcYp+ZTT5dap/o9x/HVNB48AhHldabgMV9AgMBAAECggEAHac3uCkDZJZicBAsScJ2qvMCvqPHhR7b4nZ0AorPxagoHaM1FyVTTUf9LLBbGnuN7IRpPGEyjZqRjQh9wuNvy9xzK9E/gN1+kWUaXc+TCfcoUw4xHjOuBDDHgTMDHtvUdmQ8lpqe0BBpbUn1G1BuxfjgAL5dPCWRW22Bzn9AOBzn2xcbhJIyHvt67AjH4z1gTxiWrwVAT0dQTY0hmBbHXpgjQdKm84c9o9PmQMOVKryJ5GeKtFnJvKH0NYYab3+QG8Yh3ABArvfm5clXolsDOnX4OTBv1qHQ6+rOaDBfVrLsJnkC+gtP8GAmDbNaMPyQ7E5Zf7RUkPRxX/Y0ufKaQQKBgQDqFvoIjEA+eFv4Ux0Ah7dSkclrBWccC07eIejJuCUSbaIMY4YLdgSftwn87OhRs6gAOQJvYUNgrO52OsLuVwRfti8MO3JGehK4v3uA8lCSfbKKvrlt7vv+IrQuQM+rTSf4jYb0gJGcUYuIdWLFdkm8qJMRbDi3KVCgHcIpi0B8QQKBgQC3gJP2a2BCeyWILO2GEoTQwGfx/50ixq4O6qHIBdweFMWsDPFkR+duRRw0Ds2w9QCV3vcQniajPGZNjx0ZdGqMQAEu4MY4+5AeN9G0GJxxLqHUtpXUsPneWOD3a2ULGbcuejDz0XCLZEyLs8IRq78hYH2Rb3cushP8XCqVcqCqPQKBgQDmPFcLVTZSuvpqEQTzYohyE6VxN00kjhKx89QLoqwDpgS9/pz2ZMtDcznFpBUTVookPe4hMh6c1Tls23qiBL/uizdW5pkMrEABqYOFXc7VZf/W6qNidq0uVV+2JlSafTaVBk336QROJP4B5sKQyDjZ70tG1ZQqwd3kvaAcUDPKgQKBgCCOLDH8rNA+ntMA/YbaxDtw10Ak1FD2JK06zUb6WynvD37NsQnUg+eZVT6bHbz2SotMSlLla/9r2M6LxGLet4R4Wn1hnWlAoDnsN0UXVLHzzvw5BG3+k+XxqL/cismkX05cmVC4aJoiSj5Cvvx5lugqAT0LJH7hUxBjnZ5z/rMVAoGBAM6K7oQynzQLCeGIcV97QMSswCNAQgNtOZQfb47LQtSMZQ5SV4IZTD4bIMwnABn4205QfsWt5OcfcCypP/w0F6GeUofCmw9+IDbFNpDj9QldzjPq30ziXv/U2HSQtTiPKm+fNrOV0djB/aBSL4IeD0CsDCYHXe7ckvxzt3UxukXi";
+const RSA_SPKI_BASE64: &str = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAp8v/haZe2XDNLUPwJm7TmOECYo+lCngOfCzb404urrIB6E0GiLALSUwCHWYNzNr9oYZkDEbzlwKKMeDGH8z0m0jCvWe5Lp9M2MOc4oo48Kt8uwf6TlH0VmB8tXYGQ3h3irumNgmGXgBJgqtS47avDz0AEDt1ZhOEh0Wata7XAAaU7pfGE4KRhZpPsJzwclrDh0L7DugU22KC05QX/RX+ZFJ25TSYZnH8I0BnEyBShAEIICbK/7Ty6t2zEncWJdOVoy7hRy6J6I4qCqRjXCNiyPPpI/MENJV2Ztq1ks3IEeCli0tjWHEEHGKfmU0+XWqf6Pcfx1TQePAIR5XWm4DFfQIDAQAB";
+const RSA_PUBLIC_KEY_BASE64: &str = "MIIBCgKCAQEAp8v/haZe2XDNLUPwJm7TmOECYo+lCngOfCzb404urrIB6E0GiLALSUwCHWYNzNr9oYZkDEbzlwKKMeDGH8z0m0jCvWe5Lp9M2MOc4oo48Kt8uwf6TlH0VmB8tXYGQ3h3irumNgmGXgBJgqtS47avDz0AEDt1ZhOEh0Wata7XAAaU7pfGE4KRhZpPsJzwclrDh0L7DugU22KC05QX/RX+ZFJ25TSYZnH8I0BnEyBShAEIICbK/7Ty6t2zEncWJdOVoy7hRy6J6I4qCqRjXCNiyPPpI/MENJV2Ztq1ks3IEeCli0tjWHEEHGKfmU0+XWqf6Pcfx1TQePAIR5XWm4DFfQIDAQAB";
+
+/// The JS that binds the RSA test key to `rsaPkcs8`, `rsaSpki` and `rsaPublicKey`.
+fn rsa_test_keys() -> String {
+    format!(
+        r#"
+        const fromBase64 = (text) => Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
+        const rsaPkcs8 = fromBase64('{RSA_PKCS8_BASE64}');
+        const rsaSpki = fromBase64('{RSA_SPKI_BASE64}');
+        const rsaPublicKey = fromBase64('{RSA_PUBLIC_KEY_BASE64}');
+        "#
+    )
+}
+
+/// Test RSA PKCS#1 v1.5 sign and verify with real PKCS#8 and SPKI keys
 #[tokio::test(flavor = "current_thread")]
 async fn test_rsa_sign_verify() {
-    run_in_local(|| async {
-        // Test RSA key pair (2048-bit, generated with openssl)
-        // Private key: DER format
-        // Public key: RSAPublicKey format (not SPKI)
-        let code = r#"
-            addEventListener('fetch', async (event) => {
-                // Base64 decoder (atob not available in this runtime)
-                function base64ToBytes(base64) {
-                    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-                    let bufferLength = base64.length * 0.75;
-                    if (base64[base64.length - 1] === '=') bufferLength--;
-                    if (base64[base64.length - 2] === '=') bufferLength--;
+    let body = rsa_test_keys()
+        + r#"
+        const privateKey = await crypto.subtle.importKey(
+            'pkcs8', rsaPkcs8, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']
+        );
+        const publicKey = await crypto.subtle.importKey(
+            'spki', rsaSpki, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']
+        );
 
-                    const bytes = new Uint8Array(bufferLength);
-                    let p = 0;
+        const data = new TextEncoder().encode('hello world');
+        const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', privateKey, data);
 
-                    for (let i = 0; i < base64.length; i += 4) {
-                        const encoded1 = chars.indexOf(base64[i]);
-                        const encoded2 = chars.indexOf(base64[i + 1]);
-                        const encoded3 = chars.indexOf(base64[i + 2]);
-                        const encoded4 = chars.indexOf(base64[i + 3]);
+        const isValid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', publicKey, signature, data);
 
-                        bytes[p++] = (encoded1 << 2) | (encoded2 >> 4);
-                        if (encoded3 !== -1 && base64[i + 2] !== '=') {
-                            bytes[p++] = ((encoded2 & 15) << 4) | (encoded3 >> 2);
-                        }
-                        if (encoded4 !== -1 && base64[i + 3] !== '=') {
-                            bytes[p++] = ((encoded3 & 3) << 6) | encoded4;
-                        }
-                    }
-                    return bytes;
+        const wrongData = new TextEncoder().encode('wrong data');
+        const isInvalid = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', publicKey, signature, wrongData);
+
+        // RSA-2048 signature is 256 bytes
+        const sigLen = new Uint8Array(signature).length;
+
+        return isValid && !isInvalid && sigLen === 256
+            ? 'OK'
+            : `FAIL: isValid=${isValid}, isInvalid=${isInvalid}, sigLen=${sigLen}`;
+    "#;
+
+    assert_eq!(run_fetch(&body).await, "OK");
+}
+
+/// importKey parses the key: bare DER under "pkcs8" or "spki", and bytes that
+/// are no key, reject with a DataError there, not at sign or verify. The bare
+/// RSAPublicKey is still taken as "raw".
+#[tokio::test(flavor = "current_thread")]
+async fn test_rsa_import_key_rejects_what_is_not_that_format() {
+    let body = rsa_test_keys()
+        + r#"
+        const algorithm = { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' };
+        const rsaPrivateKey = rsaPkcs8.slice(26); // the RSAPrivateKey inside the PKCS#8
+
+        const accepted = [];
+        const attempts = [
+            ['pkcs8', rsaPrivateKey, ['sign']],
+            ['pkcs8', rsaSpki, ['sign']],
+            ['pkcs8', new Uint8Array(64), ['sign']],
+            ['spki', rsaPublicKey, ['verify']],
+            ['spki', rsaPkcs8, ['verify']],
+            ['spki', new Uint8Array(64), ['verify']],
+            ['raw', rsaSpki, ['verify']],
+        ];
+        for (const [format, bytes, usages] of attempts) {
+            try {
+                await crypto.subtle.importKey(format, bytes, algorithm, false, usages);
+                accepted.push(format + ' ' + bytes.length);
+            } catch (e) {
+                if (!(e instanceof DOMException) || e.name !== 'DataError') {
+                    accepted.push(format + ' ' + bytes.length + ': ' + e);
                 }
+            }
+        }
 
-                // Base64 encoded RSA keys (2048-bit)
-                const privateKeyBase64 = 'MIIEpAIBAAKCAQEA5EmDGTHoMj6bosn6lbZMJkZNnDlfoon7eMBrVQYSkQDLZCnJHDAxAD8ODlIWlRHDD9NWqyEBdTGqlUDTrjKvLBzktSMWeIG0TrXVQ0Yw3Ibu8EvSn8tGVEq/Epa05uNh7JGVjxmIRVyGn6ic9b1S85JzfcSJgUoxSvW0KmTOh/TaaHdAkGS/4wpdfjSexogWapyKNms17jHehmtkUq0Vhh4YYr8t72bb+FJtHqwsEYbC3jXXEQ+u6zCmc9fDuAvbv5kvjglBZu0aEGap5fmbqSWexWqJcdvln7TMQ2A6b1fmZ1t76+WtKH7WwGf4SGkJ2PLFxCZaJ8oE0Ci+Rm/amwIDAQABAoIBABBogj5A2o4l9tzMBLFXEYEcw35Ll2ag4UzME8rgLVxzwKq54CUhB5yba6C24L2lMa6FA7E4JZktUTP6HVzjcrjKeNvWIkrWE8YmhqYXuPJY1nq6EHEA1NTBLJui7my8AjFVQ3kuHh/SJzD5lxKIoZo1OAzdn/6FfSaEo4b6iOe3nGj2q00WUf4t5OjQyWkgZHb3D+QFimnrw0q0ct/N28MxiHohJs+8NgDhDnjthF1fwi5mpso9mm+ysw2/ss5W1y6mczWcEwXvTh0svD6BkdGHfdpbkaXguHFCyFk1WG80MYiq61yZOwPMj2GFh/o3dPdIo5x3ScKBzDen2zuevLkCgYEA+N30zLXWM67jpqxFTokbEiImmUiLHGPx4CtCu1Cf3MNWz7W2p8/eCi3vtL8dCeD687yuHDPcft6KH88jXHriyTaK3zez8BTetmGNM+3YM1QmFynD1qYuqaDyobZBFwpxka902SQFcWAIDsimaJeNsVd2Kxr2lb3AYZyu66vQAtkCgYEA6tSNeHWS+PqF0OUivYI2Vsn+moplxNfEElSK6ifrK39YaEv9hZzwLIR3Iq0cxbKQWBNvssWzaLd0Z5ZKBEWFmLDNph7Giq7V1spUc6V6tWrbGL+92Yw0+ZWjx83InFAT+B6Cjgvptfrd0AipphhrAFC0c3iiIKbSPv0EOPec+JMCgYEAx0rneO+9A1JwV87pCYVeOl1Cz8l6LVgUIFJEdECSZHXBlUCNb0FVLI2wweux03FpRbq5KziUwLxxnBuC09JMvpmBCFRRMldkKmVgcE9trV0by7zUaZZXE9whsUKESXFBlUsOpbzk5u/iRASGzodfHr9NkCNdiHiWERUqNuw1/bECgYASDVDqx68KsMeErXikNNRUi6ak3qrAHQ4XkqQzJ+puJ5X2PpE4qj3UTkKSSdiCYh2yh5v4lDYcgK3UILuD5IxGlqDYelks5A/QOTGQylHKjHJXTrYbeSnBXf1/KJSZX5aJZl8G6GeI88YFbgUMnafsGEgm8EkWVXyoFu8yKebJPQKBgQDsltWFU9zmXXA6mMaKi5A7J7Va3s74pEqlyQk+Xb0iRcZLKCIdB3MepaIPXi0QPjRwXY6vIVIV2AvTToup1c4pZKH98YM/HFZfLgQsNw0YGW39VzyR4i39j44AvAmLB0y8x8GKD7NUk8cVJGLL+R5qyRe2LGOJtHb4UoBsmTCIWg==';
-                const publicKeyBase64 = 'MIIBCgKCAQEA5EmDGTHoMj6bosn6lbZMJkZNnDlfoon7eMBrVQYSkQDLZCnJHDAxAD8ODlIWlRHDD9NWqyEBdTGqlUDTrjKvLBzktSMWeIG0TrXVQ0Yw3Ibu8EvSn8tGVEq/Epa05uNh7JGVjxmIRVyGn6ic9b1S85JzfcSJgUoxSvW0KmTOh/TaaHdAkGS/4wpdfjSexogWapyKNms17jHehmtkUq0Vhh4YYr8t72bb+FJtHqwsEYbC3jXXEQ+u6zCmc9fDuAvbv5kvjglBZu0aEGap5fmbqSWexWqJcdvln7TMQ2A6b1fmZ1t76+WtKH7WwGf4SGkJ2PLFxCZaJ8oE0Ci+Rm/amwIDAQAB';
+        const privateKey = await crypto.subtle.importKey('pkcs8', rsaPkcs8, algorithm, false, ['sign']);
+        const rawKey = await crypto.subtle.importKey('raw', rsaPublicKey, algorithm, false, ['verify']);
+        const data = new TextEncoder().encode('hello world');
+        const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', privateKey, data);
+        const rawVerifies = await crypto.subtle.verify('RSASSA-PKCS1-v1_5', rawKey, signature, data);
 
-                const privateKeyData = base64ToBytes(privateKeyBase64);
-                const publicKeyData = base64ToBytes(publicKeyBase64);
+        return accepted.length === 0 && rawVerifies
+            ? 'OK'
+            : 'FAIL: accepted ' + accepted.join(', ') + ', rawVerifies=' + rawVerifies;
+    "#;
 
-                // Import keys
-                const privateKey = await crypto.subtle.importKey(
-                    'pkcs8',
-                    privateKeyData,
-                    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-                    false,
-                    ['sign']
-                );
-
-                const publicKey = await crypto.subtle.importKey(
-                    'spki',
-                    publicKeyData,
-                    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-                    false,
-                    ['verify']
-                );
-
-                // Sign data
-                const data = new TextEncoder().encode('hello world');
-                const signature = await crypto.subtle.sign(
-                    'RSASSA-PKCS1-v1_5',
-                    privateKey,
-                    data
-                );
-
-                // Verify signature
-                const isValid = await crypto.subtle.verify(
-                    'RSASSA-PKCS1-v1_5',
-                    publicKey,
-                    signature,
-                    data
-                );
-
-                // Verify with wrong data fails
-                const wrongData = new TextEncoder().encode('wrong data');
-                const isInvalid = await crypto.subtle.verify(
-                    'RSASSA-PKCS1-v1_5',
-                    publicKey,
-                    signature,
-                    wrongData
-                );
-
-                // RSA-2048 signature is 256 bytes
-                const sigLen = new Uint8Array(signature).length;
-
-                const result = isValid && !isInvalid && sigLen === 256 ? 'OK' : `FAIL: isValid=${isValid}, isInvalid=${isInvalid}, sigLen=${sigLen}`;
-                event.respondWith(new Response(result));
-            });
-        "#;
-
-        let script = Script::new(code);
-        let mut worker = Worker::new(script, None).await.unwrap();
-
-        let req = HttpRequest {
-            method: HttpMethod::Get,
-            url: "http://localhost/".to_string(),
-            headers: HashMap::new(),
-            body: RequestBody::None,
-        };
-
-        let (task, rx) = Event::fetch(req);
-        worker.exec(task).await.unwrap();
-        let response = rx.await.unwrap();
-
-        let body = &response.body.collect().await.unwrap().unwrap();
-        assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
-    })
-    .await;
+    assert_eq!(run_fetch(&body).await, "OK");
 }
 
 /// A view into part of a buffer must be filled where it points, not at offset 0

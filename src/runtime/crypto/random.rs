@@ -5,7 +5,7 @@ use v8;
 const RANDOM_VALUES_QUOTA: usize = 65536;
 
 /// Falls back to a plain `Error` when the context has no `DOMException`.
-fn throw_dom_exception(scope: &mut v8::PinScope, name: &str, message: &str) {
+pub(super) fn throw_dom_exception(scope: &mut v8::PinScope, name: &str, message: &str) {
     let message = v8::String::new(scope, message).unwrap();
     let global = scope.get_current_context().global(scope);
     let key = v8::String::new(scope, "DOMException").unwrap();
