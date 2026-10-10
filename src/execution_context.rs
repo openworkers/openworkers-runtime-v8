@@ -881,6 +881,11 @@ impl ExecutionContext {
             .deadline()
             .map(|at| Box::pin(tokio::time::sleep_until(at)));
 
+        // Armed once the disconnect is signalled: a guest that ignores it is
+        // left after the grace period, and nothing else wakes a quiet loop
+        // to see that it passed.
+        let mut grace: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
+
         std::future::poll_fn(|cx| {
             // A client that hangs up is seen by the task pumping the body,
             // which wakes this loop through the stream manager.
@@ -939,6 +944,7 @@ impl ExecutionContext {
                 };
 
                 // Check exit condition after each round
+                let signaled_before = abort_signaled_at.is_some();
                 let should_exit = self.check_exit_with_abort(
                     exit_condition,
                     &abort_config,
@@ -953,13 +959,29 @@ impl ExecutionContext {
                     return Poll::Ready(Ok(()));
                 }
 
+                // Signalling the disconnect queued the microtasks that end the
+                // body; they count as work for another round
+                let just_signaled = !signaled_before && abort_signaled_at.is_some();
+
                 // No callbacks processed in this round — no more work pending
-                if count == 0 || round == MAX_COALESCE_ROUNDS - 1 {
+                if (count == 0 && !just_signaled) || round == MAX_COALESCE_ROUNDS - 1 {
                     break;
                 }
 
                 // Callbacks were processed — loop to check if more arrived
                 // during processing (e.g., promise chains, microtasks)
+            }
+
+            if let (Some(at), Some(config), None) =
+                (abort_signaled_at, abort_config.as_ref(), grace.as_ref())
+            {
+                grace = Some(Box::pin(tokio::time::sleep_until(at + config.grace_period)));
+            }
+
+            // Polling the sleep registers the waker; a ready one has nothing
+            // to do, the next check_exit_with_abort reads the clock itself
+            if let Some(sleep) = grace.as_mut() {
+                let _ = sleep.as_mut().poll(cx);
             }
 
             // A guard that cut this turn's JS also cut what would wake this

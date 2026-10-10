@@ -190,11 +190,10 @@ fn get(path: &str) -> HttpRequest {
 }
 
 /// 3. A client that hangs up on a stream whose source is waiting (no timer,
-/// no I/O) leaves `exec` parked until the wall clock, although the disconnect
-/// was signalled: nothing wakes the loop to run the microtasks it queued or
-/// to notice the grace period passed.
+/// no I/O) used to leave `exec` parked until the wall clock, although the
+/// disconnect was signalled: nothing woke the loop to run the microtasks it
+/// queued or to notice the grace period had passed.
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "open bug, see the doc comment"]
 async fn hang_up_on_a_quiet_stream_is_noticed() {
     run_in_local(|| async {
         let code = r#"
