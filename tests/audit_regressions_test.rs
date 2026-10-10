@@ -1,5 +1,5 @@
-//! Reproductions of open bugs found in an audit. Each test fails on the
-//! current code and is ignored by default; run with `--ignored` to see it.
+//! Regressions of bugs found in an audit: each failed before its fix.
+//! Numbered in the order they were found.
 
 mod common;
 
@@ -257,35 +257,50 @@ async fn hang_up_on_a_quiet_stream_is_noticed() {
     .await;
 }
 
-/// 4. SharedArrayBuffer is deleted from the global, but shared WebAssembly
-/// memory still hands one out, constructor included.
+/// 4. SharedArrayBuffer is deleted from the global, and shared WebAssembly
+/// memory used to hand one out, constructor included.
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "open bug, see the doc comment"]
-async fn shared_array_buffer_is_reachable_through_wasm() {
+async fn shared_array_buffer_is_not_reachable_through_wasm() {
     run_in_local(|| async {
         let mut worker = Worker::new(Script::new("globalThis.x = 0;"), None).await.unwrap();
         worker
             .evaluate(
                 r#"
-                const mem = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
-                const buf = mem.buffer;
-                const Ctor = buf.constructor;
-                globalThis.sabName = Ctor.name === 'SharedArrayBuffer' ? 1 : 0;
-                let fresh = 0;
-                try { fresh = (new Ctor(8)).byteLength === 8 ? 1 : 0; } catch (e) { fresh = 0; }
-                globalThis.sabFresh = fresh;
+                const refused = (f) => { try { f(); return 0; } catch (e) { return e instanceof TypeError ? 1 : 0; } };
+
+                globalThis.sabGone = typeof SharedArrayBuffer === 'undefined' ? 1 : 0;
                 globalThis.atomicsGone = typeof Atomics === 'undefined' ? 1 : 0;
+                globalThis.sharedMemoryRefused = refused(() => new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true }));
+                globalThis.plainMemoryWorks = new WebAssembly.Memory({ initial: 1 }).buffer.byteLength === 65536 ? 1 : 0;
+
+                // (memory 1 1 shared), and the same memory unshared
+                const shared = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 5, 4, 1, 3, 1, 1]);
+                const plain = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 5, 4, 1, 1, 1, 1]);
+                globalThis.sharedModuleRefused = refused(() => new WebAssembly.Module(shared));
+                globalThis.plainModuleWorks = new WebAssembly.Module(plain) instanceof WebAssembly.Module ? 1 : 0;
+                globalThis.constructorIsSafe = WebAssembly.Memory.prototype.constructor === WebAssembly.Memory ? 1 : 0;
+
+                globalThis.sharedCompileRefused = 0;
+                WebAssembly.compile(shared).then(() => {}, (e) => { globalThis.sharedCompileRefused = e instanceof TypeError ? 1 : 0; });
                 "#,
             )
             .unwrap();
-        let name = worker.get_global_u32("sabName");
-        let fresh = worker.get_global_u32("sabFresh");
-        let atomics_gone = worker.get_global_u32("atomicsGone");
-        assert_eq!(
-            (name, fresh, atomics_gone),
-            (Some(0), Some(0), Some(1)),
-            "SharedArrayBuffer reachable: buffer.constructor is SAB = {name:?}, new instance works = {fresh:?}, Atomics gone = {atomics_gone:?}"
-        );
+        worker.process_callbacks();
+
+        let flags = [
+            "sabGone",
+            "atomicsGone",
+            "sharedMemoryRefused",
+            "plainMemoryWorks",
+            "sharedModuleRefused",
+            "plainModuleWorks",
+            "constructorIsSafe",
+            "sharedCompileRefused",
+        ];
+
+        for flag in flags {
+            assert_eq!(worker.get_global_u32(flag), Some(1), "{flag}");
+        }
     })
     .await;
 }

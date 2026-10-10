@@ -161,6 +161,7 @@ impl ExecutionContext {
             bindings::setup_compression_natives(scope);
             bindings::setup_navigator_natives(scope);
             bindings::setup_async_context_natives(scope);
+            bindings::setup_wasm_natives(scope);
 
             bindings::seal_native_namespace(scope);
 

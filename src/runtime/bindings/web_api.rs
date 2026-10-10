@@ -300,6 +300,13 @@ pub fn setup_fetch_helpers(scope: &mut v8::PinScope) {
 /// SharedArrayBuffer and Atomics can be used to create high-precision timers
 /// for side-channel attacks. Since we don't expose Web Workers (multi-threaded JS),
 /// these APIs have no legitimate use case and are removed for security.
+/// The op `setup_security_restrictions` reads modules with; registered with
+/// the other natives, before the namespace is sealed.
+pub fn setup_wasm_natives(scope: &mut v8::PinScope) {
+    let shares_memory_fn = v8::Function::new(scope, wasm_module_shares_memory).unwrap();
+    super::register_op(scope, "wasmModuleSharesMemory", shares_memory_fn.into());
+}
+
 pub fn setup_security_restrictions(scope: &mut v8::PinScope) {
     let code = r#"
         // Remove SharedArrayBuffer - can be used to create high-precision timers
@@ -307,9 +314,239 @@ pub fn setup_security_restrictions(scope: &mut v8::PinScope) {
 
         // Remove Atomics - only useful with SharedArrayBuffer, potential for timing attacks
         delete globalThis.Atomics;
+
+        // Shared WebAssembly memory is backed by a SharedArrayBuffer, with
+        // the constructor reachable from it. A Memory is refused when it is
+        // shared, and a module when it declares a shared memory of its own.
+        // A module that imports one needs a shared Memory, so it is covered.
+        (() => {
+            const wasm = globalThis.WebAssembly;
+
+            if (!wasm) {
+                return;
+            }
+
+            const sharesMemory = globalThis.__ow.wasmModuleSharesMemory;
+            const Memory = wasm.Memory;
+            const Module = wasm.Module;
+            const compile = wasm.compile;
+            const instantiate = wasm.instantiate;
+
+            const refuse = () => {
+                throw new TypeError('shared WebAssembly memory is not supported by this runtime');
+            };
+
+            const checked = (bytes) => {
+                if (sharesMemory(bytes)) {
+                    refuse();
+                }
+
+                return bytes;
+            };
+
+            function SafeMemory(descriptor) {
+                if (new.target === undefined) {
+                    throw new TypeError("WebAssembly.Memory must be invoked with 'new'");
+                }
+
+                if (descriptor !== null && typeof descriptor === 'object' && descriptor.shared) {
+                    refuse();
+                }
+
+                return Reflect.construct(Memory, [descriptor], new.target);
+            }
+
+            function SafeModule(bytes) {
+                if (new.target === undefined) {
+                    throw new TypeError("WebAssembly.Module must be invoked with 'new'");
+                }
+
+                return Reflect.construct(Module, [checked(bytes)], new.target);
+            }
+
+            for (const [Safe, Original] of [[SafeMemory, Memory], [SafeModule, Module]]) {
+                Safe.prototype = Original.prototype;
+                Object.defineProperty(Original.prototype, 'constructor', { value: Safe });
+                Object.defineProperty(Safe, 'name', { value: Original.name });
+
+                for (const key of Object.getOwnPropertyNames(Original)) {
+                    if (!(key in Safe)) {
+                        Object.defineProperty(Safe, key, Object.getOwnPropertyDescriptor(Original, key));
+                    }
+                }
+            }
+
+            wasm.Memory = SafeMemory;
+            wasm.Module = SafeModule;
+
+            // The async entry points answer a rejection, as the spec has it
+            wasm.compile = function (bytes) {
+                try {
+                    checked(bytes);
+                } catch (error) {
+                    return Promise.reject(error);
+                }
+
+                return compile.call(wasm, bytes);
+            };
+
+            // A compiled Module was checked on the way in
+            wasm.instantiate = function (source, imports) {
+                try {
+                    if (!(source instanceof Module)) {
+                        checked(source);
+                    }
+                } catch (error) {
+                    return Promise.reject(error);
+                }
+
+                return instantiate.call(wasm, source, imports);
+            };
+        })();
     "#;
 
     let code_str = v8::String::new(scope, code).unwrap();
     let script = v8::Script::compile(scope, code_str, None).unwrap();
     script.run(scope).unwrap();
+}
+
+/// `__ow.wasmModuleSharesMemory(bytes)`: whether the module declares a
+/// shared memory. Bytes that are not a module answer false, and the engine
+/// refuses them with its own error.
+fn wasm_module_shares_memory(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    let value = args.get(0);
+    let bytes = if let Ok(view) = v8::Local::<v8::ArrayBufferView>::try_from(value) {
+        let mut bytes = vec![0u8; view.byte_length()];
+        view.copy_contents(&mut bytes);
+        bytes
+    } else if let Ok(buffer) = v8::Local::<v8::ArrayBuffer>::try_from(value) {
+        let view = v8::Uint8Array::new(scope, buffer, 0, buffer.byte_length()).unwrap();
+        let mut bytes = vec![0u8; view.byte_length()];
+        view.copy_contents(&mut bytes);
+        bytes
+    } else {
+        Vec::new()
+    };
+
+    retval.set(v8::Boolean::new(scope, wasm::declares_shared_memory(&bytes)).into());
+}
+
+/// Just enough of the WebAssembly binary format to read the memory section.
+mod wasm {
+    const MAGIC: &[u8] = b"\0asm";
+    const MEMORY_SECTION: u8 = 5;
+    const SHARED_FLAG: u8 = 0x02;
+    const HAS_MAX_FLAG: u8 = 0x01;
+
+    struct Reader<'a> {
+        bytes: &'a [u8],
+        at: usize,
+    }
+
+    impl Reader<'_> {
+        fn byte(&mut self) -> Option<u8> {
+            let byte = *self.bytes.get(self.at)?;
+            self.at += 1;
+            Some(byte)
+        }
+
+        fn leb(&mut self) -> Option<u64> {
+            let mut value = 0u64;
+
+            for shift in (0..70).step_by(7) {
+                let byte = self.byte()?;
+
+                if shift < 64 {
+                    value |= u64::from(byte & 0x7f) << shift;
+                }
+
+                if byte & 0x80 == 0 {
+                    return Some(value);
+                }
+            }
+
+            None
+        }
+
+        fn skip(&mut self, count: u64) -> Option<()> {
+            let end = self.at.checked_add(usize::try_from(count).ok()?)?;
+            (end <= self.bytes.len()).then_some(())?;
+            self.at = end;
+            Some(())
+        }
+
+        fn done(&self) -> bool {
+            self.at >= self.bytes.len()
+        }
+    }
+
+    /// Whether any memory of the module's memory section is shared.
+    pub fn declares_shared_memory(bytes: &[u8]) -> bool {
+        shared_memory(bytes).unwrap_or(false)
+    }
+
+    fn shared_memory(bytes: &[u8]) -> Option<bool> {
+        if bytes.len() < 8 || &bytes[..4] != MAGIC {
+            return None;
+        }
+
+        let mut reader = Reader { bytes, at: 8 };
+
+        while !reader.done() {
+            let id = reader.byte()?;
+            let size = reader.leb()?;
+
+            if id != MEMORY_SECTION {
+                reader.skip(size)?;
+                continue;
+            }
+
+            let count = reader.leb()?;
+
+            for _ in 0..count {
+                let flags = reader.byte()?;
+
+                if flags & SHARED_FLAG != 0 {
+                    return Some(true);
+                }
+
+                reader.leb()?;
+
+                if flags & HAS_MAX_FLAG != 0 {
+                    reader.leb()?;
+                }
+            }
+
+            return Some(false);
+        }
+
+        Some(false)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::declares_shared_memory;
+
+        #[test]
+        fn a_shared_memory_is_seen_and_a_plain_one_is_not() {
+            // (memory 1 1 shared)
+            let shared = [0, b'a', b's', b'm', 1, 0, 0, 0, 5, 4, 1, 3, 1, 1];
+            // (memory 1 1)
+            let plain = [0, b'a', b's', b'm', 1, 0, 0, 0, 5, 4, 1, 1, 1, 1];
+            // a type section in front, then the shared memory
+            let later = [
+                0, b'a', b's', b'm', 1, 0, 0, 0, 1, 4, 1, 0x60, 0, 0, 5, 4, 1, 3, 1, 1,
+            ];
+
+            assert!(declares_shared_memory(&shared));
+            assert!(!declares_shared_memory(&plain));
+            assert!(declares_shared_memory(&later));
+            assert!(!declares_shared_memory(b"not a module"));
+            assert!(!declares_shared_memory(&shared[..10]));
+        }
+    }
 }
