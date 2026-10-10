@@ -206,8 +206,8 @@ impl StreamManager {
         self.senders.lock().unwrap().clear();
         self.receivers.lock().unwrap().clear();
         self.metadata.lock().unwrap().clear();
-        // Reset next_id so stream IDs don't grow unbounded across reuses
-        *self.next_id.lock().unwrap() = 1;
+        // next_id keeps counting: a task still holding the id of a stream of
+        // the previous request must find no stream, not the next request's
     }
 
     /// Count active streams
@@ -435,5 +435,24 @@ mod tests {
             StreamChunk::Error(message) => assert_eq!(message, "boom"),
             other => panic!("expected an error chunk, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_ids_are_not_reused_after_clear() {
+        let manager = StreamManager::new();
+        let first = manager.create_stream("a".to_string());
+
+        manager.clear();
+
+        let second = manager.create_stream("b".to_string());
+        assert_ne!(first, second);
+
+        // A late writer of the first request finds nothing
+        assert!(
+            manager
+                .write_chunk(first, StreamChunk::Data(Bytes::from("late")))
+                .await
+                .is_err()
+        );
     }
 }

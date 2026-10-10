@@ -523,7 +523,13 @@ fn spawn_stream_reader(
         loop {
             let chunk = tokio::select! {
                 biased;
-                _ = cancel.cancelled() => break,
+                // A body cut short must not read as one that ended
+                _ = cancel.cancelled() => {
+                    let _ = manager
+                        .write_chunk(stream_id, stream_manager::StreamChunk::Error(CANCELLED.into()))
+                        .await;
+                    return;
+                }
                 r = rx.recv() => r,
             };
 
