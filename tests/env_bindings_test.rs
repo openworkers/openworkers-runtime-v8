@@ -253,3 +253,12 @@ async fn the_images_binding_says_it_is_not_supported() {
 
     assert_eq!(body, "images binding is not supported by this runtime");
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_worker_binding_response_has_a_status_text() {
+    let (body, _) = run("const response = await env.OTHER.fetch('http://other/api');
+         return response.status + ' ' + response.statusText;")
+    .await;
+
+    assert_eq!(body, "200 OK");
+}

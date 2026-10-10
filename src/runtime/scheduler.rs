@@ -351,7 +351,7 @@ pub async fn run_event_loop(
                                 OperationResult::Http(Ok(response)) => {
                                     let meta = HttpResponseMeta {
                                         status: response.status,
-                                        status_text: String::new(),
+                                        status_text: status_text(response.status),
                                         headers: response.headers.into_iter().collect(),
                                     };
 
