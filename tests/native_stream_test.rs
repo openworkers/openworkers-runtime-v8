@@ -352,3 +352,54 @@ async fn test_native_stream_concurrent_reads() {
     })
     .await;
 }
+
+/// An error with an empty message still errors the stream: the read settles
+/// at once instead of hanging on a chunk that never was.
+#[tokio::test(flavor = "current_thread")]
+async fn test_native_stream_empty_error_message() {
+    run_in_local(|| async {
+        let script = Script::new(
+            r#"
+                globalThis.outcome = 'pending';
+
+                globalThis.testEmptyError = async function(streamId) {
+                    try {
+                        const reader = __createNativeStream(streamId).getReader();
+                        const { done } = await reader.read();
+                        globalThis.outcome = 'resolved done=' + done;
+                    } catch (error) {
+                        globalThis.outcome = 'threw [' + error.message + ']';
+                    }
+                };
+
+                addEventListener('fetch', event => {
+                    event.respondWith(new Response('OK'));
+                });
+            "#,
+        );
+
+        let mut worker = Worker::new(script, None)
+            .await
+            .expect("Worker creation failed");
+
+        let stream_manager = worker.stream_manager();
+        let stream_id = stream_manager.create_stream("test://empty-error".to_string());
+
+        worker
+            .evaluate(&format!("testEmptyError({});", stream_id))
+            .expect("Failed to start test");
+
+        stream_manager
+            .write_chunk(stream_id, StreamChunk::Error(String::new()))
+            .await
+            .expect("Failed to send error");
+
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            worker.process_callbacks();
+        }
+
+        assert_eq!(global_string(&mut worker, "outcome"), "threw []");
+    })
+    .await;
+}

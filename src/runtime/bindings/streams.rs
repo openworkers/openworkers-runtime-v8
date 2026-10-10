@@ -88,7 +88,9 @@ pub fn setup_stream_ops(
                     // A stream cancelled with a read in flight refuses the
                     // chunk that still lands; the read has to settle anyway.
                     try {
-                        if (result.error) {
+                        // The host answers {error} for a failed read, and the
+                        // message can be empty: the key says it failed.
+                        if ('error' in result) {
                             controller.error(new Error(result.error));
                         } else if (result.done) {
                             controller.close();
