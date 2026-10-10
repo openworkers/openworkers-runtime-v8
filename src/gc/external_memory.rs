@@ -85,19 +85,28 @@ impl ExternalMemoryGuard {
     /// Positive delta = more memory allocated.
     /// Negative delta = memory freed.
     pub fn adjust(&mut self, delta: i64) {
-        if delta != 0 {
-            self.amount += delta;
+        if delta == 0 {
+            return;
+        }
 
-            if let Some(lock) = JsLock::try_current() {
-                lock.adjust_external_memory(delta);
+        self.amount += delta;
 
-                // Capture the pending delta if we didn't have one yet
-                if self.pending_delta.is_none() {
-                    self.pending_delta = Some(lock.pending_delta());
-                }
-            } else if let Some(ref pending) = self.pending_delta {
-                pending.fetch_add(delta, Ordering::SeqCst);
+        match (JsLock::try_current(), &self.pending_delta) {
+            // The first isolate this guard meets gets the whole amount: what
+            // it held before was reported nowhere
+            (Some(lock), None) => {
+                lock.adjust_external_memory(self.amount);
+                self.pending_delta = Some(lock.pending_delta());
             }
+            (Some(lock), Some(captured)) if Arc::ptr_eq(&lock.pending_delta(), captured) => {
+                lock.adjust_external_memory(delta);
+            }
+            // Another isolate's lock, or none: the guard's own isolate takes
+            // it when it is locked next
+            (_, Some(captured)) => {
+                captured.fetch_add(delta, Ordering::SeqCst);
+            }
+            (None, None) => {}
         }
     }
 
@@ -116,15 +125,20 @@ impl ExternalMemoryGuard {
 
 impl Drop for ExternalMemoryGuard {
     fn drop(&mut self) {
-        if self.amount != 0 {
-            // Subtract our tracked memory
-            if let Some(lock) = JsLock::try_current() {
+        if self.amount == 0 {
+            return;
+        }
+
+        // Subtract our tracked memory, from the isolate it was reported to
+        match (JsLock::try_current(), &self.pending_delta) {
+            (Some(lock), Some(captured)) if Arc::ptr_eq(&lock.pending_delta(), captured) => {
                 lock.adjust_external_memory(-self.amount);
-            } else if let Some(ref pending) = self.pending_delta {
-                pending.fetch_add(-self.amount, Ordering::SeqCst);
             }
-            // else: no lock and no captured isolate — memory tracking lost.
-            // This only happens for guards created without a JsLock (tests).
+            (_, Some(captured)) => {
+                captured.fetch_add(-self.amount, Ordering::SeqCst);
+            }
+            // No isolate ever saw this amount, so none has it to take back
+            (_, None) => {}
         }
     }
 }

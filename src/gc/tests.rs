@@ -306,4 +306,69 @@ mod v8_tests {
             "Guard should have captured the per-isolate accumulator during adjust()"
         );
     }
+
+    /// A guard reports to the isolate it was created under, whichever
+    /// isolate's lock is current when it changes or drops.
+    #[test]
+    fn test_a_guard_stays_with_its_isolate() {
+        init_v8();
+        let limits = openworkers_core::RuntimeLimits::default();
+        let isolate_a = crate::LockerManagedIsolate::new(limits.clone());
+        let isolate_b = crate::LockerManagedIsolate::new(limits);
+
+        let guard = {
+            let mut locker = isolate_a.isolate.lock();
+            let _gc_lock = JsLock::new(&mut locker, &isolate_a.pending_memory_delta);
+            ExternalMemoryGuard::new(1024)
+        };
+
+        {
+            let mut locker = isolate_b.isolate.lock();
+            let _gc_lock = JsLock::new(&mut locker, &isolate_b.pending_memory_delta);
+            drop(guard);
+        }
+
+        assert_eq!(
+            isolate_a.pending_memory_delta.load(Ordering::SeqCst),
+            -1024,
+            "the release waits for A, the isolate that holds the amount"
+        );
+        assert_eq!(
+            isolate_b.pending_memory_delta.load(Ordering::SeqCst),
+            0,
+            "B never held the amount"
+        );
+    }
+
+    /// A guard that meets its first isolate after it has grown reports the
+    /// whole amount, so that the release at drop takes back what was given.
+    #[test]
+    fn test_a_late_guard_reports_what_it_holds() {
+        init_v8();
+        let limits = openworkers_core::RuntimeLimits::default();
+        let isolate = crate::LockerManagedIsolate::new(limits);
+
+        let mut guard = ExternalMemoryGuard::new(1000);
+        guard.adjust(24);
+
+        let mut locker = isolate.isolate.lock();
+        let _gc_lock = JsLock::new(&mut locker, &isolate.pending_memory_delta);
+        let external =
+            |locker: &mut v8::Locker| locker.adjust_amount_of_external_allocated_memory(0);
+        let before = external(&mut locker);
+        guard.adjust(1);
+        let held = external(&mut locker);
+        drop(guard);
+        let after = external(&mut locker);
+
+        assert_eq!(
+            held - before,
+            1025,
+            "the first report carries the whole amount"
+        );
+        assert_eq!(
+            after, before,
+            "the drop takes back exactly what was reported"
+        );
+    }
 }
