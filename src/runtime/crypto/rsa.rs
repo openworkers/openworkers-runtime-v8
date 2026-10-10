@@ -316,9 +316,10 @@ pub(super) fn setup_rsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
 
     let verify_key = v8::String::new(scope, "__nativeRsaVerify").unwrap();
     subtle_obj.set(scope, verify_key.into(), verify_fn.into());
+}
 
-    // JS wrappers for RSA - extends the existing functions
-    let code = r#"
+/// The RSASSA-PKCS1-v1_5 wrappers, extending the ECDSA ones. Installed by mod.rs.
+pub(super) const JS: &str = r#"
         // Store original functions
         const __ecdsaImportKey = crypto.subtle.importKey;
         const __ecdsaSign = crypto.subtle.sign;
@@ -395,7 +396,7 @@ pub(super) fn setup_rsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
                         }
 
                         const hashName = key.algorithm.hash.name;
-                        const result = crypto.subtle.__nativeRsaSign(hashName, key.__keyData, dataBytes);
+                        const result = crypto.subtle.__nativeRsaSign(hashName, __keyData(key), dataBytes);
 
                         if (result) {
                             resolve(result);
@@ -446,7 +447,7 @@ pub(super) fn setup_rsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
                         }
 
                         const hashName = key.algorithm.hash.name;
-                        const isValid = crypto.subtle.__nativeRsaVerify(hashName, key.__keyData, sigBytes, dataBytes);
+                        const isValid = crypto.subtle.__nativeRsaVerify(hashName, __keyData(key), sigBytes, dataBytes);
                         resolve(isValid);
                     } else {
                         // Fall back to ECDSA/HMAC handler
@@ -459,9 +460,4 @@ pub(super) fn setup_rsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
                 }
             });
         };
-    "#;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
-}
+"#;

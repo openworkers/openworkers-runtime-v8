@@ -54,9 +54,10 @@ pub(super) fn setup_digest(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::O
 
     let native_key = v8::String::new(scope, "__nativeDigest").unwrap();
     subtle_obj.set(scope, native_key.into(), digest_fn.into());
+}
 
-    // JS wrapper for digest that returns Promise
-    let code = r#"
+/// The digest wrapper, installed by mod.rs with the other subtle wrappers.
+pub(super) const JS: &str = r#"
         crypto.subtle.digest = function(algorithm, data) {
             return new Promise((resolve, reject) => {
                 try {
@@ -81,9 +82,4 @@ pub(super) fn setup_digest(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::O
                 }
             });
         };
-    "#;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
-}
+"#;

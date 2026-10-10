@@ -37,27 +37,47 @@ pub fn setup_crypto(scope: &mut v8::PinScope) {
     let subtle_key = v8::String::new(scope, "subtle").unwrap();
     crypto_obj.set(scope, subtle_key.into(), subtle_obj.into());
 
-    // Define the crypto classes (must be before importKey implementations)
-    setup_crypto_classes(scope);
-
     // crypto.getRandomValues + crypto.randomUUID
     random::setup_get_random_values(scope, crypto_obj);
     random::setup_random_uuid(scope, crypto_obj);
 
-    // crypto.subtle.digest
+    // The native ops, on crypto.subtle
     digest::setup_digest(scope, subtle_obj);
-
-    // crypto.subtle.sign/verify/importKey, chained: HMAC -> ECDSA -> RSA -> PBKDF2 -> AES
     hmac::setup_hmac(scope, subtle_obj);
     ecdsa::setup_ecdsa(scope, subtle_obj);
     rsa::setup_rsa(scope, subtle_obj);
     pbkdf2::setup_pbkdf2(scope, subtle_obj);
     aes::setup_aes(scope, subtle_obj);
+
+    setup_subtle(scope);
 }
 
-/// Define the globalThis crypto classes and a helper to create keys from importKey.
-fn setup_crypto_classes(scope: &mut v8::PinScope) {
-    let code = r#"
+/// Installs the crypto classes and every subtle wrapper from one closure.
+/// The key material lives in a WeakMap only that closure reaches, so a guest
+/// can neither read the bytes of a key nor make a CryptoKey of its own.
+///
+/// The wrappers chain: HMAC installs importKey, sign and verify, and ECDSA,
+/// RSA, PBKDF2 and AES each wrap what the one before installed.
+fn setup_subtle(scope: &mut v8::PinScope) {
+    let wrappers = [
+        KEYS_JS,
+        digest::JS,
+        hmac::JS,
+        ecdsa::JS,
+        rsa::JS,
+        pbkdf2::JS,
+        aes::JS,
+    ]
+    .join("\n");
+    let code = format!("(function () {{\n{wrappers}\n}})();");
+
+    let code_str = v8::String::new(scope, &code).unwrap();
+    let script = v8::Script::compile(scope, code_str, None).unwrap();
+    script.run(scope).unwrap();
+}
+
+/// The classes, the private key store and the helpers the wrappers share.
+const KEYS_JS: &str = r#"
         globalThis.Crypto = class Crypto {
             constructor() {
                 throw new TypeError('Illegal constructor');
@@ -75,23 +95,57 @@ fn setup_crypto_classes(scope: &mut v8::PinScope) {
         Object.setPrototypeOf(crypto, Crypto.prototype);
         Object.setPrototypeOf(crypto.subtle, SubtleCrypto.prototype);
 
-        globalThis.CryptoKey = class CryptoKey {
-            constructor(type, extractable, algorithm, usages, keyData) {
-                this.type = type;
-                this.extractable = extractable;
-                this.algorithm = algorithm;
-                this.usages = Object.freeze([...usages]);
-                this.__keyData = keyData;
+        // What a CryptoKey is, out of the guest's reach: its attributes and its bytes
+        const __material = new WeakMap();
+        const __token = Symbol('CryptoKey');
+
+        const __record = (key) => {
+            const record = __material.get(key);
+            if (!record) {
+                throw new TypeError('Not a CryptoKey');
             }
+            return record;
         };
 
-        // Helper used by all importKey implementations
-        globalThis.__createCryptoKey = function(type, extractable, algorithm, usages, keyData) {
-            return new CryptoKey(type, extractable, algorithm, usages, keyData);
+        const __freeze = (value) => {
+            if (value !== null && typeof value === 'object') {
+                for (const inner of Object.values(value)) {
+                    __freeze(inner);
+                }
+                Object.freeze(value);
+            }
+            return value;
         };
-    "#;
 
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
-}
+        // The attributes are getters on the prototype, as the spec has them: a key
+        // has no own properties, so it cannot be enumerated or serialized into
+        // its bytes, and nothing can be written over them.
+        globalThis.CryptoKey = class CryptoKey {
+            constructor(token, record) {
+                if (token !== __token) {
+                    throw new TypeError('Illegal constructor');
+                }
+                __material.set(this, record);
+            }
+            get type() { return __record(this).type; }
+            get extractable() { return __record(this).extractable; }
+            get algorithm() { return __record(this).algorithm; }
+            get usages() { return __record(this).usages; }
+        };
+
+        // Shared by every importKey and generateKey: data is the key's bytes,
+        // publicData those of the public half a private key carries
+        const __createCryptoKey = (type, extractable, algorithm, usages, data, publicData) =>
+            new CryptoKey(__token, {
+                type,
+                extractable: Boolean(extractable),
+                algorithm: __freeze(algorithm),
+                usages: Object.freeze([...usages]),
+                data,
+                publicData,
+            });
+
+        const __isCryptoKey = (key) => __material.has(key);
+        const __keyData = (key) => __record(key).data;
+        const __publicKeyData = (key) => __record(key).publicData;
+"#;

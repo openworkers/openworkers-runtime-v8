@@ -99,9 +99,11 @@ pub(super) fn setup_aes(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
 
     let open_key = v8::String::new(scope, "__nativeAesGcmOpen").unwrap();
     subtle_obj.set(scope, open_key.into(), open_fn.into());
+}
 
-    // JS wrappers: AES-GCM generateKey/importKey, plus exportKey and encrypt/decrypt
-    let code = r#"
+/// The AES-GCM wrappers, with exportKey and encrypt/decrypt, extending the
+/// PBKDF2 ones. Installed by mod.rs.
+pub(super) const JS: &str = r#"
         const __aesBytes = (value) => {
             if (value instanceof ArrayBuffer) {
                 return new Uint8Array(value);
@@ -128,7 +130,7 @@ pub(super) fn setup_aes(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
                 ? new Uint8Array(0)
                 : __aesBytes(algorithm.additionalData);
 
-            return [key.__keyData, __aesBytes(algorithm.iv), __aesBytes(data), aad];
+            return [__keyData(key), __aesBytes(algorithm.iv), __aesBytes(data), aad];
         };
 
         const __generateKeyFallback = crypto.subtle.generateKey;
@@ -202,7 +204,7 @@ pub(super) fn setup_aes(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
                         throw new Error('Key is not extractable');
                     }
 
-                    const bytes = __aesBytes(key.__keyData);
+                    const bytes = __aesBytes(__keyData(key));
 
                     resolve(bytes.slice().buffer);
                 } catch (e) {
@@ -230,9 +232,4 @@ pub(super) fn setup_aes(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
                 }
             });
         };
-    "#;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
-}
+"#;

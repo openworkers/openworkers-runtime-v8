@@ -685,3 +685,53 @@ async fn test_pbkdf2_derive_bits_bounds_iterations() {
 
     assert_eq!(run_fetch(body).await, "OK");
 }
+
+/// A key's bytes are not on the key object, so a non-extractable key cannot be
+/// read out, serialized or forged: no own property holds them, the attributes
+/// cannot be written over, and the helper that made keys is no longer global
+#[tokio::test(flavor = "current_thread")]
+async fn test_crypto_key_hides_its_material() {
+    let body = r#"
+        const secret = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        const key = await crypto.subtle.importKey(
+            'raw', secret, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+        );
+        const pair = await crypto.subtle.generateKey(
+            { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']
+        );
+
+        const failures = [];
+        const expect = (name, ok) => { if (!ok) failures.push(name); };
+
+        expect('__keyData', key.__keyData === undefined);
+        expect('__publicKeyData', pair.privateKey.__publicKeyData === undefined);
+        expect('own keys', !Object.keys(key).includes('__keyData'));
+        expect('json', !JSON.stringify(key).includes('1,2,3'));
+        expect('json private', JSON.stringify(pair.privateKey) === '{}');
+        expect('__createCryptoKey', globalThis.__createCryptoKey === undefined);
+        expect('instanceof', key instanceof CryptoKey);
+        expect('type', key.type === 'secret');
+        expect('extractable', key.extractable === false);
+        expect('usages', key.usages.length === 1 && key.usages[0] === 'sign');
+        expect('algorithm', key.algorithm.name === 'HMAC' && key.algorithm.hash.name === 'SHA-256');
+
+        // The attributes are read-only: a guest cannot make a key extractable
+        key.extractable = true;
+        key.algorithm.name = 'AES-GCM';
+        expect('extractable stays', key.extractable === false);
+        expect('algorithm stays', key.algorithm.name === 'HMAC');
+
+        let constructed = 'no';
+        try { new CryptoKey('secret', true, { name: 'HMAC' }, ['sign'], secret); constructed = 'yes'; }
+        catch (e) { constructed = e instanceof TypeError ? 'no' : 'other: ' + e; }
+        expect('constructor ' + constructed, constructed === 'no');
+
+        // And the key still signs
+        const signature = await crypto.subtle.sign('HMAC', key, new Uint8Array([42]));
+        expect('signs', signature.byteLength === 32);
+
+        return failures.length === 0 ? 'OK' : 'FAIL: ' + failures.join(', ');
+    "#;
+
+    assert_eq!(run_fetch(body).await, "OK");
+}

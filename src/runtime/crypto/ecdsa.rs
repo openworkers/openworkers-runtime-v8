@@ -186,9 +186,10 @@ pub(super) fn setup_ecdsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Ob
 
     let verify_key = v8::String::new(scope, "__nativeEcdsaVerify").unwrap();
     subtle_obj.set(scope, verify_key.into(), verify_fn.into());
+}
 
-    // JS wrappers for ECDSA - extends the existing functions
-    let code = r#"
+/// The ECDSA wrappers, extending the HMAC ones. Installed by mod.rs.
+pub(super) const JS: &str = r#"
         // Extend generateKey to support ECDSA
         crypto.subtle.generateKey = function(algorithm, extractable, keyUsages) {
             return new Promise((resolve, reject) => {
@@ -208,13 +209,14 @@ pub(super) fn setup_ecdsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Ob
                             return;
                         }
 
+                        // A private key carries its public half, so it can verify too
                         const privKey = __createCryptoKey(
                             'private', extractable,
                             { name: 'ECDSA', namedCurve: 'P-256' },
                             keyUsages.filter(u => u === 'sign'),
-                            new Uint8Array(result.privateKey)
+                            new Uint8Array(result.privateKey),
+                            new Uint8Array(result.publicKey)
                         );
-                        privKey.__publicKeyData = new Uint8Array(result.publicKey);
 
                         const pubKey = __createCryptoKey(
                             'public', true,
@@ -315,7 +317,7 @@ pub(super) fn setup_ecdsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Ob
                             return;
                         }
 
-                        const result = crypto.subtle.__nativeEcdsaSign(key.__keyData, dataBytes);
+                        const result = crypto.subtle.__nativeEcdsaSign(__keyData(key), dataBytes);
                         if (result) {
                             resolve(result);
                         } else {
@@ -368,7 +370,7 @@ pub(super) fn setup_ecdsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Ob
                         }
 
                         // For private keys, use the public key data
-                        const publicKeyData = key.type === 'private' ? key.__publicKeyData : key.__keyData;
+                        const publicKeyData = key.type === 'private' ? __publicKeyData(key) : __keyData(key);
                         const isValid = crypto.subtle.__nativeEcdsaVerify(publicKeyData, sigBytes, dataBytes);
                         resolve(isValid);
                     } else {
@@ -382,9 +384,4 @@ pub(super) fn setup_ecdsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Ob
                 }
             });
         };
-    "#;
-
-    let code_str = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, code_str, None).unwrap();
-    script.run(scope).unwrap();
-}
+"#;
