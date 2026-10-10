@@ -104,6 +104,9 @@ mod linux {
     pub struct Timer {
         id: libc::timer_t,
         key: usize,
+        /// Set after the timer is set, cleared before it is disarmed, so an
+        /// armed timer that reads as expired has fired.
+        armed: Arc<AtomicBool>,
     }
 
     impl Timer {
@@ -128,25 +131,31 @@ mod linux {
                 return None;
             }
 
+            let armed = Arc::new(AtomicBool::new(false));
+
             register(
                 key,
                 Target {
                     turn,
                     request,
                     terminated,
+                    timer: id as usize,
+                    armed: Arc::clone(&armed),
                 },
             );
 
-            Some(Self { id, key })
+            Some(Self { id, key, armed })
         }
 
         /// Fires after `after` of this thread's CPU time. A zero would disarm
         /// the timer, so a spent budget fires at once instead.
         pub fn arm(&self, after: Duration) {
             self.set(after.max(Duration::from_micros(1)));
+            self.armed.store(true, Ordering::SeqCst);
         }
 
         pub fn disarm(&self) {
+            self.armed.store(false, Ordering::SeqCst);
             self.set(Duration::ZERO);
         }
 
@@ -168,8 +177,11 @@ mod linux {
 
     impl Drop for Timer {
         fn drop(&mut self) {
+            // Under the lock, so the signal thread never reads a deleted
+            // timer, whose id the next timer could reuse
+            let mut targets = TARGETS.lock().unwrap();
+            targets.remove(&self.key);
             unsafe { libc::timer_delete(self.id) };
-            unregister(self.key);
         }
     }
 
@@ -179,6 +191,30 @@ mod linux {
         turn: Arc<Turn>,
         request: u64,
         terminated: Arc<AtomicBool>,
+        /// The timer, as `libc::timer_t` is a pointer and the map is shared
+        timer: usize,
+        armed: Arc<AtomicBool>,
+    }
+
+    impl Target {
+        /// Whether the timer has fired: armed, and nothing left on it.
+        fn expired(&self) -> bool {
+            if !self.armed.load(Ordering::SeqCst) {
+                return false;
+            }
+
+            let mut spec: libc::itimerspec = unsafe { std::mem::zeroed() };
+            let read = unsafe { libc::timer_gettime(self.timer as libc::timer_t, &mut spec) };
+
+            read == 0 && spec.it_value.tv_sec == 0 && spec.it_value.tv_nsec == 0
+        }
+
+        fn stop(&self) {
+            if !self.terminated.swap(true, Ordering::SeqCst) {
+                tracing::warn!("CPU time limit exceeded for request #{}", self.request);
+                self.turn.terminate(self.request);
+            }
+        }
     }
 
     /// The handler is installed before the first target registers, so a
@@ -194,8 +230,18 @@ mod linux {
         TARGETS.lock().unwrap().insert(key, target);
     }
 
-    fn unregister(key: usize) {
-        TARGETS.lock().unwrap().remove(&key);
+    /// The target the signal names, if it still exists, and every other
+    /// whose timer has fired. SIGALRM is a standard signal: one that arrives
+    /// while the handler runs for another is merged with it, and its value
+    /// is lost. The timers themselves still say which ones fired.
+    fn fired(key: usize) -> Vec<Target> {
+        let targets = TARGETS.lock().unwrap();
+
+        targets
+            .iter()
+            .filter(|(at, target)| **at == key || target.expired())
+            .map(|(_, target)| target.clone())
+            .collect()
     }
 
     /// Installs the SIGALRM handler, here and now, and starts the thread
@@ -227,17 +273,51 @@ mod linux {
     ) {
         for siginfo in signals.forever() {
             let key = unsafe { siginfo.si_value().sival_ptr as usize };
-            let target = TARGETS.lock().unwrap().get(&key).cloned();
 
             // A timer dropped after it fired leaves no target
-            let Some(target) = target else {
-                continue;
-            };
-
-            if !target.terminated.swap(true, Ordering::SeqCst) {
-                tracing::warn!("CPU time limit exceeded for request #{}", target.request);
-                target.turn.terminate(target.request);
+            for target in fired(key) {
+                target.stop();
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::time::Instant;
+
+        /// A timer that fired is found by the sweep whether or not its own
+        /// signal was the one delivered.
+        #[test]
+        fn a_fired_timer_is_found_without_its_signal() {
+            crate::platform::get_platform();
+            let isolate = crate::v8_helpers::new_isolate(Default::default());
+            let turn = Arc::new(Turn::new(
+                isolate.thread_safe_handle(),
+                Arc::new(AtomicBool::new(false)),
+            ));
+            let terminated = Arc::new(AtomicBool::new(false));
+            let timer = Timer::new(turn, 7, terminated).expect("a CPU timer");
+
+            // Not armed: never reported, whatever the timer reads
+            assert!(fired(usize::MAX).iter().all(|t| t.request != 7));
+
+            timer.arm(Duration::from_micros(1));
+            let start = Instant::now();
+            let mut x = 0u64;
+
+            while start.elapsed() < Duration::from_millis(20) {
+                x = x.wrapping_mul(31).wrapping_add(1);
+            }
+
+            assert!(x != 0);
+            assert!(
+                fired(usize::MAX).iter().any(|t| t.request == 7),
+                "the sweep did not find the fired timer"
+            );
+
+            timer.disarm();
+            assert!(fired(usize::MAX).iter().all(|t| t.request != 7));
         }
     }
 }
