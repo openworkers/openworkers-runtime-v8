@@ -7,10 +7,11 @@
 //! ## How it works
 //!
 //! When V8's heap approaches the configured limit, it calls our callback.
-//! The callback calls `terminate_execution()` and returns a slightly increased
-//! limit (+2 MB headroom). The headroom is critical: V8 only checks the
-//! termination flag when returning to JS execution, not during GC. Without it,
-//! V8 sees "no room given" and calls `FatalProcessOutOfMemory` (process crash).
+//! The callback calls `terminate_execution()` and returns an increased limit
+//! (a quarter of the configured heap, at least 2 MB). The headroom is
+//! critical: V8 only checks the termination flag when returning to JS
+//! execution, not during GC. Without enough of it, V8 sees "no room given"
+//! and calls `FatalProcessOutOfMemory` (process crash).
 //!
 //! This prevents a single misbehaving worker from crashing the entire runner.
 //!
@@ -56,14 +57,22 @@ impl HeapLimitState {
     }
 }
 
-/// Headroom given to V8 after calling `terminate_execution()`.
+/// The least headroom given to V8 after calling `terminate_execution()`.
 ///
 /// V8 only checks the termination flag when returning to JS execution.
 /// If we return the same `current_heap_limit`, V8 considers the allocation
 /// failed and goes straight to `FatalProcessOutOfMemory` (process crash).
-/// By returning a slightly higher limit, V8 can complete the pending
-/// allocation, return to JS, and see the termination flag.
-const TERMINATION_HEADROOM: usize = 2 * 1024 * 1024; // 2 MB
+/// By returning a higher limit, V8 can complete the pending allocation,
+/// return to JS, and see the termination flag.
+///
+/// A fixed 2 MB is not enough on its own: a loop allocating small arrays
+/// fills it in the young generation before any stack check runs, V8 asks
+/// again from inside a last-resort GC, and gives up. The headroom is
+/// therefore a share of the heap, with this as the floor.
+const MIN_TERMINATION_HEADROOM: usize = 2 * 1024 * 1024; // 2 MB
+
+/// The headroom as a share of the configured heap: a quarter.
+const HEADROOM_SHARE: usize = 4;
 
 /// Near-heap-limit callback for V8.
 ///
@@ -108,7 +117,9 @@ pub unsafe extern "C" fn near_heap_limit_callback(
     // to JS. If we return <= current_heap_limit, V8 sees "no room given" and
     // calls FatalProcessOutOfMemory, crashing the entire process.
     // The headroom lets V8 complete the pending allocation and unwind to JS.
-    current_heap_limit + TERMINATION_HEADROOM
+    let headroom = (state.max_heap_bytes / HEADROOM_SHARE).max(MIN_TERMINATION_HEADROOM);
+
+    current_heap_limit + headroom
 }
 
 /// OOM error handler for V8 isolates.

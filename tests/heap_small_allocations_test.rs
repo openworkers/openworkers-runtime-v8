@@ -1,9 +1,8 @@
-//! Reproduction of an open bug found in an audit: a plain allocation loop of
-//! ~32 KB arrays exhausts the fixed 2 MB headroom the near-heap-limit
-//! callback grants before V8 unwinds to JS, and V8 aborts the whole process
-//! with FatalProcessOutOfMemory instead of the request ending with
-//! `MemoryLimit`. Ignored by default and kept in its own binary because a
-//! failure kills the test process; run with `--ignored` to see it.
+//! A plain allocation loop of ~32 KB arrays used to exhaust the fixed 2 MB
+//! headroom the near-heap-limit callback granted before V8 unwound to JS,
+//! and V8 aborted the whole process with FatalProcessOutOfMemory instead
+//! of the request ending with `MemoryLimit`. Kept in its own binary because
+//! a regression kills the test process.
 
 mod common;
 
@@ -16,7 +15,6 @@ use openworkers_core::{
 use openworkers_runtime_v8::Worker;
 
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "open bug, see the doc comment"]
 async fn small_allocations_end_with_memory_limit_not_a_process_abort() {
     run_in_local(|| async {
         let code = r#"
