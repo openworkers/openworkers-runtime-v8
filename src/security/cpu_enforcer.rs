@@ -27,8 +27,11 @@ pub struct CpuEnforcer {
     remaining: Cell<Duration>,
     turn_started: Cell<Option<Duration>>,
     terminated: Arc<AtomicBool>,
+    /// None when the timer could not be created: the budget is then taken at
+    /// the end of each turn, and a turn that never yields is left to the wall
+    /// clock.
     #[cfg(target_os = "linux")]
-    timer: linux::Timer,
+    timer: Option<linux::Timer>,
 }
 
 impl CpuEnforcer {
@@ -44,7 +47,7 @@ impl CpuEnforcer {
         let terminated = Arc::new(AtomicBool::new(false));
 
         #[cfg(target_os = "linux")]
-        let timer = linux::Timer::new(turn, request, Arc::clone(&terminated))?;
+        let timer = linux::Timer::new(turn, request, Arc::clone(&terminated));
 
         #[cfg(not(target_os = "linux"))]
         let _ = (turn, request);
@@ -63,13 +66,17 @@ impl CpuEnforcer {
         self.turn_started.set(get_thread_cpu_time());
 
         #[cfg(target_os = "linux")]
-        self.timer.arm(self.remaining.get());
+        if let Some(timer) = &self.timer {
+            timer.arm(self.remaining.get());
+        }
     }
 
     /// Takes the CPU time of the turn from the budget.
     pub fn end_turn(&self) {
         #[cfg(target_os = "linux")]
-        self.timer.disarm();
+        if let Some(timer) = &self.timer {
+            timer.disarm();
+        }
 
         let (Some(started), Some(now)) = (self.turn_started.take(), get_thread_cpu_time()) else {
             return;
@@ -108,6 +115,9 @@ mod linux {
 
     impl Timer {
         pub fn new(turn: Arc<Turn>, request: u64, terminated: Arc<AtomicBool>) -> Option<Self> {
+            // Registered before the first timer exists
+            std::sync::LazyLock::force(&TARGETS);
+
             static NEXT_KEY: AtomicUsize = AtomicUsize::new(1);
             let key = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
 
@@ -199,16 +209,25 @@ mod linux {
         static SPAWNED: Once = Once::new();
 
         SPAWNED.call_once(|| {
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+
             std::thread::Builder::new()
                 .name("cpu-enforcer".into())
-                .spawn(signal_thread)
+                .spawn(move || signal_thread(ready_tx))
                 .expect("Failed to spawn CPU enforcer signal thread");
+
+            // A SIGALRM that lands before its handler exists kills the process
+            // (the default action), so no timer is created before the thread
+            // has registered.
+            ready_rx
+                .recv()
+                .expect("The CPU enforcer signal thread died before it registered");
         });
     }
 
     /// Receives SIGALRM off the signal handler, which only records it, and
     /// terminates the request whose timer sent it.
-    fn signal_thread() {
+    fn signal_thread(ready: std::sync::mpsc::Sender<()>) {
         use futures::StreamExt;
         use signal_hook::consts::signal;
         use signal_hook::iterator::exfiltrator::raw::WithRawSiginfo;
@@ -222,6 +241,8 @@ mod linux {
         rt.block_on(async {
             let mut signals = SignalsInfo::with_exfiltrator([signal::SIGALRM], WithRawSiginfo)
                 .expect("Failed to register SIGALRM handler");
+
+            let _ = ready.send(());
 
             while let Some(siginfo) = signals.next().await {
                 let key = unsafe { siginfo.si_value().sival_ptr as usize };
