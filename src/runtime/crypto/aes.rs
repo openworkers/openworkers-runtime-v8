@@ -182,7 +182,7 @@ pub(super) const JS: &str = r#"
                         throw new Error('Only "raw" format is supported for AES-GCM');
                     }
 
-                    const bytes = __aesBytes(keyData);
+                    const bytes = __copyBufferSource(keyData);
 
                     if (bytes.byteLength !== 16 && bytes.byteLength !== 32) {
                         throw new Error('AES-GCM supports 128 and 256 bit keys');

@@ -153,17 +153,9 @@ pub(super) const JS: &str = r#"
 
                         __checkUsages(keyUsages, ['deriveKey', 'deriveBits']);
 
-                        let keyBytes;
-                        if (keyData instanceof ArrayBuffer) {
-                            keyBytes = new Uint8Array(keyData);
-                        } else if (keyData instanceof Uint8Array) {
-                            keyBytes = keyData;
-                        } else if (typeof keyData === 'string') {
-                            keyBytes = new TextEncoder().encode(keyData);
-                        } else {
-                            reject(new Error('Key data must be ArrayBuffer, Uint8Array, or string'));
-                            return;
-                        }
+                        const keyBytes = typeof keyData === 'string'
+                            ? new TextEncoder().encode(keyData)
+                            : __copyBufferSource(keyData);
 
                         resolve(__createCryptoKey(
                             'secret', extractable,

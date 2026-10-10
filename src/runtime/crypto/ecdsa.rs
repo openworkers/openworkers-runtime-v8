@@ -249,15 +249,7 @@ pub(super) const JS: &str = r#"
                     const algoName = typeof algorithm === 'string' ? algorithm : algorithm.name;
 
                     if (algoName === 'ECDSA') {
-                        let keyBytes;
-                        if (keyData instanceof ArrayBuffer) {
-                            keyBytes = new Uint8Array(keyData);
-                        } else if (keyData instanceof Uint8Array) {
-                            keyBytes = keyData;
-                        } else {
-                            reject(new Error('Key data must be ArrayBuffer or Uint8Array'));
-                            return;
-                        }
+                        const keyBytes = __copyBufferSource(keyData);
 
                         const namedCurve = algorithm.namedCurve || 'P-256';
                         if (namedCurve !== 'P-256') {

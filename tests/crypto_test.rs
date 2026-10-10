@@ -814,3 +814,47 @@ async fn test_key_usages_and_algorithm_are_enforced() {
 
     assert_eq!(run_fetch(&body).await, "OK");
 }
+
+/// A key keeps the bytes it was imported with: writing to the caller's buffer
+/// afterwards must not change what the key signs or exports as
+#[tokio::test(flavor = "current_thread")]
+async fn test_import_key_copies_the_key_material() {
+    let body = r#"
+        const data = new Uint8Array([1, 2, 3]);
+        const hex = (buffer) => Array.from(new Uint8Array(buffer), (b) => b.toString(16).padStart(2, '0')).join('');
+
+        const source = new Uint8Array(32).fill(7);
+        const original = source.slice();
+
+        const hmac = await crypto.subtle.importKey('raw', source, { name: 'HMAC', hash: 'SHA-256' }, true, ['sign']);
+        const aes = await crypto.subtle.importKey('raw', source, { name: 'AES-GCM' }, true, ['encrypt']);
+        const pbkdf2 = await crypto.subtle.importKey('raw', source, { name: 'PBKDF2' }, false, ['deriveBits']);
+
+        // A key imported from a view keeps the bytes the view pointed at
+        const framed = new Uint8Array(40);
+        framed.set(original, 4);
+        const fromView = await crypto.subtle.importKey(
+            'raw', framed.subarray(4, 36), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+        );
+
+        source.fill(0);
+        framed.fill(0);
+
+        const fresh = await crypto.subtle.importKey('raw', original, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+        const expected = hex(await crypto.subtle.sign('HMAC', fresh, data));
+        const freshPbkdf2 = await crypto.subtle.importKey('raw', original, { name: 'PBKDF2' }, false, ['deriveBits']);
+        const params = { name: 'PBKDF2', salt: data, iterations: 2, hash: 'SHA-256' };
+
+        const failures = [];
+        if (hex(await crypto.subtle.sign('HMAC', hmac, data)) !== expected) failures.push('HMAC signs with the new bytes');
+        if (hex(await crypto.subtle.sign('HMAC', fromView, data)) !== expected) failures.push('view import lost its bytes');
+        if (hex(await crypto.subtle.exportKey('raw', aes)) !== hex(original)) failures.push('AES exports the new bytes');
+        if (hex(await crypto.subtle.deriveBits(params, pbkdf2, 128)) !== hex(await crypto.subtle.deriveBits(params, freshPbkdf2, 128))) {
+            failures.push('PBKDF2 derives from the new bytes');
+        }
+
+        return failures.length === 0 ? 'OK' : 'FAIL: ' + failures.join('; ');
+    "#;
+
+    assert_eq!(run_fetch(body).await, "OK");
+}

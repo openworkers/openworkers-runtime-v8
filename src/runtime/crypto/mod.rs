@@ -149,6 +149,22 @@ const KEYS_JS: &str = r#"
         const __keyData = (key) => __record(key).data;
         const __publicKeyData = (key) => __record(key).publicData;
 
+        // A BufferSource as the bytes it holds: the ArrayBuffer, or the part of
+        // one a view points at
+        const __bufferSource = (value) => {
+            if (value instanceof ArrayBuffer) {
+                return new Uint8Array(value);
+            }
+            if (ArrayBuffer.isView(value)) {
+                return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+            }
+            throw new TypeError('Expected an ArrayBuffer or a view');
+        };
+
+        // Key material is copied out of the caller's buffer: a key keeps the
+        // bytes it was imported with, whatever the caller writes there next
+        const __copyBufferSource = (value) => __bufferSource(value).slice();
+
         const __domException = (name, message) => typeof DOMException === 'function'
             ? new DOMException(message, name)
             : Object.assign(new Error(message), { name });

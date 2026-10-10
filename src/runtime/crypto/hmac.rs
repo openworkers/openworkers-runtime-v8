@@ -167,15 +167,7 @@ pub(super) const JS: &str = r#"
 
                     __checkUsages(keyUsages, ['sign', 'verify']);
 
-                    let keyBytes;
-                    if (keyData instanceof ArrayBuffer) {
-                        keyBytes = new Uint8Array(keyData);
-                    } else if (keyData instanceof Uint8Array) {
-                        keyBytes = keyData;
-                    } else {
-                        reject(new Error('Key data must be ArrayBuffer or Uint8Array'));
-                        return;
-                    }
+                    const keyBytes = __copyBufferSource(keyData);
 
                     const keyId = __nextKeyId++;
                     const key = __createCryptoKey(

@@ -332,15 +332,7 @@ pub(super) const JS: &str = r#"
                     const algoName = typeof algorithm === 'string' ? algorithm : algorithm.name;
 
                     if (algoName === 'RSASSA-PKCS1-v1_5') {
-                        let keyBytes;
-                        if (keyData instanceof ArrayBuffer) {
-                            keyBytes = new Uint8Array(keyData);
-                        } else if (keyData instanceof Uint8Array) {
-                            keyBytes = keyData;
-                        } else {
-                            reject(new Error('Key data must be ArrayBuffer or Uint8Array'));
-                            return;
-                        }
+                        const keyBytes = __copyBufferSource(keyData);
 
                         const hashName = typeof algorithm === 'object' && algorithm.hash
                             ? (typeof algorithm.hash === 'string' ? algorithm.hash : algorithm.hash.name)
