@@ -148,4 +148,32 @@ const KEYS_JS: &str = r#"
         const __isCryptoKey = (key) => __material.has(key);
         const __keyData = (key) => __record(key).data;
         const __publicKeyData = (key) => __record(key).publicData;
+
+        const __domException = (name, message) => typeof DOMException === 'function'
+            ? new DOMException(message, name)
+            : Object.assign(new Error(message), { name });
+
+        // What every op checks of its key before it touches the bytes: a CryptoKey
+        // of the algorithm the op is for, imported for this use
+        const __checkKey = (key, algoName, usage) => {
+            if (!__isCryptoKey(key)) {
+                throw new TypeError('The key is not a CryptoKey');
+            }
+            if (key.algorithm.name !== algoName) {
+                throw __domException('InvalidAccessError',
+                    'The key is for ' + key.algorithm.name + ', not ' + algoName);
+            }
+            if (!key.usages.includes(usage)) {
+                throw __domException('InvalidAccessError', 'The key does not allow ' + usage);
+            }
+        };
+
+        // What importKey and generateKey check of the usages they are given
+        const __checkUsages = (usages, allowed) => {
+            for (const usage of usages) {
+                if (!allowed.includes(usage)) {
+                    throw __domException('SyntaxError', 'The usage ' + usage + ' is not one of ' + allowed.join(', '));
+                }
+            }
+        };
 "#;

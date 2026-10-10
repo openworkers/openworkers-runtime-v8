@@ -116,11 +116,15 @@ pub(super) const JS: &str = r#"
             throw new TypeError('Expected an ArrayBuffer or a view');
         };
 
+        const __aesUsages = ['encrypt', 'decrypt', 'wrapKey', 'unwrapKey'];
+
         // The nonce and the extra authenticated data ride on the algorithm object.
-        const __aesGcmArgs = (algorithm, key, data) => {
-            if (algorithm.name !== 'AES-GCM' || key.algorithm.name !== 'AES-GCM') {
+        const __aesGcmArgs = (algorithm, key, data, usage) => {
+            if (algorithm.name !== 'AES-GCM') {
                 throw new Error('Only AES-GCM is supported for encrypt and decrypt');
             }
+
+            __checkKey(key, 'AES-GCM', usage);
 
             if (algorithm.tagLength !== undefined && algorithm.tagLength !== 128) {
                 throw new Error('Only a 128 bit AES-GCM tag is supported');
@@ -149,6 +153,8 @@ pub(super) const JS: &str = r#"
                     if (length !== 128 && length !== 256) {
                         throw new Error('AES-GCM supports 128 and 256 bit keys');
                     }
+
+                    __checkUsages(keyUsages, __aesUsages);
 
                     resolve(__createCryptoKey(
                         'secret', extractable,
@@ -182,6 +188,8 @@ pub(super) const JS: &str = r#"
                         throw new Error('AES-GCM supports 128 and 256 bit keys');
                     }
 
+                    __checkUsages(keyUsages, __aesUsages);
+
                     resolve(__createCryptoKey(
                         'secret', extractable,
                         { name: 'AES-GCM', length: bytes.byteLength * 8 },
@@ -200,8 +208,12 @@ pub(super) const JS: &str = r#"
                         throw new Error('Only "raw" format is supported for exportKey');
                     }
 
+                    if (!__isCryptoKey(key)) {
+                        throw new TypeError('The key is not a CryptoKey');
+                    }
+
                     if (!key.extractable) {
-                        throw new Error('Key is not extractable');
+                        throw __domException('InvalidAccessError', 'The key is not extractable');
                     }
 
                     const bytes = __aesBytes(__keyData(key));
@@ -216,7 +228,7 @@ pub(super) const JS: &str = r#"
         crypto.subtle.encrypt = function(algorithm, key, data) {
             return new Promise((resolve, reject) => {
                 try {
-                    resolve(crypto.subtle.__nativeAesGcmSeal(...__aesGcmArgs(algorithm, key, data)));
+                    resolve(crypto.subtle.__nativeAesGcmSeal(...__aesGcmArgs(algorithm, key, data, 'encrypt')));
                 } catch (e) {
                     reject(e);
                 }
@@ -226,7 +238,7 @@ pub(super) const JS: &str = r#"
         crypto.subtle.decrypt = function(algorithm, key, data) {
             return new Promise((resolve, reject) => {
                 try {
-                    resolve(crypto.subtle.__nativeAesGcmOpen(...__aesGcmArgs(algorithm, key, data)));
+                    resolve(crypto.subtle.__nativeAesGcmOpen(...__aesGcmArgs(algorithm, key, data, 'decrypt')));
                 } catch (e) {
                     reject(e);
                 }

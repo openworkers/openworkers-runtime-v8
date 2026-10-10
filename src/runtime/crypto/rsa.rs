@@ -351,6 +351,8 @@ pub(super) const JS: &str = r#"
                             return;
                         }
 
+                        __checkUsages(keyUsages, format === 'pkcs8' ? ['sign'] : ['verify']);
+
                         // Parsed now, so a key that cannot sign or verify rejects here:
                         // the PKCS#8 of a private key, the RSAPublicKey out of the
                         // SubjectPublicKeyInfo of a public one ("raw" takes it bare)
@@ -380,9 +382,9 @@ pub(super) const JS: &str = r#"
                     const algoName = typeof algorithm === 'string' ? algorithm : algorithm.name;
 
                     if (algoName === 'RSASSA-PKCS1-v1_5') {
-                        if (key.type !== 'private' || key.algorithm.name !== 'RSASSA-PKCS1-v1_5') {
-                            reject(new Error('Invalid key for RSA signing'));
-                            return;
+                        __checkKey(key, 'RSASSA-PKCS1-v1_5', 'sign');
+                        if (key.type !== 'private') {
+                            throw __domException('InvalidAccessError', 'Only a private key signs');
                         }
 
                         let dataBytes;
@@ -422,10 +424,7 @@ pub(super) const JS: &str = r#"
                     const algoName = typeof algorithm === 'string' ? algorithm : algorithm.name;
 
                     if (algoName === 'RSASSA-PKCS1-v1_5') {
-                        if (key.algorithm.name !== 'RSASSA-PKCS1-v1_5') {
-                            reject(new Error('Invalid key for RSA verification'));
-                            return;
-                        }
+                        __checkKey(key, 'RSASSA-PKCS1-v1_5', 'verify');
 
                         let dataBytes, sigBytes;
                         if (data instanceof ArrayBuffer) {

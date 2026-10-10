@@ -735,3 +735,82 @@ async fn test_crypto_key_hides_its_material() {
 
     assert_eq!(run_fetch(body).await, "OK");
 }
+
+/// Every op checks its key: a key imported for one use cannot do another, a
+/// key of one algorithm cannot be used under another (InvalidAccessError),
+/// and importKey takes only the usages its algorithm has (SyntaxError)
+#[tokio::test(flavor = "current_thread")]
+async fn test_key_usages_and_algorithm_are_enforced() {
+    let body = rsa_test_keys()
+        + r#"
+        const data = new Uint8Array([1, 2, 3]);
+        const raw = new Uint8Array(16).fill(9);
+
+        const verifyOnly = await crypto.subtle.importKey(
+            'raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']
+        );
+        const rsaPrivate = await crypto.subtle.importKey(
+            'pkcs8', rsaPkcs8, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']
+        );
+        const encryptOnly = await crypto.subtle.importKey(
+            'raw', raw, { name: 'AES-GCM' }, false, ['encrypt']
+        );
+        const deriveKeyOnly = await crypto.subtle.importKey(
+            'raw', raw, { name: 'PBKDF2' }, false, ['deriveKey']
+        );
+        const pair = await crypto.subtle.generateKey(
+            { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']
+        );
+
+        const iv = new Uint8Array(12);
+        const sealed = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, encryptOnly, data);
+
+        const refused = async (name, expected, op) => {
+            try {
+                await op();
+                return name + ' went through';
+            } catch (e) {
+                return e instanceof DOMException && e.name === expected ? null : name + ': ' + e;
+            }
+        };
+
+        const failures = (await Promise.all([
+            refused('verify-only HMAC signs', 'InvalidAccessError',
+                () => crypto.subtle.sign('HMAC', verifyOnly, data)),
+            refused('RSA key under HMAC', 'InvalidAccessError',
+                () => crypto.subtle.sign('HMAC', rsaPrivate, data)),
+            refused('HMAC key under RSA', 'InvalidAccessError',
+                () => crypto.subtle.sign('RSASSA-PKCS1-v1_5', verifyOnly, data)),
+            refused('HMAC key under ECDSA', 'InvalidAccessError',
+                () => crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, verifyOnly, data)),
+            refused('public ECDSA key signs', 'InvalidAccessError',
+                () => crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pair.publicKey, data)),
+            refused('encrypt-only AES decrypts', 'InvalidAccessError',
+                () => crypto.subtle.decrypt({ name: 'AES-GCM', iv }, encryptOnly, sealed)),
+            refused('deriveKey-only PBKDF2 derives bits', 'InvalidAccessError',
+                () => crypto.subtle.deriveBits(
+                    { name: 'PBKDF2', salt: iv, iterations: 1, hash: 'SHA-256' }, deriveKeyOnly, 256
+                )),
+            refused('non-extractable key exports', 'InvalidAccessError',
+                () => crypto.subtle.exportKey('raw', encryptOnly)),
+            refused('HMAC imported to encrypt', 'SyntaxError',
+                () => crypto.subtle.importKey('raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['encrypt'])),
+            refused('ECDSA private imported to verify', 'SyntaxError',
+                () => crypto.subtle.importKey('pkcs8', raw, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify'])),
+            refused('RSA public imported to sign', 'SyntaxError',
+                () => crypto.subtle.importKey('spki', rsaSpki, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign'])),
+        ])).filter((failure) => failure !== null);
+
+        // The allowed uses still work
+        const signature = await crypto.subtle.sign('HMAC', await crypto.subtle.importKey(
+            'raw', raw, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+        ), data);
+        if (!(await crypto.subtle.verify('HMAC', verifyOnly, signature, data))) {
+            failures.push('verify-only HMAC does not verify');
+        }
+
+        return failures.length === 0 ? 'OK' : 'FAIL: ' + failures.join('; ');
+    "#;
+
+    assert_eq!(run_fetch(&body).await, "OK");
+}

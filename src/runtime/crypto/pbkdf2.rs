@@ -151,6 +151,8 @@ pub(super) const JS: &str = r#"
                             return;
                         }
 
+                        __checkUsages(keyUsages, ['deriveKey', 'deriveBits']);
+
                         let keyBytes;
                         if (keyData instanceof ArrayBuffer) {
                             keyBytes = new Uint8Array(keyData);
@@ -189,10 +191,7 @@ pub(super) const JS: &str = r#"
                         return;
                     }
 
-                    if (!__isCryptoKey(baseKey) || baseKey.algorithm.name !== 'PBKDF2') {
-                        reject(new Error('Invalid key for PBKDF2'));
-                        return;
-                    }
+                    __checkKey(baseKey, 'PBKDF2', 'deriveBits');
 
                     let salt;
                     if (algorithm.salt instanceof ArrayBuffer) {

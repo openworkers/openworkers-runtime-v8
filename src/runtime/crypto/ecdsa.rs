@@ -203,6 +203,8 @@ pub(super) const JS: &str = r#"
                             return;
                         }
 
+                        __checkUsages(keyUsages, ['sign', 'verify']);
+
                         const result = crypto.subtle.__nativeEcdsaGenerateKey();
                         if (!result) {
                             reject(new Error('Key generation failed'));
@@ -265,6 +267,7 @@ pub(super) const JS: &str = r#"
 
                         if (format === 'raw') {
                             // Raw format is for public keys (uncompressed point)
+                            __checkUsages(keyUsages, ['verify']);
                             resolve(__createCryptoKey(
                                 'public', extractable,
                                 { name: 'ECDSA', namedCurve: 'P-256' },
@@ -272,6 +275,7 @@ pub(super) const JS: &str = r#"
                             ));
                         } else if (format === 'pkcs8') {
                             // PKCS#8 format is for private keys
+                            __checkUsages(keyUsages, ['sign']);
                             resolve(__createCryptoKey(
                                 'private', extractable,
                                 { name: 'ECDSA', namedCurve: 'P-256' },
@@ -302,9 +306,9 @@ pub(super) const JS: &str = r#"
                     const algoName = typeof algorithm === 'string' ? algorithm : algorithm.name;
 
                     if (algoName === 'ECDSA') {
-                        if (key.type !== 'private' || key.algorithm.name !== 'ECDSA') {
-                            reject(new Error('Invalid key for ECDSA signing'));
-                            return;
+                        __checkKey(key, 'ECDSA', 'sign');
+                        if (key.type !== 'private') {
+                            throw __domException('InvalidAccessError', 'Only a private key signs');
                         }
 
                         let dataBytes;
@@ -345,10 +349,9 @@ pub(super) const JS: &str = r#"
                     const algoName = typeof algorithm === 'string' ? algorithm : algorithm.name;
 
                     if (algoName === 'ECDSA') {
-                        if (key.algorithm.name !== 'ECDSA') {
-                            reject(new Error('Invalid key for ECDSA verification'));
-                            return;
-                        }
+                        // A private key verifies with the public half it carries: an
+                        // extension of the spec, under its sign usage
+                        __checkKey(key, 'ECDSA', key.type === 'private' ? 'sign' : 'verify');
 
                         let dataBytes, sigBytes;
                         if (data instanceof ArrayBuffer) {

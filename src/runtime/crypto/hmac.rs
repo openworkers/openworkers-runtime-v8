@@ -165,6 +165,8 @@ pub(super) const JS: &str = r#"
                         return;
                     }
 
+                    __checkUsages(keyUsages, ['sign', 'verify']);
+
                     let keyBytes;
                     if (keyData instanceof ArrayBuffer) {
                         keyBytes = new Uint8Array(keyData);
@@ -201,10 +203,7 @@ pub(super) const JS: &str = r#"
                         return;
                     }
 
-                    if (!__isCryptoKey(key)) {
-                        reject(new Error('Invalid key'));
-                        return;
-                    }
+                    __checkKey(key, 'HMAC', 'sign');
 
                     let dataBytes;
                     if (data instanceof ArrayBuffer) {
@@ -240,10 +239,7 @@ pub(super) const JS: &str = r#"
                         return;
                     }
 
-                    if (!__isCryptoKey(key)) {
-                        reject(new Error('Invalid key'));
-                        return;
-                    }
+                    __checkKey(key, 'HMAC', 'verify');
 
                     let dataBytes, sigBytes;
                     if (data instanceof ArrayBuffer) {
