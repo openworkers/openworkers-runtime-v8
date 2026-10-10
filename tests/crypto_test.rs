@@ -670,3 +670,35 @@ async fn test_pbkdf2_derive_bits_rejects_unusable_lengths() {
 
     assert_eq!(run_fetch(body).await, "OK");
 }
+
+/// The iteration count is run synchronously on the isolate thread, so it is
+/// bounded; `as u32` used to saturate 1e12 into four billion iterations
+#[tokio::test(flavor = "current_thread")]
+async fn test_pbkdf2_derive_bits_bounds_iterations() {
+    let body = r#"
+        const key = await crypto.subtle.importKey(
+            'raw', new TextEncoder().encode('password'), { name: 'PBKDF2' }, false, ['deriveBits']
+        );
+        const derive = (iterations) => crypto.subtle.deriveBits(
+            { name: 'PBKDF2', salt: new Uint8Array(8), iterations, hash: 'SHA-256' }, key, 256
+        );
+
+        const accepted = [];
+        for (const iterations of [1e12, 10000001, 2 ** 32, 1.5, Infinity]) {
+            try {
+                await derive(iterations);
+                accepted.push(iterations);
+            } catch (e) {
+                if (!(e instanceof TypeError)) accepted.push(iterations + ': ' + e);
+            }
+        }
+
+        const bits = await derive(1000);
+
+        return accepted.length === 0 && bits.byteLength === 32
+            ? 'OK'
+            : 'FAIL: accepted ' + accepted.join(', ');
+    "#;
+
+    assert_eq!(run_fetch(body).await, "OK");
+}

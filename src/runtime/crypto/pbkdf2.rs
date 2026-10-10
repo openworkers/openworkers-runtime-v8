@@ -32,6 +32,29 @@ fn length_bytes(bits: f64) -> Result<usize, String> {
     Ok(bits as usize / 8)
 }
 
+/// Most iterations one derivation may run. Each is a synchronous HMAC on
+/// the isolate thread, out of reach of the CPU limit, so the count has to be
+/// bounded here: this is a generous bound, with 600 000 the OWASP advice.
+const MAX_ITERATIONS: u32 = 10_000_000;
+
+/// The iteration count a derivation asks for, or why it cannot run it: the
+/// spec wants a positive integer, and this runtime a bounded one.
+fn iteration_count(count: f64) -> Result<NonZeroU32, String> {
+    if !count.is_finite() || count.fract() != 0.0 {
+        return Err("PBKDF2: the iteration count is not a whole number".into());
+    }
+    if count < 1.0 {
+        return Err("PBKDF2: the iteration count must be at least 1".into());
+    }
+    if count > MAX_ITERATIONS as f64 {
+        return Err(format!(
+            "PBKDF2: the iteration count is above {MAX_ITERATIONS}"
+        ));
+    }
+
+    Ok(NonZeroU32::new(count as u32).unwrap())
+}
+
 struct Derivation {
     algorithm: pbkdf2::Algorithm,
     password: Vec<u8>,
@@ -65,9 +88,7 @@ fn derivation(
     if !iterations.is_number() {
         return Err("PBKDF2: the iteration count is not a number".into());
     }
-    let Some(iterations) = NonZeroU32::new(iterations.number_value(scope).unwrap() as u32) else {
-        return Err("PBKDF2: the iteration count must be at least 1".into());
-    };
+    let iterations = iteration_count(iterations.number_value(scope).unwrap())?;
 
     let length = args.get(4);
     if !length.is_number() {
