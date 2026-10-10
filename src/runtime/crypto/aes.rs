@@ -128,7 +128,7 @@ pub(super) fn setup_aes(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
                 ? new Uint8Array(0)
                 : __aesBytes(algorithm.additionalData);
 
-            return [key.__keyData, __aesBytes(algorithm.iv), __aesBytes(data), aad];
+            return [__keyDataOf(key), __aesBytes(algorithm.iv), __aesBytes(data), aad];
         };
 
         const __generateKeyFallback = crypto.subtle.generateKey;
@@ -202,7 +202,7 @@ pub(super) fn setup_aes(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
                         throw new Error('Key is not extractable');
                     }
 
-                    const bytes = __aesBytes(key.__keyData);
+                    const bytes = __aesBytes(__keyDataOf(key));
 
                     resolve(bytes.slice().buffer);
                 } catch (e) {

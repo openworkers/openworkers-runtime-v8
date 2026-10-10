@@ -281,7 +281,7 @@ pub(super) fn setup_rsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
                         }
 
                         const hashName = key.algorithm.hash.name;
-                        const result = crypto.subtle.__nativeRsaSign(hashName, key.__keyData, dataBytes);
+                        const result = crypto.subtle.__nativeRsaSign(hashName, __keyDataOf(key), dataBytes);
 
                         if (result) {
                             resolve(result);
@@ -332,7 +332,7 @@ pub(super) fn setup_rsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
                         }
 
                         const hashName = key.algorithm.hash.name;
-                        const isValid = crypto.subtle.__nativeRsaVerify(hashName, key.__keyData, sigBytes, dataBytes);
+                        const isValid = crypto.subtle.__nativeRsaVerify(hashName, __keyDataOf(key), sigBytes, dataBytes);
                         resolve(isValid);
                     } else {
                         // Fall back to ECDSA/HMAC handler

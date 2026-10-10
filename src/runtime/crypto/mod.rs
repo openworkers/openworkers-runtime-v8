@@ -75,15 +75,30 @@ fn setup_crypto_classes(scope: &mut v8::PinScope) {
         Object.setPrototypeOf(crypto, Crypto.prototype);
         Object.setPrototypeOf(crypto.subtle, SubtleCrypto.prototype);
 
+        // The key material is kept off the key: a CryptoKey that is not
+        // extractable must not hand its bytes to a plain property read.
+        const __keyMaterial = new WeakMap();
+        const __publicMaterial = new WeakMap();
+
         globalThis.CryptoKey = class CryptoKey {
             constructor(type, extractable, algorithm, usages, keyData) {
                 this.type = type;
                 this.extractable = extractable;
                 this.algorithm = algorithm;
                 this.usages = Object.freeze([...usages]);
-                this.__keyData = keyData;
+                __keyMaterial.set(this, keyData);
             }
         };
+
+        // What the ops read the material through. They are not properties of
+        // any key, and not enumerable on the global.
+        for (const [name, value] of Object.entries({
+            __keyDataOf: (key) => __keyMaterial.get(key),
+            __publicKeyDataOf: (key) => __publicMaterial.get(key),
+            __setPublicKeyData: (key, bytes) => { __publicMaterial.set(key, bytes); },
+        })) {
+            Object.defineProperty(globalThis, name, { value, enumerable: false });
+        }
 
         // Helper used by all importKey implementations
         globalThis.__createCryptoKey = function(type, extractable, algorithm, usages, keyData) {

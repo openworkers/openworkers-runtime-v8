@@ -679,3 +679,37 @@ async fn test_rsa_spki_and_pkcs8_keys() {
     })
     .await;
 }
+
+/// A key that is not extractable does not show its bytes to a property read
+#[tokio::test(flavor = "current_thread")]
+async fn test_key_material_is_not_a_property() {
+    run_in_local(|| async {
+        let code = r#"
+            addEventListener('fetch', (event) => {
+                event.respondWith((async () => {
+                    const key = await crypto.subtle.importKey('raw', new Uint8Array([1, 2, 3, 4]), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+                    const names = [...Object.getOwnPropertyNames(key), ...Object.getOwnPropertySymbols(key).map(String)];
+                    const leaked = names.some((n) => n.startsWith('__')) || key.__keyData !== undefined;
+                    const signature = await crypto.subtle.sign('HMAC', key, new Uint8Array([9]));
+                    return new Response(!leaked && signature.byteLength === 32 ? 'OK' : 'FAIL ' + names);
+                })());
+            });
+        "#;
+
+        let mut worker = Worker::new(Script::new(code), None).await.unwrap();
+        let req = HttpRequest {
+            method: HttpMethod::Get,
+            url: "http://localhost/".to_string(),
+            headers: HashMap::new(),
+            body: RequestBody::None,
+        };
+
+        let (task, rx) = Event::fetch(req);
+        worker.exec(task).await.unwrap();
+        let response = rx.await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
+
+        assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
+    })
+    .await;
+}

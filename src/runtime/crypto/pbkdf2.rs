@@ -149,7 +149,7 @@ pub(super) fn setup_pbkdf2(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::O
                         return;
                     }
 
-                    if (!baseKey.__keyData || baseKey.algorithm.name !== 'PBKDF2') {
+                    if (!__keyDataOf(baseKey) || baseKey.algorithm.name !== 'PBKDF2') {
                         reject(new Error('Invalid key for PBKDF2'));
                         return;
                     }
@@ -175,7 +175,7 @@ pub(super) fn setup_pbkdf2(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::O
                         : algorithm.hash.name;
 
                     resolve(crypto.subtle.__nativePbkdf2DeriveBits(
-                        hashName, baseKey.__keyData, salt, iterations, length
+                        hashName, __keyDataOf(baseKey), salt, iterations, length
                     ));
                 } catch (e) {
                     reject(e);

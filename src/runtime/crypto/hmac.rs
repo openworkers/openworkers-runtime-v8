@@ -141,10 +141,6 @@ pub(super) fn setup_hmac(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obj
 
     // JS wrappers for sign/verify with key management
     let code = r#"
-        // Simple key storage (per-isolate)
-        const __cryptoKeys = new Map();
-        let __nextKeyId = 1;
-
         crypto.subtle.importKey = function(format, keyData, algorithm, extractable, keyUsages) {
             return new Promise((resolve, reject) => {
                 try {
@@ -173,15 +169,11 @@ pub(super) fn setup_hmac(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obj
                         return;
                     }
 
-                    const keyId = __nextKeyId++;
                     const key = __createCryptoKey(
                         'secret', extractable,
                         { name: 'HMAC', hash: { name: hashName } },
                         keyUsages, keyBytes
                     );
-                    key.__keyId = keyId;
-
-                    __cryptoKeys.set(keyId, key);
                     resolve(key);
                 } catch (e) {
                     reject(e);
@@ -199,7 +191,7 @@ pub(super) fn setup_hmac(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obj
                         return;
                     }
 
-                    if (!key.__keyData) {
+                    if (!__keyDataOf(key)) {
                         reject(new Error('Invalid key'));
                         return;
                     }
@@ -215,7 +207,7 @@ pub(super) fn setup_hmac(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obj
                     }
 
                     const hashName = key.algorithm.hash.name;
-                    const result = crypto.subtle.__nativeHmacSign(hashName, key.__keyData, dataBytes);
+                    const result = crypto.subtle.__nativeHmacSign(hashName, __keyDataOf(key), dataBytes);
 
                     if (result) {
                         resolve(result);
@@ -238,7 +230,7 @@ pub(super) fn setup_hmac(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obj
                         return;
                     }
 
-                    if (!key.__keyData) {
+                    if (!__keyDataOf(key)) {
                         reject(new Error('Invalid key'));
                         return;
                     }
@@ -263,7 +255,7 @@ pub(super) fn setup_hmac(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obj
                     }
 
                     const hashName = key.algorithm.hash.name;
-                    const isValid = crypto.subtle.__nativeHmacVerify(hashName, key.__keyData, sigBytes, dataBytes);
+                    const isValid = crypto.subtle.__nativeHmacVerify(hashName, __keyDataOf(key), sigBytes, dataBytes);
 
                     resolve(isValid);
                 } catch (e) {

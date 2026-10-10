@@ -214,7 +214,7 @@ pub(super) fn setup_ecdsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Ob
                             keyUsages.filter(u => u === 'sign'),
                             new Uint8Array(result.privateKey)
                         );
-                        privKey.__publicKeyData = new Uint8Array(result.publicKey);
+                        __setPublicKeyData(privKey, new Uint8Array(result.publicKey));
 
                         const pubKey = __createCryptoKey(
                             'public', true,
@@ -315,7 +315,7 @@ pub(super) fn setup_ecdsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Ob
                             return;
                         }
 
-                        const result = crypto.subtle.__nativeEcdsaSign(key.__keyData, dataBytes);
+                        const result = crypto.subtle.__nativeEcdsaSign(__keyDataOf(key), dataBytes);
                         if (result) {
                             resolve(result);
                         } else {
@@ -368,7 +368,7 @@ pub(super) fn setup_ecdsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Ob
                         }
 
                         // For private keys, use the public key data
-                        const publicKeyData = key.type === 'private' ? key.__publicKeyData : key.__keyData;
+                        const publicKeyData = key.type === 'private' ? __publicKeyDataOf(key) : __keyDataOf(key);
                         const isValid = crypto.subtle.__nativeEcdsaVerify(publicKeyData, sigBytes, dataBytes);
                         resolve(isValid);
                     } else {
