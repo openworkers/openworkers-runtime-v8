@@ -154,19 +154,20 @@ impl StreamManager {
             receivers.remove(&stream_id)
         };
 
-        if let Some(mut rx) = rx {
-            let result = rx.recv().await;
+        if let Some(rx) = rx {
+            // The receiver goes back when this future is dropped mid-wait, so a
+            // read that is cancelled does not take the stream with it
+            let mut waiting = Waiting {
+                manager: self,
+                stream_id,
+                rx: Some(rx),
+            };
 
-            // Put it back for next read (unless stream is done/errored)
-            if let Some(ref chunk) = result {
-                match chunk {
-                    StreamChunk::Done | StreamChunk::Error(_) => {
-                        // Don't put back - stream is finished
-                    }
-                    StreamChunk::Data(_) => {
-                        self.receivers.lock().unwrap().insert(stream_id, rx);
-                    }
-                }
+            let result = waiting.rx.as_mut().unwrap().recv().await;
+
+            // A stream that is done, errored or closed has nothing to give back
+            if !matches!(result, Some(StreamChunk::Data(_))) {
+                waiting.rx = None;
             }
 
             result.ok_or_else(|| "Stream closed unexpectedly".to_string())
@@ -263,6 +264,30 @@ impl StreamManager {
         });
 
         stream_id
+    }
+}
+
+/// The receiver of a stream while a read waits on it.
+struct Waiting<'a> {
+    manager: &'a StreamManager,
+    stream_id: StreamId,
+    rx: Option<mpsc::Receiver<StreamChunk>>,
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        let Some(rx) = self.rx.take() else {
+            return;
+        };
+
+        // A stream closed during the wait stays closed
+        if self.manager.has_sender(self.stream_id) {
+            self.manager
+                .receivers
+                .lock()
+                .unwrap()
+                .insert(self.stream_id, rx);
+        }
     }
 }
 
@@ -454,5 +479,27 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_read_keeps_the_stream() {
+        let manager = StreamManager::new();
+        let id = manager.create_stream("https://example.com".to_string());
+
+        // A read that gives up while nothing has arrived
+        let waited =
+            tokio::time::timeout(std::time::Duration::from_millis(20), manager.read_chunk(id))
+                .await;
+        assert!(waited.is_err());
+
+        manager
+            .write_chunk(id, StreamChunk::Data(Bytes::from("late")))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            manager.read_chunk(id).await.unwrap(),
+            StreamChunk::Data(_)
+        ));
     }
 }
