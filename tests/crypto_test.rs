@@ -5,6 +5,44 @@ use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, Script};
 use openworkers_runtime_v8::Worker;
 use std::collections::HashMap;
 
+/// Runs `body` as the body of an async function inside a fetch listener and
+/// returns what it returns, as text; a throw answers with its message.
+async fn run_fetch(body: &str) -> String {
+    let code = format!(
+        r#"
+            addEventListener('fetch', async (event) => {{
+                let result;
+                try {{
+                    result = await (async () => {{ {body} }})();
+                }} catch (e) {{
+                    result = 'THREW: ' + e;
+                }}
+                event.respondWith(new Response(String(result)));
+            }});
+        "#
+    );
+
+    run_in_local(|| async move {
+        let script = Script::new(code.as_str());
+        let mut worker = Worker::new(script, None).await.unwrap();
+
+        let req = HttpRequest {
+            method: HttpMethod::Get,
+            url: "http://localhost/".to_string(),
+            headers: HashMap::new(),
+            body: RequestBody::None,
+        };
+
+        let (task, rx) = Event::fetch(req);
+        worker.exec(task).await.unwrap();
+        let response = rx.await.unwrap();
+
+        let body = response.body.collect().await.unwrap().unwrap();
+        String::from_utf8(body.to_vec()).unwrap()
+    })
+    .await
+}
+
 /// Test crypto.getRandomValues
 #[tokio::test(flavor = "current_thread")]
 async fn test_get_random_values() {
@@ -601,4 +639,34 @@ async fn test_aes_gcm_rejects_wrong_additional_data() {
         assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
     })
     .await;
+}
+
+/// deriveBits allocates its output before deriving, so the length must be a
+/// bounded, whole, positive multiple of 8; Infinity used to abort the process
+#[tokio::test(flavor = "current_thread")]
+async fn test_pbkdf2_derive_bits_rejects_unusable_lengths() {
+    let body = r#"
+        const key = await crypto.subtle.importKey(
+            'raw', new TextEncoder().encode('password'), { name: 'PBKDF2' }, false, ['deriveBits']
+        );
+        const params = { name: 'PBKDF2', salt: new Uint8Array(8), iterations: 10, hash: 'SHA-256' };
+
+        const accepted = [];
+        for (const length of [Infinity, 0, 100, 2 ** 40, -8, NaN]) {
+            try {
+                await crypto.subtle.deriveBits(params, key, length);
+                accepted.push(length);
+            } catch (e) {
+                if (!(e instanceof TypeError)) accepted.push(length + ': ' + e);
+            }
+        }
+
+        const bits = await crypto.subtle.deriveBits(params, key, 256);
+
+        return accepted.length === 0 && bits.byteLength === 32
+            ? 'OK'
+            : 'FAIL: accepted ' + accepted.join(', ') + ', got ' + bits.byteLength + ' bytes';
+    "#;
+
+    assert_eq!(run_fetch(body).await, "OK");
 }

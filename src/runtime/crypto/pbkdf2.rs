@@ -5,6 +5,33 @@ use v8;
 use super::uint8_array_arg;
 use crate::v8_helpers::{create_array_buffer_from_vec, throw_type_error};
 
+/// Longest output `deriveBits` hands back. The spec sets no limit, but the
+/// output is allocated before the derivation runs, and 2**53 bits must not
+/// reserve a petabyte.
+const MAX_LENGTH_BYTES: usize = 64 * 1024;
+
+/// The byte count a `deriveBits` length asks for, or why it cannot: the spec
+/// wants a whole, positive multiple of 8 bits, and this runtime a bounded one.
+fn length_bytes(bits: f64) -> Result<usize, String> {
+    if !bits.is_finite() || bits.fract() != 0.0 {
+        return Err("PBKDF2: the length is not a whole number of bits".into());
+    }
+    if bits <= 0.0 {
+        return Err("PBKDF2: the length must be at least 8 bits".into());
+    }
+    if bits % 8.0 != 0.0 {
+        return Err("PBKDF2: the length is not a multiple of 8 bits".into());
+    }
+    if bits > (MAX_LENGTH_BYTES * 8) as f64 {
+        return Err(format!(
+            "PBKDF2: the length is above {} bits",
+            MAX_LENGTH_BYTES * 8
+        ));
+    }
+
+    Ok(bits as usize / 8)
+}
+
 struct Derivation {
     algorithm: pbkdf2::Algorithm,
     password: Vec<u8>,
@@ -46,7 +73,7 @@ fn derivation(
     if !length.is_number() {
         return Err("PBKDF2: the length is not a number".into());
     }
-    let length_bytes = length.number_value(scope).unwrap() as usize / 8;
+    let length_bytes = length_bytes(length.number_value(scope).unwrap())?;
 
     Ok(Derivation {
         algorithm,
