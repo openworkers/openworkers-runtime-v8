@@ -41,8 +41,14 @@ impl Turn {
     }
 
     /// Ends the turn, and answers whether a memory limit was hit in it.
+    ///
+    /// A termination that landed after the turn's JS returned is cancelled
+    /// here: the request's guards keep their flags, and JS run outside a
+    /// turn, such as the script of a new context, must not die of it.
     pub fn end(&self) -> bool {
-        *self.holder.lock().unwrap() = None;
+        let mut holder = self.holder.lock().unwrap();
+        *holder = None;
+        self.handle.cancel_terminate_execution();
         self.memory_limit_hit.swap(false, Ordering::SeqCst)
     }
 
@@ -109,4 +115,41 @@ pub fn next_request_id() -> u64 {
 
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::pin::pin;
+
+    /// A termination that lands after the turn's JS returned does not stop
+    /// the JS run next outside a turn.
+    #[test]
+    fn a_termination_does_not_outlive_the_turn() {
+        crate::platform::get_platform();
+        let mut isolate = crate::v8_helpers::new_isolate(Default::default());
+        let turn = Turn::new(
+            isolate.thread_safe_handle(),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        let scope = pin!(v8::HandleScope::new(&mut isolate));
+        let mut scope = scope.init();
+        let context = v8::Context::new(&scope, Default::default());
+        let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+        let run = |scope: &mut v8::PinScope| {
+            let code = v8::String::new(scope, "1 + 1").unwrap();
+            let script = v8::Script::compile(scope, code, None).unwrap();
+            script.run(scope).and_then(|value| value.int32_value(scope))
+        };
+
+        turn.begin(1);
+        assert!(!turn.terminate(2), "another request cannot end the turn");
+        assert!(turn.terminate(1));
+        turn.end();
+
+        assert_eq!(run(scope), Some(2), "the termination outlived the turn");
+        assert!(!turn.terminate(1), "no turn, nothing to terminate");
+    }
 }
