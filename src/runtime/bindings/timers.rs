@@ -130,9 +130,13 @@ pub fn setup_timers(
         globalThis.__executeTimer = function(id) {
             const callback = globalThis.__timerCallbacks.get(id);
             if (callback) {
-                callback();
-                if (!globalThis.__intervalIds.has(id)) {
-                    globalThis.__timerCallbacks.delete(id);
+                try {
+                    callback();
+                } finally {
+                    // A timeout that threw has run all the same
+                    if (!globalThis.__intervalIds.has(id)) {
+                        globalThis.__timerCallbacks.delete(id);
+                    }
                 }
             }
         };

@@ -305,3 +305,24 @@ async fn test_custom_headers() {
     })
     .await;
 }
+
+/// A timeout that throws has run, so its entry does not stay in the table
+#[tokio::test(flavor = "current_thread")]
+async fn test_throwing_timeout_leaves_no_entry() {
+    run_in_local(|| async {
+        let mut worker = Worker::new(Script::new(""), None).await.unwrap();
+
+        worker
+            .evaluate(
+                r#"
+                const id = setTimeout(() => { throw new Error('boom'); }, 100000);
+                try { __executeTimer(id); } catch (e) {}
+                globalThis.__left = __timerCallbacks.size;
+                "#,
+            )
+            .unwrap();
+
+        assert_eq!(worker.get_global_u32("__left"), Some(0));
+    })
+    .await;
+}
