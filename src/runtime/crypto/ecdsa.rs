@@ -189,6 +189,15 @@ pub(super) fn setup_ecdsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Ob
 
     // JS wrappers for ECDSA - extends the existing functions
     let code = r#"
+        // The native ops are P-256 with SHA-256 and nothing else, so another
+        // hash is refused rather than ignored.
+        const __ecdsaHashIsSupported = (algorithm) => {
+            const hash = algorithm.hash;
+            const name = typeof hash === 'string' ? hash : hash && hash.name;
+
+            return typeof name === 'string' && name.toUpperCase() === 'SHA-256';
+        };
+
         // Extend generateKey to support ECDSA
         crypto.subtle.generateKey = function(algorithm, extractable, keyUsages) {
             return new Promise((resolve, reject) => {
@@ -300,6 +309,10 @@ pub(super) fn setup_ecdsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Ob
                     const algoName = typeof algorithm === 'string' ? algorithm : algorithm.name;
 
                     if (algoName === 'ECDSA') {
+                        if (!__ecdsaHashIsSupported(algorithm)) {
+                            reject(new Error('Only SHA-256 is supported for ECDSA'));
+                            return;
+                        }
                         if (key.type !== 'private' || key.algorithm.name !== 'ECDSA') {
                             reject(new Error('Invalid key for ECDSA signing'));
                             return;
@@ -343,6 +356,10 @@ pub(super) fn setup_ecdsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Ob
                     const algoName = typeof algorithm === 'string' ? algorithm : algorithm.name;
 
                     if (algoName === 'ECDSA') {
+                        if (!__ecdsaHashIsSupported(algorithm)) {
+                            reject(new Error('Only SHA-256 is supported for ECDSA'));
+                            return;
+                        }
                         if (key.algorithm.name !== 'ECDSA') {
                             reject(new Error('Invalid key for ECDSA verification'));
                             return;

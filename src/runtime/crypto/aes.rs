@@ -142,7 +142,7 @@ pub(super) fn setup_aes(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
 
             return new Promise((resolve, reject) => {
                 try {
-                    const length = algorithm.length === undefined ? 256 : algorithm.length;
+                    const length = typeof algorithm === 'string' || algorithm.length === undefined ? 256 : algorithm.length;
 
                     if (length !== 128 && length !== 256) {
                         throw new Error('AES-GCM supports 128 and 256 bit keys');

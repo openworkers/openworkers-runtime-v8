@@ -713,3 +713,45 @@ async fn test_key_material_is_not_a_property() {
     })
     .await;
 }
+
+/// A hash the native ECDSA cannot honour is refused, and a string algorithm
+/// still generates an AES key
+#[tokio::test(flavor = "current_thread")]
+async fn test_ecdsa_refuses_other_hashes_and_aes_takes_a_string() {
+    run_in_local(|| async {
+        let code = r#"
+            addEventListener('fetch', (event) => {
+                event.respondWith((async () => {
+                    const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+                    const data = new Uint8Array([1]);
+                    let refused = false;
+
+                    try {
+                        await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-384' }, pair.privateKey, data);
+                    } catch (e) {
+                        refused = true;
+                    }
+
+                    const aes = await crypto.subtle.generateKey('AES-GCM', true, ['encrypt', 'decrypt']);
+                    return new Response(refused && aes.algorithm.length === 256 ? 'OK' : 'FAIL');
+                })());
+            });
+        "#;
+
+        let mut worker = Worker::new(Script::new(code), None).await.unwrap();
+        let req = HttpRequest {
+            method: HttpMethod::Get,
+            url: "http://localhost/".to_string(),
+            headers: HashMap::new(),
+            body: RequestBody::None,
+        };
+
+        let (task, rx) = Event::fetch(req);
+        worker.exec(task).await.unwrap();
+        let response = rx.await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
+
+        assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
+    })
+    .await;
+}
