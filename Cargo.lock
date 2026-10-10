@@ -1289,7 +1289,6 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook",
- "signal-hook-tokio",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -1911,18 +1910,6 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
-]
-
-[[package]]
-name = "signal-hook-tokio"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e513e435a8898a0002270f29d0a708b7879708fb5c4d00e46983ca2d2d378cf0"
-dependencies = [
- "futures-core",
- "libc",
- "signal-hook",
- "tokio",
 ]
 
 [[package]]

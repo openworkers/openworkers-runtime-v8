@@ -181,6 +181,9 @@ mod linux {
         terminated: Arc<AtomicBool>,
     }
 
+    /// The handler is installed before the first target registers, so a
+    /// timer armed right after cannot fire into the default action, which
+    /// is to kill the process.
     static TARGETS: std::sync::LazyLock<Mutex<HashMap<usize, Target>>> =
         std::sync::LazyLock::new(|| {
             spawn_signal_thread();
@@ -195,48 +198,46 @@ mod linux {
         TARGETS.lock().unwrap().remove(&key);
     }
 
+    /// Installs the SIGALRM handler, here and now, and starts the thread
+    /// that acts on what it records.
     fn spawn_signal_thread() {
+        use signal_hook::consts::signal;
+        use signal_hook::iterator::SignalsInfo;
+        use signal_hook::iterator::exfiltrator::raw::WithRawSiginfo;
+
         static SPAWNED: Once = Once::new();
 
         SPAWNED.call_once(|| {
+            let signals = SignalsInfo::with_exfiltrator([signal::SIGALRM], WithRawSiginfo)
+                .expect("Failed to register SIGALRM handler");
+
             std::thread::Builder::new()
                 .name("cpu-enforcer".into())
-                .spawn(signal_thread)
+                .spawn(move || signal_thread(signals))
                 .expect("Failed to spawn CPU enforcer signal thread");
         });
     }
 
     /// Receives SIGALRM off the signal handler, which only records it, and
     /// terminates the request whose timer sent it.
-    fn signal_thread() {
-        use futures::StreamExt;
-        use signal_hook::consts::signal;
-        use signal_hook::iterator::exfiltrator::raw::WithRawSiginfo;
-        use signal_hook_tokio::SignalsInfo;
+    fn signal_thread(
+        mut signals: signal_hook::iterator::SignalsInfo<
+            signal_hook::iterator::exfiltrator::raw::WithRawSiginfo,
+        >,
+    ) {
+        for siginfo in signals.forever() {
+            let key = unsafe { siginfo.si_value().sival_ptr as usize };
+            let target = TARGETS.lock().unwrap().get(&key).cloned();
 
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to create tokio runtime for CPU enforcer signal thread");
+            // A timer dropped after it fired leaves no target
+            let Some(target) = target else {
+                continue;
+            };
 
-        rt.block_on(async {
-            let mut signals = SignalsInfo::with_exfiltrator([signal::SIGALRM], WithRawSiginfo)
-                .expect("Failed to register SIGALRM handler");
-
-            while let Some(siginfo) = signals.next().await {
-                let key = unsafe { siginfo.si_value().sival_ptr as usize };
-                let target = TARGETS.lock().unwrap().get(&key).cloned();
-
-                // A timer dropped after it fired leaves no target
-                let Some(target) = target else {
-                    continue;
-                };
-
-                if !target.terminated.swap(true, Ordering::SeqCst) {
-                    tracing::warn!("CPU time limit exceeded for request #{}", target.request);
-                    target.turn.terminate(target.request);
-                }
+            if !target.terminated.swap(true, Ordering::SeqCst) {
+                tracing::warn!("CPU time limit exceeded for request #{}", target.request);
+                target.turn.terminate(target.request);
             }
-        });
+        }
     }
 }
