@@ -116,14 +116,10 @@ pub(super) fn setup_pbkdf2(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::O
                         }
 
                         let keyBytes;
-                        if (keyData instanceof ArrayBuffer) {
-                            keyBytes = new Uint8Array(keyData);
-                        } else if (keyData instanceof Uint8Array) {
-                            keyBytes = keyData;
-                        } else if (typeof keyData === 'string') {
+                        if (typeof keyData === 'string') {
                             keyBytes = new TextEncoder().encode(keyData);
-                        } else {
-                            reject(new Error('Key data must be ArrayBuffer, Uint8Array, or string'));
+                        } else if ((keyBytes = __bufferBytes(keyData)) === null) {
+                            reject(new Error('Key data must be a BufferSource or a string'));
                             return;
                         }
 
@@ -159,12 +155,9 @@ pub(super) fn setup_pbkdf2(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::O
                     }
 
                     let salt;
-                    if (algorithm.salt instanceof ArrayBuffer) {
-                        salt = new Uint8Array(algorithm.salt);
-                    } else if (algorithm.salt instanceof Uint8Array) {
-                        salt = algorithm.salt;
-                    } else {
-                        reject(new Error('Salt must be ArrayBuffer or Uint8Array'));
+                    salt = __bufferBytes(algorithm.salt);
+                    if (!salt) {
+                        reject(new Error('Salt must be a BufferSource'));
                         return;
                     }
 

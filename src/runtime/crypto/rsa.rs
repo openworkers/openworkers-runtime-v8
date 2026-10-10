@@ -215,12 +215,9 @@ pub(super) fn setup_rsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
 
                     if (algoName === 'RSASSA-PKCS1-v1_5') {
                         let keyBytes;
-                        if (keyData instanceof ArrayBuffer) {
-                            keyBytes = new Uint8Array(keyData);
-                        } else if (keyData instanceof Uint8Array) {
-                            keyBytes = keyData;
-                        } else {
-                            reject(new Error('Key data must be ArrayBuffer or Uint8Array'));
+                        keyBytes = __bufferBytes(keyData);
+                        if (!keyBytes) {
+                            reject(new Error('Key data must be a BufferSource'));
                             return;
                         }
 
@@ -271,12 +268,9 @@ pub(super) fn setup_rsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
                         }
 
                         let dataBytes;
-                        if (data instanceof ArrayBuffer) {
-                            dataBytes = new Uint8Array(data);
-                        } else if (data instanceof Uint8Array) {
-                            dataBytes = data;
-                        } else {
-                            reject(new Error('Data must be ArrayBuffer or Uint8Array'));
+                        dataBytes = __bufferBytes(data);
+                        if (!dataBytes) {
+                            reject(new Error('Data must be a BufferSource'));
                             return;
                         }
 
@@ -313,21 +307,15 @@ pub(super) fn setup_rsa(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
                         }
 
                         let dataBytes, sigBytes;
-                        if (data instanceof ArrayBuffer) {
-                            dataBytes = new Uint8Array(data);
-                        } else if (data instanceof Uint8Array) {
-                            dataBytes = data;
-                        } else {
-                            reject(new Error('Data must be ArrayBuffer or Uint8Array'));
+                        dataBytes = __bufferBytes(data);
+                        if (!dataBytes) {
+                            reject(new Error('Data must be a BufferSource'));
                             return;
                         }
 
-                        if (signature instanceof ArrayBuffer) {
-                            sigBytes = new Uint8Array(signature);
-                        } else if (signature instanceof Uint8Array) {
-                            sigBytes = signature;
-                        } else {
-                            reject(new Error('Signature must be ArrayBuffer or Uint8Array'));
+                        sigBytes = __bufferBytes(signature);
+                        if (!sigBytes) {
+                            reject(new Error('Signature must be a BufferSource'));
                             return;
                         }
 

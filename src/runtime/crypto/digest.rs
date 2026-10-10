@@ -61,12 +61,9 @@ pub(super) fn setup_digest(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::O
             return new Promise((resolve, reject) => {
                 try {
                     let bytes;
-                    if (data instanceof ArrayBuffer) {
-                        bytes = new Uint8Array(data);
-                    } else if (data instanceof Uint8Array) {
-                        bytes = data;
-                    } else {
-                        reject(new Error('Data must be ArrayBuffer or Uint8Array'));
+                    bytes = __bufferBytes(data);
+                    if (!bytes) {
+                        reject(new Error('Data must be a BufferSource'));
                         return;
                     }
                     const algoName = typeof algorithm === 'string' ? algorithm : algorithm.name;

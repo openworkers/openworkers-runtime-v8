@@ -93,6 +93,18 @@ fn setup_crypto_classes(scope: &mut v8::PinScope) {
         // What the ops read the material through. They are not properties of
         // any key, and not enumerable on the global.
         for (const [name, value] of Object.entries({
+            // The bytes of a BufferSource, viewed in place, or null
+            __bufferBytes: (value) => {
+                if (value instanceof ArrayBuffer) {
+                    return new Uint8Array(value);
+                }
+
+                if (ArrayBuffer.isView(value)) {
+                    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+                }
+
+                return null;
+            },
             __keyDataOf: (key) => __keyMaterial.get(key),
             __publicKeyDataOf: (key) => __publicMaterial.get(key),
             __setPublicKeyData: (key, bytes) => { __publicMaterial.set(key, bytes); },

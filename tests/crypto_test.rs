@@ -761,3 +761,40 @@ async fn test_ecdsa_refuses_other_hashes_and_aes_takes_a_string() {
     })
     .await;
 }
+
+/// Any BufferSource goes in, not only an ArrayBuffer or a Uint8Array
+#[tokio::test(flavor = "current_thread")]
+async fn test_crypto_takes_any_buffer_source() {
+    run_in_local(|| async {
+        let code = r#"
+            addEventListener('fetch', (event) => {
+                event.respondWith((async () => {
+                    const hex = (b) => Array.from(new Uint8Array(b)).map((x) => x.toString(16).padStart(2, '0')).join('');
+                    const bytes = new TextEncoder().encode('hello');
+                    const view = new DataView(bytes.buffer);
+                    const plain = hex(await crypto.subtle.digest('SHA-256', bytes));
+                    const viaView = hex(await crypto.subtle.digest('SHA-256', view));
+                    const key = await crypto.subtle.importKey('raw', new Uint16Array([1, 2]), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+                    const mac = await crypto.subtle.sign('HMAC', key, view);
+                    return new Response(plain === viaView && mac.byteLength === 32 ? 'OK' : 'FAIL');
+                })());
+            });
+        "#;
+
+        let mut worker = Worker::new(Script::new(code), None).await.unwrap();
+        let req = HttpRequest {
+            method: HttpMethod::Get,
+            url: "http://localhost/".to_string(),
+            headers: HashMap::new(),
+            body: RequestBody::None,
+        };
+
+        let (task, rx) = Event::fetch(req);
+        worker.exec(task).await.unwrap();
+        let response = rx.await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
+
+        assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
+    })
+    .await;
+}
