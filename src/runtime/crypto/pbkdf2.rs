@@ -147,7 +147,7 @@ pub(super) const JS: &str = r#"
 
                     if (algoName === 'PBKDF2') {
                         if (format !== 'raw') {
-                            reject(new Error('Only "raw" format is supported for PBKDF2'));
+                            reject(__domException('NotSupportedError', 'Only "raw" format is supported for PBKDF2'));
                             return;
                         }
 
@@ -179,25 +179,19 @@ pub(super) const JS: &str = r#"
                     const algoName = typeof algorithm === 'string' ? algorithm : algorithm.name;
 
                     if (algoName !== 'PBKDF2') {
-                        reject(new Error('Only PBKDF2 algorithm is supported for deriveBits'));
+                        reject(__domException('NotSupportedError', 'Only PBKDF2 algorithm is supported for deriveBits'));
                         return;
                     }
 
                     __checkKey(baseKey, 'PBKDF2', 'deriveBits');
 
-                    let salt;
-                    if (algorithm.salt instanceof ArrayBuffer) {
-                        salt = new Uint8Array(algorithm.salt);
-                    } else if (algorithm.salt instanceof Uint8Array) {
-                        salt = algorithm.salt;
-                    } else {
-                        reject(new Error('Salt must be ArrayBuffer or Uint8Array'));
-                        return;
-                    }
+                    const salt = __bufferSource(algorithm.salt);
 
+                    // A count the derivation cannot run is the native op's TypeError;
+                    // the spec names zero an OperationError
                     const iterations = algorithm.iterations;
-                    if (!iterations || iterations < 1) {
-                        reject(new Error('Iterations must be a positive number'));
+                    if (typeof iterations === 'number' && iterations < 1) {
+                        reject(__domException('OperationError', 'Iterations must be a positive number'));
                         return;
                     }
 

@@ -61,21 +61,13 @@ pub(super) const JS: &str = r#"
         crypto.subtle.digest = function(algorithm, data) {
             return new Promise((resolve, reject) => {
                 try {
-                    let bytes;
-                    if (data instanceof ArrayBuffer) {
-                        bytes = new Uint8Array(data);
-                    } else if (data instanceof Uint8Array) {
-                        bytes = data;
-                    } else {
-                        reject(new Error('Data must be ArrayBuffer or Uint8Array'));
-                        return;
-                    }
+                    const bytes = __bufferSource(data);
                     const algoName = typeof algorithm === 'string' ? algorithm : algorithm.name;
                     const result = crypto.subtle.__nativeDigest(algoName, bytes);
                     if (result) {
                         resolve(result);
                     } else {
-                        reject(new Error('Unsupported algorithm: ' + algoName));
+                        reject(__domException('NotSupportedError', 'Unsupported algorithm: ' + algoName));
                     }
                 } catch (e) {
                     reject(e);

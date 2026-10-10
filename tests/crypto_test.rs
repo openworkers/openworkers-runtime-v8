@@ -963,3 +963,85 @@ async fn test_hmac_key_is_not_retained() {
 
     assert_eq!(run_fetch(body).await, "OK");
 }
+
+/// Every op takes any BufferSource, a DataView or a typed array over part of
+/// a buffer included, and refuses with the DOMException the spec names
+#[tokio::test(flavor = "current_thread")]
+async fn test_buffer_sources_and_error_names() {
+    let body = rsa_test_keys()
+        + r#"
+        const hex = (buffer) => Array.from(new Uint8Array(buffer), (b) => b.toString(16).padStart(2, '0')).join('');
+        const data = new TextEncoder().encode('hello world');
+        const asView = (bytes) => new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        const framed = new Uint8Array(data.length + 8);
+        framed.set(data, 4);
+        const asSlice = new Int8Array(framed.buffer, 4, data.length);
+
+        const failures = [];
+        const same = (name, a, b) => { if (hex(a) !== hex(b)) failures.push(name); };
+        const truthy = (name, value) => { if (!value) failures.push(name); };
+
+        same('digest of a DataView', await crypto.subtle.digest('SHA-256', asView(data)), await crypto.subtle.digest('SHA-256', data));
+        same('digest of an Int8Array slice', await crypto.subtle.digest('SHA-256', asSlice), await crypto.subtle.digest('SHA-256', data));
+
+        const hmac = await crypto.subtle.importKey('raw', new Uint8Array(16), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
+        const mac = await crypto.subtle.sign('HMAC', hmac, data);
+        same('HMAC of a DataView', await crypto.subtle.sign('HMAC', hmac, asView(data)), mac);
+        truthy('HMAC verify of DataViews', await crypto.subtle.verify('HMAC', hmac, asView(new Uint8Array(mac)), asView(data)));
+
+        const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']);
+        const ecdsa = { name: 'ECDSA', hash: 'SHA-256' };
+        const ecSig = await crypto.subtle.sign(ecdsa, pair.privateKey, asSlice);
+        truthy('ECDSA verify of DataViews', await crypto.subtle.verify(ecdsa, pair.publicKey, asView(new Uint8Array(ecSig)), asView(data)));
+
+        const rsaAlgorithm = { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' };
+        const rsaPrivate = await crypto.subtle.importKey('pkcs8', asView(rsaPkcs8), rsaAlgorithm, false, ['sign']);
+        const rsaPublic = await crypto.subtle.importKey('spki', rsaSpki, rsaAlgorithm, false, ['verify']);
+        const rsaSig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', rsaPrivate, asView(data));
+        truthy('RSA verify of DataViews', await crypto.subtle.verify('RSASSA-PKCS1-v1_5', rsaPublic, asView(new Uint8Array(rsaSig)), asSlice));
+
+        const pbkdf2 = await crypto.subtle.importKey('raw', data, { name: 'PBKDF2' }, false, ['deriveBits']);
+        const derive = (salt) => crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations: 2, hash: 'SHA-256' }, pbkdf2, 128);
+        same('PBKDF2 with a DataView salt', await derive(asView(data)), await derive(data));
+
+        const refused = async (name, expected, op) => {
+            try {
+                await op();
+                failures.push(name + ' went through');
+            } catch (e) {
+                const named = expected === 'TypeError' ? e instanceof TypeError : e instanceof DOMException && e.name === expected;
+                if (!named) failures.push(name + ': ' + e);
+            }
+        };
+        const aes = await crypto.subtle.importKey('raw', new Uint8Array(16), { name: 'AES-GCM' }, false, ['encrypt']);
+
+        await refused('digest with MD5', 'NotSupportedError', () => crypto.subtle.digest('MD5', data));
+        await refused('digest of a string', 'TypeError', () => crypto.subtle.digest('SHA-256', 'hello'));
+        await refused('HMAC sign of a string', 'TypeError', () => crypto.subtle.sign('HMAC', hmac, 'hello'));
+        await refused('HMAC import as jwk', 'NotSupportedError',
+            () => crypto.subtle.importKey('jwk', {}, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']));
+        await refused('HMAC import with MD5', 'NotSupportedError',
+            () => crypto.subtle.importKey('raw', data, { name: 'HMAC', hash: 'MD5' }, false, ['sign']));
+        await refused('RSA import with SHA-1', 'NotSupportedError',
+            () => crypto.subtle.importKey('spki', rsaSpki, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-1' }, false, ['verify']));
+        await refused('generateKey of RSA-OAEP', 'NotSupportedError',
+            () => crypto.subtle.generateKey({ name: 'RSA-OAEP' }, false, ['encrypt']));
+        await refused('generateKey on P-384', 'NotSupportedError',
+            () => crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-384' }, false, ['sign']));
+        await refused('AES-GCM import of 24 bytes', 'DataError',
+            () => crypto.subtle.importKey('raw', new Uint8Array(24), { name: 'AES-GCM' }, false, ['encrypt']));
+        await refused('AES-GCM generateKey of 192 bits', 'OperationError',
+            () => crypto.subtle.generateKey({ name: 'AES-GCM', length: 192 }, false, ['encrypt']));
+        await refused('AES-GCM with a 96 bit tag', 'NotSupportedError',
+            () => crypto.subtle.encrypt({ name: 'AES-GCM', iv: new Uint8Array(12), tagLength: 96 }, aes, data));
+        await refused('PBKDF2 with 0 iterations', 'OperationError', () => derive(data).then(() => crypto.subtle.deriveBits(
+            { name: 'PBKDF2', salt: data, iterations: 0, hash: 'SHA-256' }, pbkdf2, 128)));
+        await refused('exportKey of a private key as raw', 'InvalidAccessError',
+            () => crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign'])
+                .then((extractable) => crypto.subtle.exportKey('raw', extractable.privateKey)));
+
+        return failures.length === 0 ? 'OK' : 'FAIL: ' + failures.join('; ');
+    "#;
+
+    assert_eq!(run_fetch(&body).await, "OK");
+}

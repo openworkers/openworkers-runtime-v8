@@ -339,8 +339,12 @@ pub(super) const JS: &str = r#"
                             : 'SHA-256';
 
                         if (format !== 'pkcs8' && format !== 'spki' && format !== 'raw') {
-                            reject(new Error('Only "pkcs8" and "spki" formats are supported for RSA'));
+                            reject(__domException('NotSupportedError', 'Only "pkcs8" and "spki" formats are supported for RSA'));
                             return;
+                        }
+
+                        if (!['SHA-256', 'SHA-384', 'SHA-512'].includes(hashName)) {
+                            throw __domException('NotSupportedError', 'RSASSA-PKCS1-v1_5 with ' + hashName + ' is not supported');
                         }
 
                         __checkUsages(keyUsages, format === 'pkcs8' ? ['sign'] : ['verify']);
@@ -379,15 +383,7 @@ pub(super) const JS: &str = r#"
                             throw __domException('InvalidAccessError', 'Only a private key signs');
                         }
 
-                        let dataBytes;
-                        if (data instanceof ArrayBuffer) {
-                            dataBytes = new Uint8Array(data);
-                        } else if (data instanceof Uint8Array) {
-                            dataBytes = data;
-                        } else {
-                            reject(new Error('Data must be ArrayBuffer or Uint8Array'));
-                            return;
-                        }
+                        const dataBytes = __bufferSource(data);
 
                         const hashName = key.algorithm.hash.name;
                         const result = crypto.subtle.__nativeRsaSign(hashName, __keyData(key), dataBytes);
@@ -395,7 +391,7 @@ pub(super) const JS: &str = r#"
                         if (result) {
                             resolve(result);
                         } else {
-                            reject(new Error('RSA sign failed'));
+                            reject(__domException('OperationError', 'RSA sign failed'));
                         }
                     } else {
                         // Fall back to ECDSA/HMAC handler
@@ -418,24 +414,8 @@ pub(super) const JS: &str = r#"
                     if (algoName === 'RSASSA-PKCS1-v1_5') {
                         __checkKey(key, 'RSASSA-PKCS1-v1_5', 'verify');
 
-                        let dataBytes, sigBytes;
-                        if (data instanceof ArrayBuffer) {
-                            dataBytes = new Uint8Array(data);
-                        } else if (data instanceof Uint8Array) {
-                            dataBytes = data;
-                        } else {
-                            reject(new Error('Data must be ArrayBuffer or Uint8Array'));
-                            return;
-                        }
-
-                        if (signature instanceof ArrayBuffer) {
-                            sigBytes = new Uint8Array(signature);
-                        } else if (signature instanceof Uint8Array) {
-                            sigBytes = signature;
-                        } else {
-                            reject(new Error('Signature must be ArrayBuffer or Uint8Array'));
-                            return;
-                        }
+                        const dataBytes = __bufferSource(data);
+                        const sigBytes = __bufferSource(signature);
 
                         const hashName = key.algorithm.hash.name;
                         const isValid = crypto.subtle.__nativeRsaVerify(hashName, __keyData(key), sigBytes, dataBytes);

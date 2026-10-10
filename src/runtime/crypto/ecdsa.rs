@@ -220,7 +220,7 @@ pub(super) const JS: &str = r#"
                     if (algoName === 'ECDSA') {
                         const namedCurve = algorithm.namedCurve || 'P-256';
                         if (namedCurve !== 'P-256') {
-                            reject(new Error('Only P-256 curve is supported'));
+                            reject(__domException('NotSupportedError', 'Only P-256 curve is supported'));
                             return;
                         }
 
@@ -228,7 +228,7 @@ pub(super) const JS: &str = r#"
 
                         const result = crypto.subtle.__nativeEcdsaGenerateKey();
                         if (!result) {
-                            reject(new Error('Key generation failed'));
+                            reject(__domException('OperationError', 'Key generation failed'));
                             return;
                         }
 
@@ -252,7 +252,7 @@ pub(super) const JS: &str = r#"
 
                         resolve(keyPair);
                     } else {
-                        reject(new Error('Only ECDSA algorithm is supported for generateKey'));
+                        reject(__domException('NotSupportedError', 'Only ECDSA algorithm is supported for generateKey'));
                     }
                 } catch (e) {
                     reject(e);
@@ -285,7 +285,7 @@ pub(super) const JS: &str = r#"
 
                         const namedCurve = algorithm.namedCurve || 'P-256';
                         if (namedCurve !== 'P-256') {
-                            reject(new Error('Only P-256 curve is supported'));
+                            reject(__domException('NotSupportedError', 'Only P-256 curve is supported'));
                             return;
                         }
 
@@ -311,7 +311,7 @@ pub(super) const JS: &str = r#"
                                 keyUsages, keyBytes, publicBytes
                             ));
                         } else {
-                            reject(new Error('Only "raw" and "pkcs8" formats are supported for ECDSA'));
+                            reject(__domException('NotSupportedError', 'Only "raw" and "pkcs8" formats are supported for ECDSA'));
                         }
                     } else {
                         // Fall back to original for HMAC
@@ -340,15 +340,7 @@ pub(super) const JS: &str = r#"
                             throw __domException('InvalidAccessError', 'Only a private key signs');
                         }
 
-                        let dataBytes;
-                        if (data instanceof ArrayBuffer) {
-                            dataBytes = new Uint8Array(data);
-                        } else if (data instanceof Uint8Array) {
-                            dataBytes = data;
-                        } else {
-                            reject(new Error('Data must be ArrayBuffer or Uint8Array'));
-                            return;
-                        }
+                        const dataBytes = __bufferSource(data);
 
                         resolve(crypto.subtle.__nativeEcdsaSign(__ecdsaHash(algorithm), __keyData(key), dataBytes));
                     } else {
@@ -377,24 +369,8 @@ pub(super) const JS: &str = r#"
                         // extension of the spec, under its sign usage
                         __checkKey(key, 'ECDSA', key.type === 'private' ? 'sign' : 'verify');
 
-                        let dataBytes, sigBytes;
-                        if (data instanceof ArrayBuffer) {
-                            dataBytes = new Uint8Array(data);
-                        } else if (data instanceof Uint8Array) {
-                            dataBytes = data;
-                        } else {
-                            reject(new Error('Data must be ArrayBuffer or Uint8Array'));
-                            return;
-                        }
-
-                        if (signature instanceof ArrayBuffer) {
-                            sigBytes = new Uint8Array(signature);
-                        } else if (signature instanceof Uint8Array) {
-                            sigBytes = signature;
-                        } else {
-                            reject(new Error('Signature must be ArrayBuffer or Uint8Array'));
-                            return;
-                        }
+                        const dataBytes = __bufferSource(data);
+                        const sigBytes = __bufferSource(signature);
 
                         // For private keys, use the public key data
                         const publicKeyData = key.type === 'private' ? __publicKeyData(key) : __keyData(key);

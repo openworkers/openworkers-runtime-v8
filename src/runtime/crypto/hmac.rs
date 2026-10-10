@@ -147,7 +147,7 @@ pub(super) const JS: &str = r#"
             return new Promise((resolve, reject) => {
                 try {
                     if (format !== 'raw') {
-                        reject(new Error('Only "raw" format is supported'));
+                        reject(__domException('NotSupportedError', 'Only "raw" format is supported'));
                         return;
                     }
 
@@ -157,8 +157,12 @@ pub(super) const JS: &str = r#"
                         : 'SHA-256';
 
                     if (algoName !== 'HMAC') {
-                        reject(new Error('Only HMAC algorithm is supported'));
+                        reject(__domException('NotSupportedError', 'Only HMAC algorithm is supported'));
                         return;
+                    }
+
+                    if (!['SHA-1', 'SHA-256', 'SHA-384', 'SHA-512'].includes(hashName)) {
+                        throw __domException('NotSupportedError', 'HMAC with ' + hashName + ' is not supported');
                     }
 
                     __checkUsages(keyUsages, ['sign', 'verify']);
@@ -182,21 +186,13 @@ pub(super) const JS: &str = r#"
                     const algoName = typeof algorithm === 'string' ? algorithm : algorithm.name;
 
                     if (algoName !== 'HMAC') {
-                        reject(new Error('Only HMAC algorithm is supported'));
+                        reject(__domException('NotSupportedError', 'Only HMAC algorithm is supported'));
                         return;
                     }
 
                     __checkKey(key, 'HMAC', 'sign');
 
-                    let dataBytes;
-                    if (data instanceof ArrayBuffer) {
-                        dataBytes = new Uint8Array(data);
-                    } else if (data instanceof Uint8Array) {
-                        dataBytes = data;
-                    } else {
-                        reject(new Error('Data must be ArrayBuffer or Uint8Array'));
-                        return;
-                    }
+                    const dataBytes = __bufferSource(data);
 
                     const hashName = key.algorithm.hash.name;
                     const result = crypto.subtle.__nativeHmacSign(hashName, __keyData(key), dataBytes);
@@ -204,7 +200,7 @@ pub(super) const JS: &str = r#"
                     if (result) {
                         resolve(result);
                     } else {
-                        reject(new Error('Sign failed'));
+                        reject(__domException('OperationError', 'HMAC sign failed'));
                     }
                 } catch (e) {
                     reject(e);
@@ -218,30 +214,14 @@ pub(super) const JS: &str = r#"
                     const algoName = typeof algorithm === 'string' ? algorithm : algorithm.name;
 
                     if (algoName !== 'HMAC') {
-                        reject(new Error('Only HMAC algorithm is supported'));
+                        reject(__domException('NotSupportedError', 'Only HMAC algorithm is supported'));
                         return;
                     }
 
                     __checkKey(key, 'HMAC', 'verify');
 
-                    let dataBytes, sigBytes;
-                    if (data instanceof ArrayBuffer) {
-                        dataBytes = new Uint8Array(data);
-                    } else if (data instanceof Uint8Array) {
-                        dataBytes = data;
-                    } else {
-                        reject(new Error('Data must be ArrayBuffer or Uint8Array'));
-                        return;
-                    }
-
-                    if (signature instanceof ArrayBuffer) {
-                        sigBytes = new Uint8Array(signature);
-                    } else if (signature instanceof Uint8Array) {
-                        sigBytes = signature;
-                    } else {
-                        reject(new Error('Signature must be ArrayBuffer or Uint8Array'));
-                        return;
-                    }
+                    const dataBytes = __bufferSource(data);
+                    const sigBytes = __bufferSource(signature);
 
                     const hashName = key.algorithm.hash.name;
                     const isValid = crypto.subtle.__nativeHmacVerify(hashName, __keyData(key), sigBytes, dataBytes);

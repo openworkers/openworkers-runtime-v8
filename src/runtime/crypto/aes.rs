@@ -104,37 +104,25 @@ pub(super) fn setup_aes(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obje
 /// The AES-GCM wrappers, with exportKey and encrypt/decrypt, extending the
 /// PBKDF2 ones. Installed by mod.rs.
 pub(super) const JS: &str = r#"
-        const __aesBytes = (value) => {
-            if (value instanceof ArrayBuffer) {
-                return new Uint8Array(value);
-            }
-
-            if (ArrayBuffer.isView(value)) {
-                return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-            }
-
-            throw new TypeError('Expected an ArrayBuffer or a view');
-        };
-
         const __aesUsages = ['encrypt', 'decrypt', 'wrapKey', 'unwrapKey'];
 
         // The nonce and the extra authenticated data ride on the algorithm object.
         const __aesGcmArgs = (algorithm, key, data, usage) => {
             if (algorithm.name !== 'AES-GCM') {
-                throw new Error('Only AES-GCM is supported for encrypt and decrypt');
+                throw __domException('NotSupportedError', 'Only AES-GCM is supported for encrypt and decrypt');
             }
 
             __checkKey(key, 'AES-GCM', usage);
 
             if (algorithm.tagLength !== undefined && algorithm.tagLength !== 128) {
-                throw new Error('Only a 128 bit AES-GCM tag is supported');
+                throw __domException('NotSupportedError', 'Only a 128 bit AES-GCM tag is supported');
             }
 
             const aad = algorithm.additionalData === undefined
                 ? new Uint8Array(0)
-                : __aesBytes(algorithm.additionalData);
+                : __bufferSource(algorithm.additionalData);
 
-            return [__keyData(key), __aesBytes(algorithm.iv), __aesBytes(data), aad];
+            return [__keyData(key), __bufferSource(algorithm.iv), __bufferSource(data), aad];
         };
 
         const __generateKeyFallback = crypto.subtle.generateKey;
@@ -151,7 +139,7 @@ pub(super) const JS: &str = r#"
                     const length = algorithm.length === undefined ? 256 : algorithm.length;
 
                     if (length !== 128 && length !== 256) {
-                        throw new Error('AES-GCM supports 128 and 256 bit keys');
+                        throw __domException('OperationError', 'AES-GCM supports 128 and 256 bit keys');
                     }
 
                     __checkUsages(keyUsages, __aesUsages);
@@ -179,13 +167,13 @@ pub(super) const JS: &str = r#"
             return new Promise((resolve, reject) => {
                 try {
                     if (format !== 'raw') {
-                        throw new Error('Only "raw" format is supported for AES-GCM');
+                        throw __domException('NotSupportedError', 'Only "raw" format is supported for AES-GCM');
                     }
 
                     const bytes = __copyBufferSource(keyData);
 
                     if (bytes.byteLength !== 16 && bytes.byteLength !== 32) {
-                        throw new Error('AES-GCM supports 128 and 256 bit keys');
+                        throw __domException('DataError', 'AES-GCM supports 128 and 256 bit keys');
                     }
 
                     __checkUsages(keyUsages, __aesUsages);
@@ -205,7 +193,7 @@ pub(super) const JS: &str = r#"
             return new Promise((resolve, reject) => {
                 try {
                     if (format !== 'raw') {
-                        throw new Error('Only "raw" format is supported for exportKey');
+                        throw __domException('NotSupportedError', 'Only "raw" format is supported for exportKey');
                     }
 
                     if (!__isCryptoKey(key)) {
@@ -216,9 +204,13 @@ pub(super) const JS: &str = r#"
                         throw __domException('InvalidAccessError', 'The key is not extractable');
                     }
 
-                    const bytes = __aesBytes(__keyData(key));
+                    // "raw" is the format of a secret or a public key; a private one
+                    // has none this runtime exports
+                    if (key.type === 'private') {
+                        throw __domException('InvalidAccessError', 'A private key has no "raw" form');
+                    }
 
-                    resolve(bytes.slice().buffer);
+                    resolve(__keyData(key).slice().buffer);
                 } catch (e) {
                     reject(e);
                 }
