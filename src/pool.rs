@@ -419,18 +419,26 @@ fn acquire_from_local_pool(owner_id: &str) -> Result<(Arc<TaggedIsolate>, bool),
     })
 }
 
-/// Release an isolate back to the pool and reclaim overcommitted isolates.
-fn release_to_local_pool(isolate: &TaggedIsolate) {
-    isolate.release();
+/// The slot of an isolate that a request holds. Dropping it releases the slot
+/// and reclaims overcommitted isolates, whether the request ended or its future
+/// was dropped mid-await: a slot that is never released leaves the isolate
+/// busy for good.
+struct SlotGuard(Arc<TaggedIsolate>);
 
-    // Reclaim any overcommitted isolates that are now free
-    LOCAL_POOL.with(|pool_cell| {
-        let mut pool_opt = pool_cell.borrow_mut();
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        self.0.release();
 
-        if let Some(pool) = pool_opt.as_mut() {
-            pool.reclaim();
-        }
-    });
+        // Reclaim any overcommitted isolates that are now free. The pool is
+        // gone when the thread is shutting down, and there is nothing to do.
+        let _ = LOCAL_POOL.try_with(|pool_cell| {
+            if let Ok(mut pool_opt) = pool_cell.try_borrow_mut()
+                && let Some(pool) = pool_opt.as_mut()
+            {
+                pool.reclaim();
+            }
+        });
+    }
 }
 
 // ============================================================================
@@ -525,6 +533,8 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
     } else {
         CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
     }
+
+    let _slot = SlotGuard(Arc::clone(&isolate_arc));
 
     let pooled = Arc::clone(&isolate_arc.isolate);
     let (use_snapshot, platform, limits) =
@@ -665,7 +675,6 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
                     drop_under_lock(ec, &pooled);
                 }
 
-                release_to_local_pool(&isolate_arc);
                 return result;
             }
             Err(e) => {
@@ -774,9 +783,6 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
             drop_under_lock(evicted, &pooled);
         }
     }
-
-    // Release the isolate back to the pool
-    release_to_local_pool(&isolate_arc);
 
     result
 }
