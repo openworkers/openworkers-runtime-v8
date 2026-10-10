@@ -371,3 +371,34 @@ async fn a_reset_releases_every_codec() {
     })
     .await;
 }
+
+/// Input cut before the end of the deflate stream is an error at the end,
+/// for the formats without a trailer too.
+#[tokio::test(flavor = "current_thread")]
+async fn truncated_input_rejects() {
+    let compressed = deflate_raw(&compressible());
+    let cut = hex(&compressed[..compressed.len() / 2]);
+
+    for format in ["deflate-raw", "deflate"] {
+        let data = match format {
+            "deflate" => {
+                let mut encoder =
+                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder.write_all(b"hello hello hello hello").unwrap();
+                let zlib = encoder.finish().unwrap();
+                hex(&zlib[..zlib.len() - 6])
+            }
+            _ => cut.clone(),
+        };
+
+        let body = format!(
+            r#"
+            const pieces = await through(new DecompressionStream('{format}'), [hex('{data}')]);
+            return 'accepted ' + pieces.length + ' pieces';
+            "#
+        );
+
+        let out = answer_of(&body).await;
+        assert!(out.starts_with("threw TypeError:"), "{format} got: {out}");
+    }
+}

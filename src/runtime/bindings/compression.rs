@@ -356,10 +356,6 @@ impl Codec {
         })
     }
 
-    fn is_decoder(&self) -> bool {
-        matches!(self.engine, Engine::Decode(_))
-    }
-
     fn append_input(&mut self, bytes: &[u8]) {
         if self.pending_pos == self.pending.len() {
             self.pending.clear();
@@ -389,15 +385,10 @@ impl Codec {
         let mut out = Vec::with_capacity(OUTPUT_BOUND);
         self.drain(&mut out, true)?;
 
+        // A decoder that never saw the final block, or the trailer after it,
+        // was cut short: the standard makes that an error, not a shorter file.
         if out.is_empty() && self.phase != Phase::Done {
-            // A deflate stream has no end marker a reader must see, so a cut
-            // raw or zlib stream passes, as the writer codecs let it. Only the
-            // gzip trailer is required.
-            if self.is_decoder() && self.format != Format::Gzip {
-                self.phase = Phase::Done;
-            } else {
-                return Err("the compressed input ended early".into());
-            }
+            return Err("the compressed input ended early".into());
         }
 
         Ok(out)
