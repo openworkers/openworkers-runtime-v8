@@ -15,12 +15,17 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::v8_helpers::throw_type_error;
+use crate::v8_helpers::{throw_error, throw_type_error};
 use flate2::{Compress, Compression, Crc, Decompress, FlushCompress, FlushDecompress, Status};
 use v8;
 
 /// The most bytes one push or finish hands back.
 pub const OUTPUT_BOUND: usize = 64 * 1024;
+
+/// The most codecs a context holds at once. Each keeps a window and whatever
+/// input it has not consumed, and a guest that opens streams it never ends
+/// would otherwise hold them all.
+pub const MAX_CODECS: usize = 64;
 
 /// The surface's `CompressionStream` and `DecompressionStream`, over the
 /// bounded ops: the one the shared surface ships calls `push` and `finish`
@@ -577,6 +582,17 @@ fn state(scope: &mut v8::PinScope) -> Rc<CompressionState> {
     state
 }
 
+/// Releases every codec of the running context.
+///
+/// For the reset between the requests of a pooled context: a stream the last
+/// request left open keeps its codec, which the next request can neither
+/// reach nor release.
+pub fn clear_compression_state(scope: &mut v8::PinScope) {
+    if let Some(state) = crate::context_slots::get::<CompressionState>(scope) {
+        state.codecs.borrow_mut().clear();
+    }
+}
+
 /// `compressionStart(format, decompress) -> id`
 fn compression_start(
     scope: &mut v8::PinScope,
@@ -601,13 +617,24 @@ fn compression_start(
     };
 
     let state = state(scope);
+    let mut codecs = state.codecs.borrow_mut();
+
+    if codecs.len() >= MAX_CODECS {
+        drop(codecs);
+        throw_error(
+            scope,
+            &format!("too many compression streams are open at once (the limit is {MAX_CODECS})"),
+        );
+        return;
+    }
+
     let id = {
         let mut next = state.next_id.borrow_mut();
         *next += 1;
         *next
     };
 
-    state.codecs.borrow_mut().insert(id, codec);
+    codecs.insert(id, codec);
     rv.set_uint32(id);
 }
 

@@ -254,3 +254,120 @@ async fn corrupt_gzip_trailer_rejects() {
     let out = answer_of(&body).await;
     assert!(out.starts_with("threw TypeError:"), "got: {out}");
 }
+
+/// A context holds a bounded number of codecs: the one past the limit is
+/// refused with a plain Error, and releasing one makes room again.
+#[tokio::test(flavor = "current_thread")]
+async fn open_codecs_are_capped() {
+    let limit = openworkers_runtime_v8::runtime::bindings::MAX_CODECS;
+    let body = format!(
+        r#"
+        const streams = [];
+        for (let i = 0; i < {limit}; i++) {{
+            streams.push(new CompressionStream('gzip'));
+        }}
+
+        let refused;
+        try {{
+            new CompressionStream('gzip');
+            refused = 'none';
+        }} catch (e) {{
+            refused = e.name + ': ' + e.message;
+        }}
+
+        // Ending one stream releases its codec.
+        const pieces = await through(streams[0], [new TextEncoder().encode('hello')]);
+        const again = concat(await through(new CompressionStream('gzip'), [new TextEncoder().encode('again')]));
+
+        return refused + ' / first=' + (pieces.length > 0) + ' again=' + (again.byteLength > 0);
+        "#
+    );
+
+    let out = answer_of(&body).await;
+    assert_eq!(
+        out,
+        format!(
+            "Error: too many compression streams are open at once (the limit is {limit}) / first=true again=true"
+        )
+    );
+}
+
+/// A codec the previous request left open is released when the context is
+/// reset for the next one, so the guest can no longer reach it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_reset_releases_every_codec() {
+    run_in_local(|| async {
+        let code = r#"
+            globalThis.outcome = 'pending';
+            globalThis.probe = () => {
+                try {
+                    __ow.compressionPush(globalThis.id, new Uint8Array(1));
+                    globalThis.outcome = 'open';
+                } catch (e) {
+                    globalThis.outcome = e.name + ': ' + e.message;
+                }
+            };
+            addEventListener('fetch', (event) => {
+                globalThis.id ??= __ow.compressionStart('deflate-raw', false);
+                event.respondWith(new Response('OK'));
+            });
+        "#;
+
+        let mut worker = Worker::new(Script::new(code), None).await.unwrap();
+
+        // The codec a request opens is still there after it, and gone after
+        // the reset that starts the next
+        let (task, _rx) = Event::fetch(HttpRequest {
+            method: HttpMethod::Get,
+            url: "http://localhost/".into(),
+            headers: HashMap::new(),
+            body: RequestBody::None,
+        });
+        worker.exec(task).await.unwrap();
+        worker.evaluate("probe();").unwrap();
+
+        let (task, _rx) = Event::fetch(HttpRequest {
+            method: HttpMethod::Get,
+            url: "http://localhost/".into(),
+            headers: HashMap::new(),
+            body: RequestBody::None,
+        });
+        worker.exec(task).await.unwrap();
+        worker
+            .evaluate("globalThis.before = outcome; probe();")
+            .unwrap();
+
+        let outcome = worker.with_isolate(|isolate, context| {
+            use std::pin::pin;
+
+            let scope = pin!(v8::HandleScope::new(isolate));
+            let mut scope = scope.init();
+            let context = v8::Local::new(&scope, context);
+            let scope = &mut v8::ContextScope::new(&mut scope, context);
+            let global = context.global(scope);
+            let key = v8::String::new(scope, "outcome").unwrap();
+            let value = global.get(scope, key.into()).unwrap();
+            value.to_rust_string_lossy(scope)
+        });
+
+        let before = worker.with_isolate(|isolate, context| {
+            use std::pin::pin;
+
+            let scope = pin!(v8::HandleScope::new(isolate));
+            let mut scope = scope.init();
+            let context = v8::Local::new(&scope, context);
+            let scope = &mut v8::ContextScope::new(&mut scope, context);
+            let global = context.global(scope);
+            let key = v8::String::new(scope, "before").unwrap();
+            let value = global.get(scope, key.into()).unwrap();
+            value.to_rust_string_lossy(scope)
+        });
+
+        assert_eq!(before, "open");
+        assert_eq!(
+            outcome,
+            "TypeError: the compression stream is already closed"
+        );
+    })
+    .await;
+}

@@ -18,7 +18,9 @@ pub use state::{FetchState, LogCallback, ResponseStreamState, StreamState, WebSo
 
 // Re-export setup functions
 pub use async_context::{clear_async_context, setup_async_context_natives};
-pub use compression::{OUTPUT_BOUND, setup_compression_natives};
+pub use compression::{
+    MAX_CODECS, OUTPUT_BOUND, clear_compression_state, setup_compression_natives,
+};
 pub use console::{log_callback_from_ops, setup_console};
 pub use fetch::setup_fetch;
 pub use native::register_op;

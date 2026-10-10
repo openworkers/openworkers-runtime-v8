@@ -1294,6 +1294,19 @@ impl ExecutionContext {
             .to_string(),
         ))?;
 
+        // The codecs of compression streams the previous request left open
+        {
+            use std::pin::pin;
+
+            let mut isolate = self.isolate();
+            let scope = pin!(v8::HandleScope::new(&mut isolate));
+            let mut scope = scope.init();
+            let context = v8::Local::new(&scope, &self.request.context);
+            let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+            bindings::clear_compression_state(scope);
+        }
+
         // 2. Reset Rust-side abort flag
         self.request.aborted.store(false, Ordering::SeqCst);
 
