@@ -858,3 +858,91 @@ async fn test_import_key_copies_the_key_material() {
 
     assert_eq!(run_fetch(body).await, "OK");
 }
+
+/// The ECDSA P-256 test key, as `openssl genpkey -algorithm EC` made it: the
+/// private key as PKCS#8 (`openssl pkcs8 -topk8 -nocrypt -outform DER`) and the
+/// public key as the uncompressed point, the last 65 bytes of its SPKI.
+const ECDSA_PKCS8_BASE64: &str = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgvs4o05WtZG9XxcbiyYIzDMz47WuZjhcqqPyLzCagUtqhRANCAATXzssSuh+l26Cx74l4OAXEF4f7Sj8YjuiYER5k32Cr3vFW3kosdGp3WwU1eB6GGSqMvwHsDM8fygaIIskd73vy";
+const ECDSA_POINT_BASE64: &str =
+    "BNfOyxK6H6XboLHviXg4BcQXh/tKPxiO6JgRHmTfYKve8VbeSix0andbBTV4HoYZKoy/AewMzx/KBogiyR3ve/I=";
+
+/// ECDSA sign and verify use the hash the algorithm names; SHA-256 is the one
+/// ring pairs with P-256, and the others were silently signed as SHA-256
+#[tokio::test(flavor = "current_thread")]
+async fn test_ecdsa_honours_the_hash() {
+    let body = r#"
+        const pair = await crypto.subtle.generateKey(
+            { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify']
+        );
+        const data = new Uint8Array([1, 2, 3]);
+        const signature = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pair.privateKey, data);
+
+        const refused = async (name, expected, op) => {
+            try {
+                await op();
+                return name + ' went through';
+            } catch (e) {
+                const named = expected === 'TypeError' ? e instanceof TypeError : e instanceof DOMException && e.name === expected;
+                return named ? null : name + ': ' + e;
+            }
+        };
+
+        const failures = (await Promise.all([
+            refused('sign with SHA-384', 'NotSupportedError',
+                () => crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-384' }, pair.privateKey, data)),
+            refused('sign with SHA-512', 'NotSupportedError',
+                () => crypto.subtle.sign({ name: 'ECDSA', hash: { name: 'SHA-512' } }, pair.privateKey, data)),
+            refused('verify with SHA-384', 'NotSupportedError',
+                () => crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-384' }, pair.publicKey, signature, data)),
+            refused('sign without a hash', 'TypeError',
+                () => crypto.subtle.sign({ name: 'ECDSA' }, pair.privateKey, data)),
+        ])).filter((failure) => failure !== null);
+
+        const verified = await crypto.subtle.verify({ name: 'ECDSA', hash: { name: 'SHA-256' } }, pair.publicKey, signature, data);
+        if (!verified) failures.push('SHA-256 does not verify');
+
+        return failures.length === 0 ? 'OK' : 'FAIL: ' + failures.join('; ');
+    "#;
+
+    assert_eq!(run_fetch(body).await, "OK");
+}
+
+/// A private key imported as PKCS#8 is parsed at import, and carries its
+/// public half, so it verifies what it signs; bytes that are no key reject there
+#[tokio::test(flavor = "current_thread")]
+async fn test_ecdsa_pkcs8_import_carries_the_public_key() {
+    let body = format!(
+        r#"
+        const fromBase64 = (text) => Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
+        const pkcs8 = fromBase64('{ECDSA_PKCS8_BASE64}');
+        const point = fromBase64('{ECDSA_POINT_BASE64}');
+        const algorithm = {{ name: 'ECDSA', hash: 'SHA-256' }};
+        const data = new TextEncoder().encode('hello world');
+
+        const privateKey = await crypto.subtle.importKey(
+            'pkcs8', pkcs8, {{ name: 'ECDSA', namedCurve: 'P-256' }}, false, ['sign']
+        );
+        const publicKey = await crypto.subtle.importKey(
+            'raw', point, {{ name: 'ECDSA', namedCurve: 'P-256' }}, false, ['verify']
+        );
+
+        const signature = await crypto.subtle.sign(algorithm, privateKey, data);
+        const byPrivate = await crypto.subtle.verify(algorithm, privateKey, signature, data);
+        const byPublic = await crypto.subtle.verify(algorithm, publicKey, signature, data);
+        const wrong = await crypto.subtle.verify(algorithm, privateKey, signature, new Uint8Array([0]));
+
+        let rejected = 'no';
+        try {{
+            await crypto.subtle.importKey('pkcs8', point, {{ name: 'ECDSA', namedCurve: 'P-256' }}, false, ['sign']);
+        }} catch (e) {{
+            rejected = e instanceof DOMException && e.name === 'DataError' ? 'yes' : 'other: ' + e;
+        }}
+
+        return byPrivate && byPublic && !wrong && rejected === 'yes'
+            ? 'OK'
+            : `FAIL: byPrivate=${{byPrivate}} byPublic=${{byPublic}} wrong=${{wrong}} rejected=${{rejected}}`;
+        "#
+    );
+
+    assert_eq!(run_fetch(&body).await, "OK");
+}
