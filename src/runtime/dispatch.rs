@@ -118,13 +118,18 @@ pub(crate) fn dispatch(
                 callback_handlers::populate_fetch_meta(scope, meta_obj, &meta, stream_id);
                 let callback = v8::Local::new(scope, &callback);
 
-                // Resolving builds the Response, which can refuse what it is given.
-                if let (Guest::Threw(thrown), Some(on_error)) =
-                    (call_guest(scope, callback, &[meta_obj.into()]), on_error)
-                {
-                    let on_error = v8::Local::new(scope, &on_error);
-                    let exception = v8::Local::new(scope, &thrown);
-                    call_guest(scope, on_error, &[exception]);
+                // Resolving builds the Response, which can refuse what it is
+                // given. Nothing will read the body then, so its stream goes,
+                // or the pump filling it waits on the consumer to the end of
+                // the request.
+                if let Guest::Threw(thrown) = call_guest(scope, callback, &[meta_obj.into()]) {
+                    tables.stream_manager.close_stream(stream_id);
+
+                    if let Some(on_error) = on_error {
+                        let on_error = v8::Local::new(scope, &on_error);
+                        let exception = v8::Local::new(scope, &thrown);
+                        call_guest(scope, on_error, &[exception]);
+                    }
                 }
             }
         }
