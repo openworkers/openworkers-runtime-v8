@@ -946,3 +946,20 @@ async fn test_ecdsa_pkcs8_import_carries_the_public_key() {
 
     assert_eq!(run_fetch(&body).await, "OK");
 }
+
+/// An HMAC key is not registered anywhere: nothing numbers it, and nothing
+/// keeps it alive after the caller lets it go
+#[tokio::test(flavor = "current_thread")]
+async fn test_hmac_key_is_not_retained() {
+    let body = r#"
+        const key = await crypto.subtle.importKey(
+            'raw', new Uint8Array(16), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+        );
+
+        return key.__keyId === undefined && Object.keys(key).length === 0
+            ? 'OK'
+            : 'FAIL: own keys ' + Object.keys(key).join(', ');
+    "#;
+
+    assert_eq!(run_fetch(body).await, "OK");
+}

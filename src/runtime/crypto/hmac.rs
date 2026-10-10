@@ -143,10 +143,6 @@ pub(super) fn setup_hmac(scope: &mut v8::PinScope, subtle_obj: v8::Local<v8::Obj
 /// The HMAC importKey, sign and verify wrappers: the first in the chain the
 /// other algorithms extend. Installed by mod.rs with the rest.
 pub(super) const JS: &str = r#"
-        // Simple key storage (per-isolate)
-        const __cryptoKeys = new Map();
-        let __nextKeyId = 1;
-
         crypto.subtle.importKey = function(format, keyData, algorithm, extractable, keyUsages) {
             return new Promise((resolve, reject) => {
                 try {
@@ -169,16 +165,11 @@ pub(super) const JS: &str = r#"
 
                     const keyBytes = __copyBufferSource(keyData);
 
-                    const keyId = __nextKeyId++;
-                    const key = __createCryptoKey(
+                    resolve(__createCryptoKey(
                         'secret', extractable,
                         { name: 'HMAC', hash: { name: hashName } },
                         keyUsages, keyBytes
-                    );
-                    key.__keyId = keyId;
-
-                    __cryptoKeys.set(keyId, key);
-                    resolve(key);
+                    ));
                 } catch (e) {
                     reject(e);
                 }
