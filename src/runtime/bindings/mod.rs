@@ -18,7 +18,7 @@ pub use state::{FetchState, LogCallback, ResponseStreamState, StreamState, WebSo
 
 // Re-export setup functions
 pub use async_context::{clear_async_context, setup_async_context_natives};
-pub use compression::setup_compression_natives;
+pub use compression::{OUTPUT_BOUND, setup_compression_natives};
 pub use console::{log_callback_from_ops, setup_console};
 pub use fetch::setup_fetch;
 pub use native::register_op;
@@ -43,6 +43,9 @@ pub fn setup_surface(scope: &mut v8::PinScope) {
         openworkers_wintertc::SURFACE
             .iter()
             .map(|module| module.source)
+            // The compression streams come last: this runtime drives its codecs
+            // a bounded piece at a time, which the shared ones do not.
+            .chain(std::iter::once(compression::SURFACE))
             .collect::<Vec<_>>()
             .join("\n")
     });
