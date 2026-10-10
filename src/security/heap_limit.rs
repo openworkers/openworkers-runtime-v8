@@ -42,6 +42,20 @@ pub struct HeapLimitState {
 }
 
 impl HeapLimitState {
+    /// Puts the limit back where it was configured, after a callback raised
+    /// it to let a request end. V8 keeps a raised limit for the life of the
+    /// isolate otherwise, so each hit on a pooled isolate would leave it
+    /// larger than the last. The caller holds the isolate's lock.
+    pub fn restore(&self, isolate: &mut v8::Isolate) {
+        let state_ptr = self as *const HeapLimitState as *mut c_void;
+
+        // V8 restores no further than the live heap, and what the stopped
+        // request kept is garbage by now
+        isolate.low_memory_notification();
+        isolate.remove_near_heap_limit_callback(near_heap_limit_callback, self.max_heap_bytes);
+        isolate.add_near_heap_limit_callback(near_heap_limit_callback, state_ptr);
+    }
+
     /// Create a new heap limit state.
     pub fn new(
         isolate_handle: IsolateHandle,

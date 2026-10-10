@@ -189,6 +189,8 @@ impl ExecutionContext {
         // No turn holds the isolate here: a memory limit hit while the script
         // loads belongs to the event that loads it
         if pooled.memory_limit_hit.swap(false, Ordering::SeqCst) {
+            pooled.heap_limit_state.restore(isolate);
+
             return Err(TerminationReason::MemoryLimit);
         }
 
@@ -715,6 +717,8 @@ impl ExecutionContext {
             wall_guard.was_triggered(),
         );
 
+        self.restore_heap_limit();
+
         // The waitUntil work drain_waituntil runs next spends what is left of
         // this budget. On an error there is none to run, and the guards drop.
         if outcome.is_ok() {
@@ -762,7 +766,7 @@ impl ExecutionContext {
             .await_event_loop(&wall_guard, &cpu_guard, EventLoopExit::FullyComplete, None)
             .await;
 
-        self.check_termination_reason(
+        let outcome = self.check_termination_reason(
             result.map(|_| HttpResponse {
                 status: 200,
                 headers: vec![],
@@ -773,7 +777,23 @@ impl ExecutionContext {
                 .map(|g| g.was_terminated())
                 .unwrap_or(false),
             wall_guard.was_triggered(),
-        )
+        );
+
+        self.restore_heap_limit();
+
+        outcome
+    }
+
+    /// Puts the heap limit back after an event that hit it: the callback
+    /// raised it so the event could end, and V8 would keep it raised.
+    fn restore_heap_limit(&self) {
+        if !self.memory_hit.load(Ordering::SeqCst) {
+            return;
+        }
+
+        let _lock = self.pooled.lock();
+        let mut isolate = self.isolate();
+        self.pooled.heap_limit_state.restore(&mut isolate);
     }
 
     /// Check termination reason based on execution result and guard states

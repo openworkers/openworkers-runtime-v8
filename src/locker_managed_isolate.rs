@@ -35,8 +35,7 @@ pub struct LockerManagedIsolate {
     /// The request that runs JS here, for the guards that stop one request.
     pub(crate) turn: Arc<Turn>,
     /// Heap limit state - must be kept alive for the isolate's lifetime
-    #[allow(dead_code)]
-    _heap_limit_state: Box<HeapLimitState>,
+    pub(crate) heap_limit_state: Box<HeapLimitState>,
 }
 
 impl LockerManagedIsolate {
@@ -81,7 +80,7 @@ impl LockerManagedIsolate {
             pending_memory_delta: Arc::new(AtomicI64::new(0)),
             foreground,
             turn,
-            _heap_limit_state: heap_limit_state,
+            heap_limit_state,
         }
     }
 
