@@ -94,3 +94,69 @@ async fn test_typed_rows_reach_the_guest() {
     })
     .await;
 }
+
+struct BigIds;
+
+impl OperationsHandler for BigIds {
+    fn handle_binding_database(
+        &self,
+        _binding: &str,
+        _op: DatabaseOp,
+    ) -> OpFuture<'_, DatabaseResult> {
+        Box::pin(async move {
+            DatabaseResult::Table {
+                columns: vec!["small".to_string(), "big".to_string()],
+                rows: vec![vec![
+                    SqlPrimitive::Int(9_007_199_254_740_992),
+                    SqlPrimitive::Int(9_007_199_254_740_993),
+                ]],
+            }
+        })
+    }
+}
+
+/// An integer a number cannot hold exactly is not rounded to its neighbour
+#[tokio::test(flavor = "current_thread")]
+async fn test_large_integers_keep_their_value() {
+    run_in_local(|| async {
+        let code = r#"
+            addEventListener('fetch', (event) => {
+                event.respondWith(
+                    env.DB.query('select 1').then(rows => new Response(
+                        typeof rows[0].small + ' ' + typeof rows[0].big + ' ' + String(rows[0].big)
+                    ))
+                );
+            });
+        "#;
+
+        let script = Script::with_bindings(
+            code,
+            None,
+            vec![BindingInfo::new("DB", BindingType::Database)],
+        );
+
+        let ops: OperationsHandle = Arc::new(BigIds);
+        let mut worker = openworkers_runtime_v8::Worker::new_with_ops(script, None, ops)
+            .await
+            .unwrap();
+
+        let req = HttpRequest {
+            method: HttpMethod::Get,
+            url: "http://localhost/".to_string(),
+            headers: HashMap::new(),
+            body: RequestBody::None,
+        };
+
+        let (task, rx) = Event::fetch(req);
+        worker.exec(task).await.unwrap();
+
+        let response = rx.await.unwrap();
+        let body = response.body.collect().await.unwrap().unwrap();
+
+        assert_eq!(
+            String::from_utf8_lossy(&body),
+            "number bigint 9007199254740993"
+        );
+    })
+    .await;
+}

@@ -388,10 +388,13 @@ pub fn populate_database_result(
     }
 }
 
+/// The largest integer a JavaScript number holds exactly.
+const MAX_EXACT_INT: u64 = 1 << 53;
+
 /// One SQL value as the guest sees it.
 ///
-/// Both integer kinds become a JavaScript number, like the JSON the `Rows`
-/// shape parses to, and a blob becomes an array of byte values, which is what
+/// Integers become a JavaScript number, like the JSON the `Rows` shape parses
+/// to, or a BigInt when a number would round them, and a blob becomes an array of byte values, which is what
 /// D1 hands a worker for a BLOB column.
 fn sql_primitive_to_v8<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -400,6 +403,11 @@ fn sql_primitive_to_v8<'s>(
     match value {
         SqlPrimitive::Null => v8::null(scope).into(),
         SqlPrimitive::Bool(value) => v8::Boolean::new(scope, *value).into(),
+        // A number holds an integer exactly up to 2^53; past it the value
+        // would be rounded to a neighbour, so it reaches the guest as a BigInt
+        SqlPrimitive::Int(value) if value.unsigned_abs() > MAX_EXACT_INT => {
+            v8::BigInt::new_from_i64(scope, *value).into()
+        }
         SqlPrimitive::Int(value) => v8::Number::new(scope, *value as f64).into(),
         SqlPrimitive::Float(value) => v8::Number::new(scope, *value).into(),
         SqlPrimitive::String(value) => v8::String::new(scope, value).unwrap().into(),
