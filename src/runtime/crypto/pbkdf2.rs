@@ -50,7 +50,11 @@ fn derivation(
     if !length.is_number() {
         return Err("PBKDF2: the length is not a number".into());
     }
-    let length_bytes = length.number_value(scope).unwrap() as usize / 8;
+    let bits = length.number_value(scope).unwrap();
+    if !bits.is_finite() || bits < 0.0 || bits % 8.0 != 0.0 {
+        return Err("PBKDF2: the length is not a whole number of bytes".into());
+    }
+    let length_bytes = bits as usize / 8;
     if length_bytes > MAX_OUTPUT_BYTES {
         return Err(format!(
             "PBKDF2: the length is over {} bits",

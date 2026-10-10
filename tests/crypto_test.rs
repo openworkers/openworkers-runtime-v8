@@ -618,6 +618,12 @@ async fn test_pbkdf2_refuses_a_huge_output() {
                         return new Response('FAIL: derived');
                     } catch (e) {
                         const small = await crypto.subtle.deriveBits(algorithm, key, 256);
+
+                        try {
+                            await crypto.subtle.deriveBits(algorithm, key, 13);
+                            return new Response('FAIL: 13 bits');
+                        } catch (e) {}
+
                         return new Response(small.byteLength === 32 ? 'OK' : 'FAIL: small');
                     }
                 })());
