@@ -164,7 +164,11 @@ impl StreamManager {
                         // Don't put back - stream is finished
                     }
                     StreamChunk::Data(_) => {
-                        self.receivers.lock().unwrap().insert(stream_id, rx);
+                        // A stream closed during the read stays closed: its
+                        // receiver would otherwise outlive it until the reset
+                        if self.senders.lock().unwrap().contains_key(&stream_id) {
+                            self.receivers.lock().unwrap().insert(stream_id, rx);
+                        }
                     }
                 }
             }
@@ -299,6 +303,34 @@ mod tests {
             StreamChunk::Data(data) => assert_eq!(data, Bytes::from("test")),
             _ => panic!("Expected data chunk"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_read_in_flight_does_not_revive_a_closed_stream() {
+        let manager = Arc::new(StreamManager::new());
+        let id = manager.create_stream("closing".to_string());
+        let sender = manager.senders.lock().unwrap().get(&id).cloned().unwrap();
+
+        let reading = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move { manager.read_chunk(id).await }
+        });
+        tokio::task::yield_now().await;
+
+        // The consumer leaves while the read waits, and a pump that took the
+        // sender before that still delivers
+        manager.close_stream(id);
+        sender
+            .send(StreamChunk::Data(Bytes::from("late")))
+            .await
+            .unwrap();
+
+        assert!(matches!(reading.await.unwrap(), Ok(StreamChunk::Data(_))));
+        assert!(
+            manager.take_receiver(id).is_none(),
+            "the closed stream came back"
+        );
+        assert_eq!(manager.active_count(), 0);
     }
 
     #[tokio::test]
