@@ -8,6 +8,9 @@
 //! Snapshot on/off is chosen outside this process: an empty or missing file at
 //! RUNTIME_SNAPSHOT_PATH means no snapshot. The header line says which was used.
 
+// Benchmarks take their inputs from the environment; the lint is for the runtime.
+#![allow(clippy::disallowed_methods)]
+
 use openworkers_core::{
     BindingInfo, Event, HttpMethod, HttpRequest, HttpResponse, LogLevel, OpFuture,
     OperationsHandle, OperationsHandler, RequestBody, ResponseBody, RuntimeLimits, Script,

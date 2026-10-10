@@ -10,6 +10,9 @@
 //!   OW_V8_FLAGS   forwarded to v8::V8::set_flags_from_string by the runtime
 //!   OW_URL        route to render, default http://localhost/ssr-bench
 
+// Benchmarks take their inputs from the environment; the lint is for the runtime.
+#![allow(clippy::disallowed_methods)]
+
 use openworkers_core::{
     BindingInfo, Event, HttpMethod, HttpRequest, HttpResponse, LogLevel, OpFuture,
     OperationsHandle, OperationsHandler, RequestBody, ResponseBody, RuntimeLimits, Script,
