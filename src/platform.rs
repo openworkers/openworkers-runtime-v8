@@ -48,7 +48,9 @@ pub fn get_platform() -> &'static v8::SharedRef<v8::Platform> {
     })
 }
 
-/// Get the runtime snapshot, loading it once from disk.
+/// Get the runtime snapshot, loading it once from disk: from
+/// `OW_RUNTIME_SNAPSHOT_PATH` when set, else from the path baked in at
+/// build time (`RUNTIME_SNAPSHOT_PATH`).
 ///
 /// Returns `None` if:
 /// - The snapshot file doesn't exist
@@ -60,11 +62,18 @@ pub fn get_snapshot() -> Option<&'static [u8]> {
     *SNAPSHOT.get_or_init(|| {
         const RUNTIME_SNAPSHOT_PATH: &str = env!("RUNTIME_SNAPSHOT_PATH");
 
-        match std::fs::read(RUNTIME_SNAPSHOT_PATH) {
+        // The path baked in at build time is the build machine's. Like the
+        // V8 flags, the snapshot is process-wide, so no config struct can
+        // carry where a deployment keeps it.
+        #[allow(clippy::disallowed_methods)]
+        let path = std::env::var("OW_RUNTIME_SNAPSHOT_PATH")
+            .unwrap_or_else(|_| RUNTIME_SNAPSHOT_PATH.to_string());
+
+        match std::fs::read(&path) {
             Ok(bytes) if bytes.is_empty() => {
                 tracing::warn!(
                     "Runtime snapshot file is empty: {} - running without snapshot (slower startup)",
-                    RUNTIME_SNAPSHOT_PATH
+                    path
                 );
                 None
             }
@@ -72,14 +81,14 @@ pub fn get_snapshot() -> Option<&'static [u8]> {
                 tracing::info!(
                     "Loaded runtime snapshot ({} bytes) from {}",
                     bytes.len(),
-                    RUNTIME_SNAPSHOT_PATH
+                    path
                 );
                 Some(Box::leak(bytes.into_boxed_slice()) as &'static [u8])
             }
             Err(e) => {
                 tracing::warn!(
                     "Failed to load runtime snapshot from {}: {} - running without snapshot (slower startup)",
-                    RUNTIME_SNAPSHOT_PATH,
+                    path,
                     e
                 );
                 None
