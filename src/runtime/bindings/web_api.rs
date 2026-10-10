@@ -277,14 +277,16 @@ pub fn setup_fetch_helpers(scope: &mut v8::PinScope) {
                 body = options.body !== undefined ? options.body : null;
             }
 
-            // Normalize Headers instance to plain object
-            if (headers instanceof Headers) {
-                const obj = {};
-                for (const [key, value] of headers) {
-                    obj[key] = value;
-                }
-                headers = obj;
+            // Every form of HeadersInit goes through Headers, which is where
+            // names and values are checked: a plain object or an array of
+            // pairs handed to the host as it came would skip that, and the
+            // host takes only a flat object of strings.
+            headers = new Headers(headers);
+            const flat = {};
+            for (const [key, value] of headers) {
+                flat[key] = value;
             }
+            headers = flat;
 
             return { url, method, headers, body };
         };
