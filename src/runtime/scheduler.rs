@@ -123,7 +123,17 @@ struct TimerResult {
     interval_ms: u64,
 }
 
+/// The least an interval waits between two firings. At 0 the timer is due
+/// again as soon as it fires, and the loop spins posting callbacks.
+const MIN_INTERVAL_MS: u64 = 1;
+
 fn create_timer(id: CallbackId, delay_ms: u64, is_interval: bool) -> Timer {
+    let delay_ms = if is_interval {
+        delay_ms.max(MIN_INTERVAL_MS)
+    } else {
+        delay_ms
+    };
+
     Timer {
         id,
         is_interval,
@@ -460,6 +470,12 @@ pub async fn run_event_loop(
                         request_cancel.cancel();
                         request_cancel = cancel.child_token();
                         ws_commands.clear();
+
+                        // The previous request's timers go with it: the
+                        // context dropped their callbacks, and an interval
+                        // would otherwise fire into an idle context forever
+                        timers = FuturesUnordered::new();
+                        cancelled.clear();
 
                         if let Some(abort) = abort {
                             let scope = request_cancel.clone();

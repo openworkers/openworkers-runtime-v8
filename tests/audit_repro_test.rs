@@ -20,11 +20,10 @@ use openworkers_runtime_v8::runtime::{CallbackMessage, SchedulerMessage, run_eve
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// 1. An interval set by a request keeps firing into the event loop after the
-/// request ends (BeginRequest for the next one), so a cached context collects
-/// ExecuteInterval messages forever.
+/// 1. An interval set by a request used to keep firing into the event loop
+/// after the request ended (BeginRequest for the next one), so a cached
+/// context collected ExecuteInterval messages forever.
 #[tokio::test]
-#[ignore = "open bug, see the doc comment"]
 async fn interval_outlives_its_request() {
     let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel();
     let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
