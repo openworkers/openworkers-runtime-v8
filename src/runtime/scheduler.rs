@@ -59,6 +59,8 @@ pub enum SchedulerMessage {
     ScheduleTimeout(CallbackId, u64),
     ScheduleInterval(CallbackId, u64),
     ClearTimer(CallbackId),
+    /// Drop every timer, for a context that starts over between requests.
+    ClearAllTimers,
     FetchStreaming(CallbackId, HttpRequest),
     BindingFetch(CallbackId, String, HttpRequest),
     BindingStorage(CallbackId, String, StorageOp),
@@ -176,6 +178,11 @@ pub async fn run_event_loop(
 
                     SchedulerMessage::ClearTimer(id) => {
                         cancelled.insert(id);
+                    }
+
+                    SchedulerMessage::ClearAllTimers => {
+                        timers = FuturesUnordered::new();
+                        cancelled.clear();
                     }
 
                     SchedulerMessage::FetchStreaming(promise_id, request) => {
@@ -766,4 +773,43 @@ fn status_text(status: u16) -> String {
         _ => "",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn clearing_all_timers_stops_an_interval() {
+        let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel();
+        let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
+        let ops: OperationsHandle = Arc::new(openworkers_core::DefaultOps);
+
+        tokio::spawn(run_event_loop(
+            scheduler_rx,
+            callback_tx,
+            Arc::new(Notify::new()),
+            Arc::new(StreamManager::new()),
+            ops,
+            CancellationToken::new(),
+        ));
+
+        scheduler_tx
+            .send(SchedulerMessage::ScheduleInterval(1, 10))
+            .unwrap();
+
+        // The interval runs
+        assert!(matches!(
+            callback_rx.recv().await,
+            Some(CallbackMessage::ExecuteInterval(1))
+        ));
+
+        scheduler_tx.send(SchedulerMessage::ClearAllTimers).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        while callback_rx.try_recv().is_ok() {}
+
+        // And no longer does
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(callback_rx.try_recv().is_err());
+    }
 }

@@ -1278,6 +1278,13 @@ impl ExecutionContext {
             .to_string(),
         ))?;
 
+        // The scheduler keeps a timer until it fires, and an interval for good:
+        // the previous event's must not run into this one
+        let _ = self
+            .request
+            .scheduler_tx
+            .send(crate::runtime::SchedulerMessage::ClearAllTimers);
+
         // 2. Reset Rust-side abort flag
         self.request.aborted.store(false, Ordering::SeqCst);
 
