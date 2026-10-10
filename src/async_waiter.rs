@@ -52,16 +52,29 @@ impl AsyncWaiter {
         {
             true
         } else {
-            self.queue.lock().unwrap().push_back(cx.waker().clone());
+            let mut queue = self.queue.lock().unwrap();
+
+            // A task polled again before it was woken is already in line
+            if !queue.iter().any(|waker| waker.will_wake(cx.waker())) {
+                queue.push_back(cx.waker().clone());
+            }
+
             false
         }
     }
 
-    /// Release the turn. Wakes the next waiter in FIFO order.
+    /// Release the turn. Wakes the waiters in FIFO order; the first to poll
+    /// takes the turn, and the others line up again.
+    ///
+    /// Waking only the head would strand the rest whenever the head is a task
+    /// that was dropped while it waited: its waker is still queued, and
+    /// nothing else would ever wake the others.
     pub fn unlock(&self) {
         self.locked.store(false, Ordering::Release);
 
-        if let Some(waker) = self.queue.lock().unwrap().pop_front() {
+        let waiters = std::mem::take(&mut *self.queue.lock().unwrap());
+
+        for waker in waiters {
             waker.wake();
         }
     }
@@ -116,18 +129,47 @@ mod tests {
         assert!(!waiter.try_lock(&mut cx));
         assert_eq!(waiter.queue_len(), 1);
 
-        // Third lock also fails
+        // The same task polled again is not queued twice
         assert!(!waiter.try_lock(&mut cx));
-        assert_eq!(waiter.queue_len(), 2);
+        assert_eq!(waiter.queue_len(), 1);
 
-        // Unlock wakes first waiter, drains one from queue
+        // Unlock wakes the waiters, who line up again if they lose the turn
         waiter.unlock();
         assert!(waiter.is_free());
-        assert_eq!(waiter.queue_len(), 1);
+        assert_eq!(waiter.queue_len(), 0);
 
         // Can lock again after unlock
         assert!(waiter.try_lock(&mut cx));
         assert!(!waiter.is_free());
+    }
+
+    #[test]
+    fn test_unlock_wakes_every_waiter() {
+        let waiter = AsyncWaiter::new();
+        let waker = noop_waker();
+        let mut cx = test_context(&waker);
+
+        assert!(waiter.try_lock(&mut cx));
+
+        // Distinct wakers, as distinct tasks have
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        struct Counter(Arc<std::sync::atomic::AtomicUsize>);
+        impl std::task::Wake for Counter {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        for _ in 0..3 {
+            let waker = Waker::from(Arc::new(Counter(wakes.clone())));
+            let mut cx = test_context(&waker);
+            assert!(!waiter.try_lock(&mut cx));
+        }
+
+        assert_eq!(waiter.queue_len(), 3);
+        waiter.unlock();
+        assert_eq!(wakes.load(Ordering::SeqCst), 3);
     }
 
     #[test]
