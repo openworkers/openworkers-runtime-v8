@@ -602,3 +602,42 @@ async fn test_aes_gcm_rejects_wrong_additional_data() {
     })
     .await;
 }
+
+/// The output of a native op is Rust memory the isolate caps do not see
+#[tokio::test(flavor = "current_thread")]
+async fn test_pbkdf2_refuses_a_huge_output() {
+    run_in_local(|| async {
+        let code = r#"
+            addEventListener('fetch', (event) => {
+                event.respondWith((async () => {
+                    const key = await crypto.subtle.importKey('raw', new Uint8Array([1]), { name: 'PBKDF2' }, false, ['deriveBits']);
+                    const algorithm = { name: 'PBKDF2', salt: new Uint8Array([1]), iterations: 1, hash: 'SHA-256' };
+
+                    try {
+                        await crypto.subtle.deriveBits(algorithm, key, 8 * 1024 * 1024 * 400);
+                        return new Response('FAIL: derived');
+                    } catch (e) {
+                        const small = await crypto.subtle.deriveBits(algorithm, key, 256);
+                        return new Response(small.byteLength === 32 ? 'OK' : 'FAIL: small');
+                    }
+                })());
+            });
+        "#;
+
+        let mut worker = Worker::new(Script::new(code), None).await.unwrap();
+        let req = HttpRequest {
+            method: HttpMethod::Get,
+            url: "http://localhost/".to_string(),
+            headers: HashMap::new(),
+            body: RequestBody::None,
+        };
+
+        let (task, rx) = Event::fetch(req);
+        worker.exec(task).await.unwrap();
+        let response = rx.await.unwrap();
+        let body = &response.body.collect().await.unwrap().unwrap();
+
+        assert_eq!(std::str::from_utf8(body).unwrap(), "OK");
+    })
+    .await;
+}

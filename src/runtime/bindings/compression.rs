@@ -20,6 +20,13 @@ use flate2::write::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use v8;
 
+/// The most one chunk may expand to, in bytes.
+const MAX_OUTPUT: usize = 32 * 1024 * 1024;
+
+/// The input handed to a codec at a time, so the output is checked often
+/// enough to stop a bomb within a few times `MAX_OUTPUT`.
+const INPUT_SLICE: usize = 16 * 1024;
+
 enum Codec {
     ZlibEncode(ZlibEncoder<Vec<u8>>),
     RawEncode(DeflateEncoder<Vec<u8>>),
@@ -48,10 +55,22 @@ impl Codec {
 
     /// Whatever the codec can emit from `bytes`, which for a first small chunk
     /// is usually nothing.
+    ///
+    /// The output lives in Rust memory, outside the caps of the isolate, so the
+    /// input goes in by slices and the call fails once the output passes
+    /// `MAX_OUTPUT`: a few kilobytes of deflate expand a thousandfold.
     fn push(&mut self, bytes: &[u8]) -> std::io::Result<Vec<u8>> {
         macro_rules! push_into {
             ($writer:expr) => {{
-                $writer.write_all(bytes)?;
+                for slice in bytes.chunks(INPUT_SLICE) {
+                    $writer.write_all(slice)?;
+
+                    if $writer.get_ref().len() > MAX_OUTPUT {
+                        return Err(std::io::Error::other(format!(
+                            "the output passes {MAX_OUTPUT} bytes for one chunk"
+                        )));
+                    }
+                }
 
                 Ok(std::mem::take($writer.get_mut()))
             }};
@@ -256,4 +275,38 @@ pub fn setup_compression_natives(scope: &mut v8::PinScope) {
 
     let release = v8::Function::new(scope, compression_drop).unwrap();
     super::native::register_op(scope, "compressionDrop", release.into());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_chunk_that_expands_past_the_cap_is_refused() {
+        let mut encoder = Codec::new("gzip", false).unwrap();
+        let zeros = vec![0u8; 1024 * 1024];
+        let mut packed = Vec::new();
+
+        for _ in 0..(MAX_OUTPUT / zeros.len() + 8) {
+            packed.extend(encoder.push(&zeros).unwrap());
+        }
+        packed.extend(encoder.finish().unwrap());
+        assert!(packed.len() < 1024 * 1024);
+
+        let mut decoder = Codec::new("gzip", true).unwrap();
+        assert!(decoder.push(&packed).is_err());
+    }
+
+    #[test]
+    fn a_small_chunk_round_trips() {
+        let mut encoder = Codec::new("deflate", false).unwrap();
+        let mut packed = encoder.push(b"hello hello hello").unwrap();
+        packed.extend(encoder.finish().unwrap());
+
+        let mut decoder = Codec::new("deflate", true).unwrap();
+        let mut out = decoder.push(&packed).unwrap();
+        out.extend(decoder.finish().unwrap());
+
+        assert_eq!(out, b"hello hello hello");
+    }
 }

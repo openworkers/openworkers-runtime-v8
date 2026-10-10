@@ -5,6 +5,10 @@ use v8;
 use super::uint8_array_arg;
 use crate::v8_helpers::{create_array_buffer_from_vec, throw_type_error};
 
+/// The most bytes one derivation may ask for. The output is Rust memory, which
+/// the caps of the isolate do not see, and real uses want a few dozen bytes.
+const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+
 struct Derivation {
     algorithm: pbkdf2::Algorithm,
     password: Vec<u8>,
@@ -47,6 +51,12 @@ fn derivation(
         return Err("PBKDF2: the length is not a number".into());
     }
     let length_bytes = length.number_value(scope).unwrap() as usize / 8;
+    if length_bytes > MAX_OUTPUT_BYTES {
+        return Err(format!(
+            "PBKDF2: the length is over {} bits",
+            MAX_OUTPUT_BYTES * 8
+        ));
+    }
 
     Ok(Derivation {
         algorithm,
