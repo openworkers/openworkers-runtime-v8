@@ -428,6 +428,15 @@ pub fn setup_fetch(
     // JavaScript fetch implementation using Promises with streaming support
     let code = r#"
         // Serialize FormData to multipart/form-data
+        // Per the HTML spec, the quote and the line breaks cannot sit raw in the
+        // quoted name of a part header, or a field could write headers of its own.
+        function __escapeFormName(name) {
+            return String(name)
+                .replace(/\r/g, '%0D')
+                .replace(/\n/g, '%0A')
+                .replace(/"/g, '%22');
+        }
+
         async function __serializeFormData(formData) {
             const boundary = '----OpenWorkersBoundary' + Math.random().toString(36).slice(2);
             const CRLF = '\r\n';
@@ -438,7 +447,7 @@ pub fn setup_fetch(
 
                 if (value instanceof Blob) {
                     const fname = filename || (value.name ? value.name : 'blob');
-                    part += 'Content-Disposition: form-data; name="' + name + '"; filename="' + fname + '"' + CRLF;
+                    part += 'Content-Disposition: form-data; name="' + __escapeFormName(name) + '"; filename="' + __escapeFormName(fname) + '"' + CRLF;
                     part += 'Content-Type: ' + (value.type || 'application/octet-stream') + CRLF + CRLF;
 
                     const headerBytes = new TextEncoder().encode(part);
@@ -449,7 +458,7 @@ pub fn setup_fetch(
                     parts.push(blobBytes);
                     parts.push(crlfBytes);
                 } else {
-                    part += 'Content-Disposition: form-data; name="' + name + '"' + CRLF + CRLF;
+                    part += 'Content-Disposition: form-data; name="' + __escapeFormName(name) + '"' + CRLF + CRLF;
                     part += String(value) + CRLF;
                     parts.push(new TextEncoder().encode(part));
                 }

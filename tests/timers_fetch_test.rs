@@ -326,3 +326,28 @@ async fn test_throwing_timeout_leaves_no_entry() {
     })
     .await;
 }
+
+/// A field name cannot write headers of its own into the multipart body
+#[tokio::test(flavor = "current_thread")]
+async fn test_form_data_names_are_escaped() {
+    run_in_local(|| async {
+        let mut worker = Worker::new(Script::new(""), None).await.unwrap();
+
+        worker
+            .evaluate(
+                r#"
+                const form = new FormData();
+                form.append('a"b\r\nX-Injected: yes', 'v');
+                __serializeFormData(form).then((out) => {
+                    const text = new TextDecoder().decode(out.body);
+                    globalThis.__safe = !text.includes('\r\nX-Injected') && text.includes('%22') ? 1 : 2;
+                });
+                "#,
+            )
+            .unwrap();
+
+        worker.process_callbacks();
+        assert_eq!(worker.get_global_u32("__safe"), Some(1));
+    })
+    .await;
+}
