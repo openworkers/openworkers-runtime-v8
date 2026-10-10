@@ -202,12 +202,15 @@ impl StreamManager {
     }
 
     /// Clear all streams (used for context reuse between requests)
+    ///
+    /// The id counter keeps counting: a pump of the previous request that
+    /// writes late must find no stream, not the next request's. Senders are
+    /// looked up by id at each write, and a guest can keep a native stream
+    /// of one request in a global and read it in the next.
     pub fn clear(&self) {
         self.senders.lock().unwrap().clear();
         self.receivers.lock().unwrap().clear();
         self.metadata.lock().unwrap().clear();
-        // Reset next_id so stream IDs don't grow unbounded across reuses
-        *self.next_id.lock().unwrap() = 1;
     }
 
     /// Count active streams

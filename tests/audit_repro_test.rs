@@ -85,11 +85,10 @@ impl OperationsHandler for HangingFetch {
     }
 }
 
-/// 2. Stream ids restart at 1 on `clear()`, and the reader of a cancelled
-/// upstream body writes `Done` by id after it is cancelled, so the next
-/// request's stream 1 gets a `Done` it never produced.
+/// 2. Stream ids used to restart at 1 on `clear()`, and the reader of a
+/// cancelled upstream body wrote `Done` by id after it was cancelled, so the
+/// next request's stream 1 got a `Done` it never produced.
 #[tokio::test]
-#[ignore = "open bug, see the doc comment"]
 async fn stale_reader_ends_the_next_requests_stream() {
     let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel();
     let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
@@ -142,25 +141,26 @@ async fn stale_reader_ends_the_next_requests_stream() {
     // Request A ends; the context is reset for request B.
     manager.clear();
 
-    // Request B gets a stream of its own, which comes out with the same id.
+    // Request B gets a stream of its own, under an id of its own.
     let new_id = manager.create_stream("request B body".into());
-    assert_eq!(new_id, old_id, "ids restart after clear()");
+    assert_ne!(new_id, old_id, "ids must not repeat after clear()");
 
     scheduler_tx
         .send(SchedulerMessage::BeginRequest(None))
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Request B's stream should be empty and open. It is not.
+    // Request B's stream is empty and open: request A's reader wrote nowhere.
     let got = tokio::time::timeout(Duration::from_millis(200), manager.read_chunk(new_id)).await;
 
     match got {
-        Err(_) => {} // nothing arrived: correct
+        Err(_) => {}
         Ok(Ok(StreamChunk::Done)) => {
             panic!("request B's stream {new_id} received a Done from request A's reader")
         }
         Ok(other) => panic!("unexpected chunk on request B's stream: {other:?}"),
     }
+    assert!(manager.has_sender(new_id), "request B's stream was closed");
 }
 
 type Exec<'a> = Pin<&'a mut (dyn Future<Output = Result<(), TerminationReason>> + 'a)>;

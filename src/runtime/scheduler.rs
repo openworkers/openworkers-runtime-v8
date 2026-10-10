@@ -516,7 +516,9 @@ fn spawn_stream_reader(
         loop {
             let chunk = tokio::select! {
                 biased;
-                _ = cancel.cancelled() => break,
+                // The request is over: its stream is gone, and the id must not
+                // be written to again
+                _ = cancel.cancelled() => return,
                 r = rx.recv() => r,
             };
 
