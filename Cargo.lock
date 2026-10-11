@@ -1267,7 +1267,7 @@ dependencies = [
 
 [[package]]
 name = "openworkers-runtime-v8"
-version = "0.15.22"
+version = "0.15.23"
 dependencies = [
  "bytes",
  "criterion",
