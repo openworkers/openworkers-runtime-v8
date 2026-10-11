@@ -142,6 +142,26 @@ pub fn warm_hit(
         .position(|(key, reuses)| *key == wanted && *reuses < max_reuses)
 }
 
+/// Whether `cached` belongs to a deployment of the wanted worker that `wanted`
+/// replaces: an older version, or the same version with another environment.
+/// It can never be a warm hit again, and it keeps its whole bundle alive in the
+/// isolate's heap. A newer deployment stays, since a request on the previous
+/// one can still arrive during a rollout.
+pub fn superseded(cached: ContextKey, wanted: ContextKey) -> bool {
+    if cached.worker_id != wanted.worker_id {
+        return false;
+    }
+
+    if cached.version != wanted.version {
+        return cached.version < wanted.version;
+    }
+
+    match (cached.env_updated_at, wanted.env_updated_at) {
+        (Some(cached_env), Some(wanted_env)) => cached_env < wanted_env,
+        (cached_env, wanted_env) => cached_env != wanted_env,
+    }
+}
+
 /// Whether a context that has served `reuses` requests goes back to the cache:
 /// only when a later [`warm_hit`] can take it. Past `max_reuses`, or with no
 /// room at all, it is dropped at once instead of left to age out.
@@ -336,6 +356,29 @@ mod tests {
                 None => {
                     prop_assert!(!keys.iter().any(|(key, reuses)| *key == wanted && *reuses < max_reuses));
                 }
+            }
+        }
+
+        #[test]
+        fn a_superseded_context_is_an_older_deployment_of_the_same_worker(
+            cached in (owner(), 0i32..3, proptest::option::of(0i64..3)),
+            wanted in (owner(), 0i32..3, proptest::option::of(0i64..3)),
+        ) {
+            let cached = ContextKey { worker_id: cached.0, version: cached.1, env_updated_at: cached.2 };
+            let wanted = ContextKey { worker_id: wanted.0, version: wanted.1, env_updated_at: wanted.2 };
+
+            if superseded(cached, wanted) {
+                prop_assert_eq!(cached.worker_id, wanted.worker_id);
+                prop_assert_ne!(cached, wanted);
+                prop_assert!(cached.version <= wanted.version);
+            }
+
+            if cached.worker_id == wanted.worker_id && cached.version < wanted.version {
+                prop_assert!(superseded(cached, wanted));
+            }
+
+            if cached.worker_id == wanted.worker_id && cached.version > wanted.version {
+                prop_assert!(!superseded(cached, wanted));
             }
         }
 

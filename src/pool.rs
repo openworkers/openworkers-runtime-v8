@@ -541,7 +541,7 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
     let async_waiter = isolate_arc.concurrency.async_waiter();
 
     // Lock inner briefly for bookkeeping and cached context lookup
-    let cached_context = {
+    let (cached_context, superseded) = {
         let mut inner = isolate_arc.inner.lock().await;
         inner.total_requests += 1;
         inner.last_used = Instant::now();
@@ -570,10 +570,43 @@ pub async fn execute_pinned(req: PinnedExecuteRequest) -> Result<(), Termination
             env_updated_at,
         };
         let found = pool_policy::warm_hit(&keys, wanted, get_config().max_context_reuses);
+        let cached_context = found.map(|idx| inner.cached_contexts.swap_remove(idx));
 
-        found.map(|idx| inner.cached_contexts.swap_remove(idx))
+        let mut superseded = Vec::new();
+        let mut idx = 0;
+
+        while idx < inner.cached_contexts.len() {
+            let cached = &inner.cached_contexts[idx];
+            let key = ContextKey {
+                worker_id: &cached.worker_id,
+                version: cached.version,
+                env_updated_at: cached.env_updated_at,
+            };
+
+            if pool_policy::superseded(key, wanted) {
+                superseded.push(inner.cached_contexts.swap_remove(idx));
+            } else {
+                idx += 1;
+            }
+        }
+
+        (cached_context, superseded)
         // MutexGuard dropped here
     };
+
+    if !superseded.is_empty() {
+        tracing::debug!(
+            "context SUPERSEDED: worker={}, {} older deployment(s)",
+            &worker_id[..8.min(worker_id.len())],
+            superseded.len()
+        );
+        drop_under_lock(superseded, &pooled);
+
+        // A detached context needs several full GCs to be freed; without this,
+        // the next cold start of the new deployment can hit the heap limit.
+        let (mut locker, _js_lock) = pooled.lock();
+        locker.low_memory_notification();
+    }
 
     let warm_hit = cached_context.is_some();
 
