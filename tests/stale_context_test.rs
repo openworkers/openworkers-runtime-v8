@@ -36,11 +36,12 @@ fn init_pool() {
     });
 }
 
-/// A deployment whose bundle keeps about 4 MB alive, like a large app.
+/// A deployment whose bundle keeps 2 MB (pointer compression) to 4 MB alive,
+/// like a large app: twelve of them overflow the 16 MB heap, two fit in it.
 fn script(version: i32) -> Script {
     Script::new(format!(
         r#"
-        const ballast = new Array(1_000_000).fill({version});
+        const ballast = new Array(500_000).fill({version});
         addEventListener('fetch', (event) => {{
             event.respondWith(new Response('v{version}:' + ballast.length));
         }});
@@ -95,7 +96,7 @@ async fn redeploys_do_not_fill_the_heap_with_old_versions() {
 
         for version in 1..=12 {
             let served = serve(version, None).await;
-            let expected = format!("v{version}:1000000");
+            let expected = format!("v{version}:500000");
 
             assert_eq!(
                 served.map(|(body, _)| body),
