@@ -16,6 +16,8 @@
 //                   be dropped
 //   writing()       whether a storage write is under way: the host holds
 //                   the responses back until it is committed (output gate)
+//   alarm(retries)  runs the alarm() handler, and answers an object whose
+//                   `done` turns true when it ends, with `error` if it threw
 
 (function installObject(dispatch, className, id) {
     'use strict';
@@ -47,11 +49,11 @@
 
     // A write that cannot start rejects without harm to the object; one that
     // fails in the host drops the object, as its memory no longer matches.
-    const write = (op) => {
+    const tracked = (op) => {
         let done;
 
         try {
-            done = call({ kind: 'write', puts: [], deletes: [], deleteAll: false, ...op });
+            done = call(op);
         } catch (error) {
             return Promise.reject(error);
         }
@@ -69,6 +71,8 @@
 
         return done;
     };
+
+    const write = (op) => tracked({ kind: 'write', puts: [], deletes: [], deleteAll: false, ...op });
 
     const isKeys = (value) => Array.isArray(value);
 
@@ -185,6 +189,15 @@
                 list() {
                     return Promise.reject(new Error('Durable Object storage: list() is not supported in a transaction'));
                 },
+                getAlarm() {
+                    return storage.getAlarm();
+                },
+                setAlarm() {
+                    return Promise.reject(new Error('Durable Object storage: setAlarm() is not supported in a transaction'));
+                },
+                deleteAlarm() {
+                    return Promise.reject(new Error('Durable Object storage: deleteAlarm() is not supported in a transaction'));
+                },
                 rollback() {
                     rolledBack = true;
                 },
@@ -202,14 +215,25 @@
         sync() {
             return call({ kind: 'get', keys: [] }).then(() => undefined);
         },
+        // Milliseconds since the Unix epoch, or null
         getAlarm() {
-            return Promise.reject(new Error('Durable Object alarms are not supported yet'));
+            return call({ kind: 'getAlarm' });
         },
-        setAlarm() {
-            return Promise.reject(new Error('Durable Object alarms are not supported yet'));
+        setAlarm(scheduledTime) {
+            if (typeof Class.prototype.alarm !== 'function') {
+                return Promise.reject(new TypeError('the Durable Object class has no alarm() handler'));
+            }
+
+            const time = scheduledTime instanceof Date ? scheduledTime.getTime() : scheduledTime;
+
+            if (typeof time !== 'number' || !Number.isFinite(time)) {
+                return Promise.reject(new TypeError('setAlarm() takes a Date or a time in milliseconds'));
+            }
+
+            return tracked({ kind: 'setAlarm', at: Math.trunc(time) }).then(() => undefined);
         },
         deleteAlarm() {
-            return Promise.reject(new Error('Durable Object alarms are not supported yet'));
+            return tracked({ kind: 'setAlarm', at: null }).then(() => undefined);
         },
         get sql() {
             throw new Error('Durable Object SQL storage is not supported');
@@ -252,5 +276,28 @@
         blocked: () => blocked > 0,
         failure: () => failure,
         writing: () => writes > 0,
+        alarm: (retryCount) => {
+            const run = { done: false, error: null };
+
+            Promise.resolve()
+                .then(() => {
+                    if (typeof instance.alarm !== 'function') {
+                        throw new TypeError('the Durable Object class has no alarm() handler');
+                    }
+
+                    return instance.alarm({ retryCount, isRetry: retryCount > 0 });
+                })
+                .then(
+                    () => {
+                        run.done = true;
+                    },
+                    (error) => {
+                        run.error = message(error);
+                        run.done = true;
+                    }
+                );
+
+            return run;
+        },
     };
 })

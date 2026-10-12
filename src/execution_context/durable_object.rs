@@ -12,7 +12,7 @@ use std::sync::atomic::Ordering;
 use std::task::Poll;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, Sleep};
 
 use super::ExecutionContext;
@@ -51,7 +51,7 @@ pub struct ObjectSpec {
 /// Serves the events of one object until the mailbox closes. The object is
 /// built for the first event, dropped when it is idle or stopped, and built
 /// again for the next event.
-pub async fn run(spec: ObjectSpec, mut mailbox: mpsc::UnboundedReceiver<FetchInit>) {
+pub async fn run(spec: ObjectSpec, mut mailbox: mpsc::UnboundedReceiver<ObjectEvent>) {
     while let Some(first) = mailbox.recv().await {
         let object = match DurableObject::new(&spec) {
             Ok(object) => object,
@@ -70,13 +70,56 @@ pub async fn run(spec: ObjectSpec, mut mailbox: mpsc::UnboundedReceiver<FetchIni
     }
 }
 
-/// An event the object answers.
-struct InFlight {
+/// An event for an object.
+pub enum ObjectEvent {
+    Fetch(FetchInit),
+    Alarm(AlarmInit),
+}
+
+/// The alarm of the object is due: its alarm() handler runs, and `done`
+/// gets the outcome. The host retries an alarm that failed.
+pub struct AlarmInit {
+    /// How many times this alarm failed before
+    pub retry_count: u32,
+    pub done: oneshot::Sender<Result<(), String>>,
+}
+
+/// An event the object has taken.
+enum InFlight {
+    Fetch(FetchInFlight),
+    Alarm(AlarmInFlight),
+}
+
+struct FetchInFlight {
     handle: v8::Global<v8::Object>,
     /// Taken when the response goes out
     res_tx: Option<ResponseSender>,
     /// Set once the guest knows that the client hung up
     disconnected: bool,
+}
+
+struct AlarmInFlight {
+    /// What durable_object.js answers for the run of the handler
+    run: v8::Global<v8::Object>,
+    /// Taken when the handler ends
+    done: Option<oneshot::Sender<Result<(), String>>>,
+}
+
+impl InFlight {
+    /// Whether the caller no longer waits for the event. Registers the
+    /// waker for when it leaves.
+    fn caller_left(&mut self, cx: &mut std::task::Context<'_>) -> bool {
+        match self {
+            InFlight::Fetch(event) => event
+                .res_tx
+                .as_mut()
+                .is_some_and(|res_tx| res_tx.poll_closed(cx).is_ready()),
+            InFlight::Alarm(event) => event
+                .done
+                .as_mut()
+                .is_some_and(|done| done.poll_closed(cx).is_ready()),
+        }
+    }
 }
 
 /// What the object lets through.
@@ -143,8 +186,8 @@ impl DurableObject {
     /// events it had taken fail with it.
     pub async fn serve(
         mut self,
-        first: FetchInit,
-        mailbox: &mut mpsc::UnboundedReceiver<FetchInit>,
+        first: ObjectEvent,
+        mailbox: &mut mpsc::UnboundedReceiver<ObjectEvent>,
         idle: Duration,
         drain: Duration,
     ) -> Result<(), TerminationReason> {
@@ -253,8 +296,8 @@ impl ExecutionContext {
 
     async fn serve(
         &mut self,
-        first: FetchInit,
-        mailbox: &mut mpsc::UnboundedReceiver<FetchInit>,
+        first: ObjectEvent,
+        mailbox: &mut mpsc::UnboundedReceiver<ObjectEvent>,
         idle: Duration,
         drain: Duration,
     ) -> Result<(), TerminationReason> {
@@ -329,12 +372,7 @@ impl ExecutionContext {
 
             // A caller that left takes its event out of the count; the code
             // of the event may still run, but it keeps the object no longer
-            inflight.retain_mut(|event| {
-                !event
-                    .res_tx
-                    .as_mut()
-                    .is_some_and(|res_tx| res_tx.poll_closed(cx).is_ready())
-            });
+            inflight.retain_mut(|event| !event.caller_left(cx));
 
             // Timers do not keep the object: only events in flight do
             if active || outcome.admitted || !inflight.is_empty() {
@@ -372,8 +410,8 @@ impl ExecutionContext {
     fn turn(
         &mut self,
         cx: &mut std::task::Context<'_>,
-        mailbox: &mut mpsc::UnboundedReceiver<FetchInit>,
-        queue: &mut VecDeque<FetchInit>,
+        mailbox: &mut mpsc::UnboundedReceiver<ObjectEvent>,
+        queue: &mut VecDeque<ObjectEvent>,
         inflight: &mut Vec<InFlight>,
         pending: &mut Vec<crate::runtime::CallbackMessage>,
         closed: &mut bool,
@@ -458,8 +496,42 @@ impl ExecutionContext {
         Gate::State { blocked, writing }
     }
 
-    /// Hands the request to the object.
-    fn admit(&mut self, init: FetchInit) -> Result<InFlight, String> {
+    /// Hands the event to the object.
+    fn admit(&mut self, event: ObjectEvent) -> Result<InFlight, String> {
+        match event {
+            ObjectEvent::Fetch(init) => self.admit_fetch(init).map(InFlight::Fetch),
+            ObjectEvent::Alarm(init) => Ok(InFlight::Alarm(self.admit_alarm(init))),
+        }
+    }
+
+    fn admit_alarm(&mut self, init: AlarmInit) -> AlarmInFlight {
+        use std::pin::pin;
+
+        let mut isolate = self.isolate();
+        let scope = pin!(v8::HandleScope::new(&mut isolate));
+        let mut scope = scope.init();
+        let context = v8::Local::new(&scope, &self.request.context);
+        let scope = &mut v8::ContextScope::new(&mut scope, context);
+        let object = v8::Local::new(scope, &self.request.dispatch);
+
+        let key = v8::String::new(scope, "alarm").unwrap();
+        let alarm = object
+            .get(scope, key.into())
+            .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
+            .expect("durable_object.js answers alarm");
+        let retry_count = v8::Integer::new_from_unsigned(scope, init.retry_count);
+        let run = alarm
+            .call(scope, object.into(), &[retry_count.into()])
+            .and_then(|run| run.to_object(scope))
+            .expect("alarm() answers an object and does not throw");
+
+        AlarmInFlight {
+            run: v8::Global::new(scope, run),
+            done: Some(init.done),
+        }
+    }
+
+    fn admit_fetch(&mut self, init: FetchInit) -> Result<FetchInFlight, String> {
         use std::pin::pin;
 
         let FetchInit {
@@ -490,16 +562,16 @@ impl ExecutionContext {
             body_stream_id,
         )?;
 
-        Ok(InFlight {
+        Ok(FetchInFlight {
             handle,
             res_tx: Some(res_tx),
             disconnected: false,
         })
     }
 
-    /// Sends the responses that are ready, tells the guest of the clients
-    /// that hung up, and drops the events that are over. Answers whether it
-    /// ran guest code or sent a response.
+    /// Sends the responses and the alarm outcomes that are ready, tells the
+    /// guest of the clients that hung up, and drops the events that are
+    /// over. Answers whether it ran guest code or sent an answer.
     fn answer(&mut self, inflight: &mut Vec<InFlight>) -> bool {
         use std::pin::pin;
 
@@ -513,6 +585,35 @@ impl ExecutionContext {
         let mut answered = false;
 
         inflight.retain_mut(|event| {
+            let event = match event {
+                InFlight::Fetch(event) => event,
+                InFlight::Alarm(alarm) => {
+                    let run = v8::Local::new(scope, &alarm.run);
+                    let done = v8::String::new(scope, "done").unwrap();
+
+                    if !run
+                        .get(scope, done.into())
+                        .is_some_and(|done| done.is_true())
+                    {
+                        return true;
+                    }
+
+                    let error = v8::String::new(scope, "error").unwrap();
+                    let outcome = match run.get(scope, error.into()) {
+                        Some(error) if error.is_string() => Err(error.to_rust_string_lossy(scope)),
+                        _ => Ok(()),
+                    };
+
+                    // A dropped receiver is a host that stopped waiting
+                    if let Some(done) = alarm.done.take() {
+                        done.send(outcome).ok();
+                    }
+
+                    answered = true;
+
+                    return false;
+                }
+            };
             let handle = Some(v8::Local::new(scope, &event.handle));
 
             if event.res_tx.is_some()

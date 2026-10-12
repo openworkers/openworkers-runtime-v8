@@ -13,7 +13,7 @@ use openworkers_core::{
     BindingInfo, Event, FetchInit, HttpMethod, HttpRequest, HttpResponse, ObjectIdSource, OpFuture,
     OperationsHandle, OperationsHandler, RequestBody, RuntimeLimits, Script,
 };
-use openworkers_runtime_v8::{ObjectSpec, Worker};
+use openworkers_runtime_v8::{ObjectEvent, ObjectSpec, Worker};
 use tokio::sync::{mpsc, oneshot};
 
 /// The host of one namespace, COUNTER: ids are `name-<name>` and
@@ -117,7 +117,7 @@ async fn run(body: &str) -> String {
         let objects_script = script.clone();
         let objects_ops = ops.clone();
         tokio::task::spawn_local(async move {
-            let mut mailboxes: HashMap<String, mpsc::UnboundedSender<FetchInit>> = HashMap::new();
+            let mut mailboxes: HashMap<String, mpsc::UnboundedSender<ObjectEvent>> = HashMap::new();
 
             while let Some((id, init)) = routes.recv().await {
                 let mailbox = mailboxes.entry(id.clone()).or_insert_with(|| {
@@ -139,7 +139,7 @@ async fn run(body: &str) -> String {
                     tx
                 });
 
-                let _ = mailbox.send(init);
+                let _ = mailbox.send(ObjectEvent::Fetch(init));
             }
         });
 

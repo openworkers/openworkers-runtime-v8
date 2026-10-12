@@ -14,7 +14,7 @@ use openworkers_core::{
     FetchInit, HttpMethod, HttpRequest, HttpResponse, ObjectStorageOp, ObjectStorageResult,
     OpFuture, OperationsHandler, RequestBody, ResponseBody, RuntimeLimits, Script,
 };
-use openworkers_runtime_v8::ObjectSpec;
+use openworkers_runtime_v8::{ObjectEvent, ObjectSpec};
 use openworkers_transform::CodeLanguage;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
@@ -102,6 +102,9 @@ impl OperationsHandler for Memory {
 
                     ObjectStorageResult::Written { deleted }
                 }
+                ObjectStorageOp::GetAlarm | ObjectStorageOp::SetAlarm(_) => {
+                    ObjectStorageResult::Error("no alarms in these tests".to_string())
+                }
             }
         })
     }
@@ -157,7 +160,7 @@ async fn run(memory: Arc<Memory>, body: &str, paths: &[&str]) -> Vec<Result<Stri
     .await
 }
 
-async fn send(object: &mpsc::UnboundedSender<FetchInit>, path: &str) -> Result<String, String> {
+async fn send(object: &mpsc::UnboundedSender<ObjectEvent>, path: &str) -> Result<String, String> {
     let (res_tx, res_rx) = oneshot::channel::<HttpResponse>();
     let request = HttpRequest {
         method: HttpMethod::Get,
@@ -166,7 +169,9 @@ async fn send(object: &mpsc::UnboundedSender<FetchInit>, path: &str) -> Result<S
         body: RequestBody::None,
     };
 
-    object.send(FetchInit::new(request, res_tx)).unwrap();
+    object
+        .send(ObjectEvent::Fetch(FetchInit::new(request, res_tx)))
+        .unwrap();
 
     let response = timeout(Duration::from_secs(5), res_rx)
         .await

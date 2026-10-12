@@ -13,7 +13,7 @@ use openworkers_core::{
     FetchInit, HttpMethod, HttpRequest, HttpResponse, RequestBody, ResponseBody, RuntimeLimits,
     Script,
 };
-use openworkers_runtime_v8::ObjectSpec;
+use openworkers_runtime_v8::{ObjectEvent, ObjectSpec};
 use openworkers_transform::CodeLanguage;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
@@ -77,14 +77,17 @@ fn spec(code: &str, idle: Duration) -> ObjectSpec {
 }
 
 /// Starts the object on this thread and answers its mailbox.
-fn start(spec: ObjectSpec) -> mpsc::UnboundedSender<FetchInit> {
+fn start(spec: ObjectSpec) -> mpsc::UnboundedSender<ObjectEvent> {
     let (tx, rx) = mpsc::unbounded_channel();
     tokio::task::spawn_local(openworkers_runtime_v8::durable_object::run(spec, rx));
 
     tx
 }
 
-fn send(object: &mpsc::UnboundedSender<FetchInit>, path: &str) -> oneshot::Receiver<HttpResponse> {
+fn send(
+    object: &mpsc::UnboundedSender<ObjectEvent>,
+    path: &str,
+) -> oneshot::Receiver<HttpResponse> {
     let (res_tx, res_rx) = oneshot::channel();
     let request = HttpRequest {
         method: HttpMethod::Get,
@@ -93,7 +96,9 @@ fn send(object: &mpsc::UnboundedSender<FetchInit>, path: &str) -> oneshot::Recei
         body: RequestBody::None,
     };
 
-    object.send(FetchInit::new(request, res_tx)).unwrap();
+    object
+        .send(ObjectEvent::Fetch(FetchInit::new(request, res_tx)))
+        .unwrap();
 
     res_rx
 }

@@ -232,6 +232,8 @@ pub(crate) fn dispatch(
                 ObjectStorageResult::Written { deleted } => {
                     v8::Number::new(scope, deleted as f64).into()
                 }
+                ObjectStorageResult::Alarm(Some(at)) => v8::Number::new(scope, at as f64).into(),
+                ObjectStorageResult::Alarm(None) => v8::null(scope).into(),
             };
 
             settle(scope, tables, callback_id, None, Some(value));

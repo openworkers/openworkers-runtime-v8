@@ -56,7 +56,9 @@ mod pool;
 // Core API
 pub use async_waiter::AsyncWaiter;
 pub use execution_context::ExecutionContext;
-pub use execution_context::durable_object::{self, DurableObject, ObjectSpec};
+pub use execution_context::durable_object::{
+    self, AlarmInit, DurableObject, ObjectEvent, ObjectSpec,
+};
 pub use execution_helpers::ListenerMarks;
 pub use gc::{ExternalMemoryGuard, GcTraceable, JsLock, JsLockRef, Tracked, tracked_guard};
 

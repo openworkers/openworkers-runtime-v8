@@ -219,6 +219,14 @@ fn parse_storage_op(
                 delete_all,
             })
         }
+        "getAlarm" => Some(ObjectStorageOp::GetAlarm),
+        "setAlarm" => {
+            let at = field(scope, op, "at")
+                .filter(|value| value.is_number())
+                .and_then(|value| value.integer_value(scope));
+
+            Some(ObjectStorageOp::SetAlarm(at))
+        }
         _ => {
             throw_type_error(scope, "durable object storage: unknown op");
             None
