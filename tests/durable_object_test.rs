@@ -14,13 +14,14 @@ use openworkers_core::{
     Script,
 };
 use openworkers_runtime_v8::ObjectSpec;
+use openworkers_transform::CodeLanguage;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
 const COUNTER: &str = r#"
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-    class Counter {
+    export class Counter {
         constructor(state, env) {
             this.state = state;
             this.count = 0;
@@ -45,12 +46,17 @@ const COUNTER: &str = r#"
     }
 "#;
 
+/// The classic script the runner makes of a module.
+fn module(code: &str) -> String {
+    openworkers_transform::parse_worker_code(code.as_bytes(), CodeLanguage::JavaScript).unwrap()
+}
+
 /// A short wall clock, so a turn that never yields stops soon.
 const WALL_CLOCK_MS: u64 = 300;
 
 fn spec(code: &str, idle: Duration) -> ObjectSpec {
     ObjectSpec {
-        script: Script::new(code),
+        script: Script::new(module(code)),
         class_name: "Counter".to_string(),
         id: "0123abcd".to_string(),
         limits: RuntimeLimits {
@@ -160,7 +166,7 @@ async fn events_interleave_at_their_awaits() {
 const GATED: &str = r#"
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-    class Counter {
+    export class Counter {
         constructor(state) {
             this.state = state;
             this.log = [];
@@ -264,7 +270,7 @@ async fn a_stopped_object_fails_its_events_in_flight() {
 const BROKEN: &str = r#"
     globalThis.built = 0;
 
-    class Counter {
+    export class Counter {
         constructor(state) {
             globalThis.built += 1;
             state.blockConcurrencyWhile(async () => {
@@ -304,7 +310,7 @@ async fn an_object_of_a_class_the_worker_lacks_fails_its_events() {
 #[tokio::test(flavor = "current_thread")]
 async fn a_constructor_that_throws_fails_the_event() {
     run_in_local(|| async {
-        let code = "class Counter { constructor() { throw new Error('nope'); } }";
+        let code = "export class Counter { constructor() { throw new Error('nope'); } }";
         let object = start(spec(code, Duration::from_secs(60)));
 
         assert!(failed(send(&object, "/")).await);
@@ -316,7 +322,7 @@ async fn a_constructor_that_throws_fails_the_event() {
 async fn a_constructor_that_never_returns_is_cut() {
     run_in_local(|| async {
         let code = r#"
-            class Counter {
+            export class Counter {
                 constructor() { while (true) {} }
                 fetch() { return new Response('served'); }
             }

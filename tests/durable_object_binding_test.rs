@@ -57,7 +57,7 @@ impl OperationsHandler for Host {
 }
 
 const WORKER: &str = r#"
-    class Counter {
+    export class Counter {
         constructor(state, env) {
             this.state = state;
             this.env = env;
@@ -83,7 +83,7 @@ const WORKER: &str = r#"
         }
     }
 
-    globalThis.default = {
+    export default {
         async fetch(request, env) {
             const url = new URL(request.url);
             const body = await (async () => { BODY })();
@@ -96,6 +96,11 @@ const WORKER: &str = r#"
 /// worker with a COUNTER binding, and answers what it returns.
 async fn run(body: &str) -> String {
     let code = WORKER.replace("BODY", body);
+    let code = openworkers_transform::parse_worker_code(
+        code.as_bytes(),
+        openworkers_transform::CodeLanguage::JavaScript,
+    )
+    .unwrap();
 
     run_in_local(|| async move {
         let script =

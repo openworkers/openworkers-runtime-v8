@@ -1,4 +1,4 @@
-//! A Durable Object: one instance of a class the worker declares, in a
+//! A Durable Object: one instance of a class the worker exports, in a
 //! context that lives across its events.
 //!
 //! Its events interleave at their awaits, as on Cloudflare. Each turn of the
@@ -37,7 +37,7 @@ const MAX_ROUNDS: usize = 4;
 #[derive(Clone)]
 pub struct ObjectSpec {
     pub script: Script,
-    /// The class the worker script declares at its top level
+    /// The name the worker exports the class under
     pub class_name: String,
     pub id: String,
     pub limits: RuntimeLimits,
@@ -149,27 +149,11 @@ impl Drop for DurableObject {
     }
 }
 
-/// Whether `name` is a plain identifier, so it can be read as a script.
-fn is_identifier(name: &str) -> bool {
-    let mut chars = name.chars();
-
-    chars
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
-}
-
 impl ExecutionContext {
-    /// Runs the constructor of `class_name` and puts the dispatch of the
-    /// object in place of the dispatch of the worker.
+    /// Runs the constructor of the class exported as `class_name`, and puts
+    /// the dispatch of the object in place of the dispatch of the worker.
     fn construct(&mut self, class_name: &str, id: &str) -> Result<(), TerminationReason> {
         use std::pin::pin;
-
-        if !is_identifier(class_name) {
-            return Err(TerminationReason::InitializationError(format!(
-                "'{class_name}' is not a class name"
-            )));
-        }
 
         self.request_id = next_request_id();
         let pooled = Arc::clone(&self.pooled);
@@ -200,40 +184,26 @@ impl ExecutionContext {
             let tc = pin!(v8::TryCatch::new(scope));
             let tc = tc.init();
 
-            let run = |source: &str| {
-                let source = v8::String::new(&tc, source).unwrap();
-
-                v8::Script::compile(&tc, source, None).and_then(|script| script.run(&tc))
-            };
-
-            // A top-level class is a binding of the global scope, which
-            // every script of the context sees
-            let class = run(class_name).filter(|class| class.is_function());
-            let install = run(include_str!("../js/durable_object.js"))
+            let source = v8::String::new(&tc, include_str!("../js/durable_object.js")).unwrap();
+            let install = v8::Script::compile(&tc, source, None)
+                .and_then(|script| script.run(&tc))
                 .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
                 .expect("durable_object.js evaluates to a function");
 
-            match class {
-                None if tc.has_terminated() => Err(None),
-                None => Err(Some(format!("the worker declares no class '{class_name}'"))),
-                Some(class) => {
-                    let dispatch = v8::Local::new(&tc, &self.request.dispatch);
-                    let id = v8::String::new(&tc, id).unwrap();
-                    let receiver = v8::undefined(&tc).into();
+            let dispatch = v8::Local::new(&tc, &self.request.dispatch);
+            let class_name = v8::String::new(&tc, class_name).unwrap();
+            let id = v8::String::new(&tc, id).unwrap();
+            let receiver = v8::undefined(&tc).into();
+            let args = [dispatch.into(), class_name.into(), id.into()];
 
-                    match install.call(&tc, receiver, &[dispatch.into(), class, id.into()]) {
-                        Some(object) => {
-                            let object = object.to_object(&tc).unwrap();
-                            Ok(v8::Global::new(&tc, object))
-                        }
-                        None if tc.has_terminated() => Err(None),
-                        None => Err(Some(
-                            tc.exception()
-                                .map(|e| e.to_rust_string_lossy(&tc))
-                                .unwrap_or_else(|| "the constructor failed".to_string()),
-                        )),
-                    }
-                }
+            match install.call(&tc, receiver, &args) {
+                Some(object) => Ok(v8::Global::new(&tc, object.to_object(&tc).unwrap())),
+                None if tc.has_terminated() => Err(None),
+                None => Err(Some(
+                    tc.exception()
+                        .map(|e| e.to_rust_string_lossy(&tc))
+                        .unwrap_or_else(|| "the constructor failed".to_string()),
+                )),
             }
         };
 
@@ -541,21 +511,5 @@ impl ExecutionContext {
         });
 
         answered
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_identifier;
-
-    #[test]
-    fn a_class_name_is_a_plain_identifier() {
-        for name in ["Counter", "_Room", "$x", "Room2"] {
-            assert!(is_identifier(name), "{name}");
-        }
-
-        for name in ["", "2Room", "a.b", "Room()", "a b", "globalThis['x']"] {
-            assert!(!is_identifier(name), "{name}");
-        }
     }
 }

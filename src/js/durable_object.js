@@ -3,8 +3,10 @@
 //
 // The script evaluates to a function that the host calls once, after the
 // worker script, with the `{ fetch, task }` object of the wintertc dispatch,
-// the class and the id of the object. The call runs the constructor and
-// answers what the host keeps in place of the dispatch:
+// the name the worker exports the class under, and the id of the object.
+// openworkers-transform puts the named exports in globalThis.__exports. The
+// call runs the constructor and answers what the host keeps in place of the
+// dispatch:
 //
 //   fetch(request)  the handle of the wintertc dispatch for the request
 //   blocked()       whether a blockConcurrencyWhile callback runs: the host
@@ -12,8 +14,14 @@
 //   failure()       the error of a blockConcurrencyWhile callback that
 //                   failed, after which the object must be dropped
 
-(function installObject(dispatch, Class, id) {
+(function installObject(dispatch, className, id) {
     'use strict';
+
+    const Class = globalThis.__exports?.[className];
+
+    if (typeof Class !== 'function') {
+        throw new TypeError(`the worker exports no class '${className}'`);
+    }
 
     let blocked = 0;
     let failure = null;
