@@ -10,6 +10,7 @@ use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use openworkers_core::D1Result;
 use openworkers_core::DatabaseResult;
 use openworkers_core::KvResult;
 use openworkers_core::StorageResult;
@@ -182,6 +183,19 @@ pub(crate) fn dispatch(
             };
 
             settle(scope, tables, callback_id, error_msg, value);
+        }
+
+        CallbackMessage::D1Result(callback_id, result) => {
+            let (error_msg, value) = if let D1Result::Error(err) = &result {
+                (Some(callback_handlers::d1_error_message(err)), None)
+            } else {
+                let result_obj = v8::Object::new(scope);
+                callback_handlers::populate_d1_result(scope, result_obj, result);
+
+                (None, Some(result_obj.into()))
+            };
+
+            settle(scope, tables, callback_id, error_msg.as_deref(), value);
         }
 
         CallbackMessage::WebSocketConnected(callback_id, ws_id) => {

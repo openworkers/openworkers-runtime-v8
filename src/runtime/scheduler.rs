@@ -18,9 +18,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::stream_manager::{self, StreamManager};
 use openworkers_core::{
-    DatabaseOp, DatabaseResult, HttpRequest, HttpResponseMeta, KvOp, KvResult, Operation,
-    OperationResult, OperationsHandle, ResponseBody, StorageOp, StorageResult, WebSocketId,
-    WebSocketIncoming, WebSocketOutgoing,
+    D1Error, D1ErrorKind, D1Op, D1Result, DatabaseOp, DatabaseResult, HttpRequest,
+    HttpResponseMeta, KvOp, KvResult, Operation, OperationResult, OperationsHandle, ResponseBody,
+    StorageOp, StorageResult, WebSocketId, WebSocketIncoming, WebSocketOutgoing,
 };
 
 pub type CallbackId = u64;
@@ -64,6 +64,7 @@ pub enum SchedulerMessage {
     BindingStorage(CallbackId, String, StorageOp),
     BindingKv(CallbackId, String, KvOp),
     BindingDatabase(CallbackId, String, DatabaseOp),
+    BindingD1(CallbackId, String, D1Op),
     BindingWorker(CallbackId, String, HttpRequest),
     StreamRead(CallbackId, stream_manager::StreamId),
     StreamCancel(stream_manager::StreamId),
@@ -86,6 +87,7 @@ pub enum CallbackMessage {
     StorageResult(CallbackId, StorageResult),
     KvResult(CallbackId, KvResult),
     DatabaseResult(CallbackId, DatabaseResult),
+    D1Result(CallbackId, D1Result),
     WebSocketConnected(CallbackId, WebSocketId),
     WebSocketConnectError(CallbackId, String),
     WebSocketEvent(WebSocketId, WebSocketIncoming),
@@ -318,6 +320,43 @@ pub async fn run_event_loop(
                                 callback_id,
                                 database_result,
                             ));
+                        });
+                    }
+
+                    SchedulerMessage::BindingD1(callback_id, binding_name, d1_op) => {
+                        let callback_tx = callback_tx.clone();
+                        let ops = ops.clone();
+                        let cancel = request_cancel.clone();
+
+                        tokio::spawn(async move {
+                            let result = tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => {
+                                    let cancelled = D1Result::Error(D1Error {
+                                        kind: D1ErrorKind::Interrupted,
+                                        message: CANCELLED.into(),
+                                        statement: None,
+                                    });
+
+                                    let _ = callback_tx.send(CallbackMessage::D1Result(callback_id, cancelled));
+                                    return;
+                                }
+                                r = ops.handle(Operation::BindingD1 {
+                                    binding: binding_name,
+                                    op: d1_op,
+                                }) => r,
+                            };
+
+                            let d1_result = match result {
+                                OperationResult::D1(r) => r,
+                                _ => D1Result::Error(D1Error {
+                                    kind: D1ErrorKind::Unavailable,
+                                    message: "Unexpected result type".into(),
+                                    statement: None,
+                                }),
+                            };
+
+                            let _ = callback_tx.send(CallbackMessage::D1Result(callback_id, d1_result));
                         });
                     }
 
@@ -586,6 +625,7 @@ async fn convert_fetch_result_to_stream(
         OperationResult::Storage(_) => return Err("Unexpected Storage result for fetch".into()),
         OperationResult::Kv(_) => return Err("Unexpected Kv result for fetch".into()),
         OperationResult::Database(_) => return Err("Unexpected Database result for fetch".into()),
+        OperationResult::D1(_) => return Err("Unexpected D1 result for fetch".into()),
         OperationResult::WebSocket(_) => return Err("Unexpected WebSocket result for fetch".into()),
         OperationResult::Images(_) => return Err("Unexpected Images result for fetch".into()),
     };

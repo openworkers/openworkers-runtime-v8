@@ -101,6 +101,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
+
+[[package]]
 name = "better_scoped_tls"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -536,7 +542,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1244,10 +1250,10 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "openworkers-core"
-version = "0.15.0"
-source = "git+https://github.com/openworkers/openworkers-core?tag=v0.15.0#d13fde762478e3c08c5803995e3b250a076480e3"
+version = "0.16.0"
+source = "git+https://github.com/openworkers/openworkers-core?tag=v0.16.0#08028398e68323dd3bb6b456ce63184ee1e2e8eb"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "bytes",
  "serde",
  "serde_json",
@@ -1773,7 +1779,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2215,7 +2221,7 @@ version = "40.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06920cb2277974a0000f58fb7a70d23f2419dddd53de0d5de8db014a9a1163f9"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes-str",
  "indexmap",
  "once_cell",
@@ -2371,7 +2377,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2791,7 +2797,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

@@ -291,6 +291,7 @@ pub(crate) fn setup_env(
                 BindingType::Storage => "storage",
                 BindingType::Kv => "kv",
                 BindingType::Database => "database",
+                BindingType::D1 => "d1",
                 BindingType::Worker => "worker",
                 BindingType::Images => "images",
             };

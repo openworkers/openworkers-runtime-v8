@@ -18,7 +18,7 @@ sandbox = ["v8/v8_enable_sandbox", "serde_v8/v8_enable_sandbox"]
 gc-derive = { package = "openworkers-runtime-v8-gc-derive", path = "gc-derive" }
 
 # Common types
-openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.15.0" }
+openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.16.0" }
 
 # The shared web surface
 openworkers-wintertc = { git = "https://github.com/openworkers/openworkers-wintertc", tag = "v0.1.10" }

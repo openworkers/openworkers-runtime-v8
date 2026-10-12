@@ -2,7 +2,7 @@ use super::super::{CallbackId, SchedulerMessage};
 use super::state::FetchState;
 use crate::v8_helpers::throw_type_error;
 use openworkers_core::{
-    DatabaseOp, HttpMethod, HttpRequest, KvOp, RequestBody, SqlParam, StorageOp,
+    D1Op, DatabaseOp, HttpMethod, HttpRequest, KvOp, RequestBody, SqlParam, StorageOp,
 };
 use serde::Deserialize;
 use std::cell::RefCell;
@@ -419,6 +419,46 @@ pub fn setup_fetch(
     .unwrap();
 
     register_fn!(scope, "__nativeBindingDatabase", native_binding_database_fn);
+
+    // Create __nativeBindingD1 for D1 operations; js/env.js builds the op
+    // Args: (binding_name, op, resolve, reject)
+    let native_binding_d1_fn = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope,
+         args: v8::FunctionCallbackArguments,
+         mut _retval: v8::ReturnValue| {
+            let Some(state) = get_state!(scope, FetchState) else {
+                return;
+            };
+
+            let Ok(binding_name) = serde_v8::from_v8_any::<String>(scope, args.get(0)) else {
+                return throw_type_error(scope, "d1: the binding name is not a string");
+            };
+
+            let d1_op = match serde_v8::from_v8_any::<D1Op>(scope, args.get(1)) {
+                Ok(op) => op,
+                Err(e) => {
+                    return throw_type_error(scope, &format!("D1_TYPE_ERROR: {e}"));
+                }
+            };
+
+            let Some((resolve_fn, reject_fn)) = resolve_reject(scope, args.get(2), args.get(3))
+            else {
+                return;
+            };
+
+            let callback_id = register_callbacks_with_error(&state, scope, resolve_fn, reject_fn);
+
+            let _ = state.scheduler_tx.send(SchedulerMessage::BindingD1(
+                callback_id,
+                binding_name,
+                d1_op,
+            ));
+        },
+    )
+    .unwrap();
+
+    register_fn!(scope, "__nativeBindingD1", native_binding_d1_fn);
 
     // Create __nativeBindingWorker for worker-to-worker calls
     setup_binding_fetch_helper(scope, "__nativeBindingWorker", |id, name, req| {

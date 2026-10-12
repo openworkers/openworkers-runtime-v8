@@ -7,7 +7,10 @@
 //! passes it to be populated. This avoids lifetime issues with returning `Local<T>`.
 
 use super::stream_manager;
-use openworkers_core::{DatabaseResult, HttpResponseMeta, KvResult, SqlPrimitive, StorageResult};
+use openworkers_core::{
+    D1Error, D1ErrorKind, D1Result, D1StatementResult, DatabaseResult, HttpResponseMeta, KvResult,
+    SqlPrimitive, StorageResult,
+};
 
 /// Populate metadata object for FetchStreamingSuccess callback.
 ///
@@ -386,6 +389,115 @@ pub fn populate_database_result(
             result_obj.set(scope, rows_key.into(), rows_array.into());
         }
     }
+}
+
+/// Populate result object for D1Result callback.
+///
+/// Sets `{ columns, rows, meta }` for a query, `{ results }` for a batch and
+/// `{ count, duration }` for an exec. Rows are value arrays; `js/env.js` builds
+/// the row objects, so `raw()` keeps duplicate column names.
+pub fn populate_d1_result(
+    scope: &mut v8::PinScope,
+    result_obj: v8::Local<v8::Object>,
+    result: D1Result,
+) {
+    match result {
+        D1Result::Query(statement) => populate_d1_statement(scope, result_obj, &statement),
+        D1Result::Batch { results } => {
+            let array = v8::Array::new(scope, results.len().try_into().unwrap());
+
+            for (index, statement) in results.iter().enumerate() {
+                let statement_obj = v8::Object::new(scope);
+
+                populate_d1_statement(scope, statement_obj, statement);
+                array.set_index(scope, index as u32, statement_obj.into());
+            }
+
+            set_value(scope, result_obj, "results", array.into());
+        }
+        D1Result::Exec { count, duration } => {
+            let count = v8::Number::new(scope, f64::from(count));
+            let duration = v8::Number::new(scope, duration);
+
+            set_value(scope, result_obj, "count", count.into());
+            set_value(scope, result_obj, "duration", duration.into());
+        }
+        D1Result::Error(err) => {
+            let message = v8::String::new(scope, &d1_error_message(&err)).unwrap();
+
+            set_value(scope, result_obj, "error", message.into());
+        }
+    }
+}
+
+/// The guest error message: the D1 prefix of the kind, then the message.
+pub fn d1_error_message(err: &D1Error) -> String {
+    let prefix = match err.kind {
+        D1ErrorKind::Type => "D1_TYPE_ERROR",
+        D1ErrorKind::Range => "D1_RANGE_ERROR",
+        D1ErrorKind::Sql
+        | D1ErrorKind::Interrupted
+        | D1ErrorKind::Overloaded
+        | D1ErrorKind::Unavailable => "D1_ERROR",
+    };
+
+    format!("{prefix}: {}", err.message)
+}
+
+fn populate_d1_statement(
+    scope: &mut v8::PinScope,
+    statement_obj: v8::Local<v8::Object>,
+    statement: &D1StatementResult,
+) {
+    let columns = v8::Array::new(scope, statement.columns.len().try_into().unwrap());
+
+    for (index, column) in statement.columns.iter().enumerate() {
+        let column = v8::String::new(scope, column).unwrap();
+
+        columns.set_index(scope, index as u32, column.into());
+    }
+
+    let rows = v8::Array::new(scope, statement.rows.len().try_into().unwrap());
+
+    for (row_index, row) in statement.rows.iter().enumerate() {
+        let values = v8::Array::new(scope, row.len().try_into().unwrap());
+
+        for (index, value) in row.iter().enumerate() {
+            let value = sql_primitive_to_v8(scope, value);
+
+            values.set_index(scope, index as u32, value);
+        }
+
+        rows.set_index(scope, row_index as u32, values.into());
+    }
+
+    let meta = v8::Object::new(scope);
+    let duration = v8::Number::new(scope, statement.meta.duration);
+    let changes = v8::Number::new(scope, statement.meta.changes as f64);
+    let last_row_id = v8::Number::new(scope, statement.meta.last_row_id as f64);
+    let changed_db = v8::Boolean::new(scope, statement.meta.changed_db);
+    let size_after = v8::Number::new(scope, statement.meta.size_after as f64);
+
+    set_value(scope, meta, "duration", duration.into());
+    set_value(scope, meta, "changes", changes.into());
+    set_value(scope, meta, "last_row_id", last_row_id.into());
+    set_value(scope, meta, "changed_db", changed_db.into());
+    set_value(scope, meta, "size_after", size_after.into());
+
+    set_value(scope, statement_obj, "columns", columns.into());
+    set_value(scope, statement_obj, "rows", rows.into());
+    set_value(scope, statement_obj, "meta", meta.into());
+}
+
+fn set_value(
+    scope: &mut v8::PinScope,
+    object: v8::Local<v8::Object>,
+    key: &str,
+    value: v8::Local<v8::Value>,
+) {
+    let key = v8::String::new(scope, key).unwrap();
+
+    object.set(scope, key.into(), value);
 }
 
 /// One SQL value as the guest sees it.
