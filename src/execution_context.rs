@@ -15,6 +15,8 @@ use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 use v8;
 
+pub mod durable_object;
+
 use crate::LockerManagedIsolate;
 use crate::async_waiter::AsyncWaiter;
 use crate::execution_helpers::{
