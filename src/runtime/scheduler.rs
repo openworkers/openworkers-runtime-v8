@@ -19,9 +19,9 @@ use tokio_util::sync::CancellationToken;
 use super::stream_manager::{self, StreamManager};
 use openworkers_core::{
     D1Error, D1ErrorKind, D1Op, D1Result, DatabaseOp, DatabaseResult, HttpRequest,
-    HttpResponseMeta, KvOp, KvResult, Operation, OperationResult, OperationsHandle, ResponseBody,
-    StorageOp, StorageResult, WebSocketConnection, WebSocketId, WebSocketIncoming,
-    WebSocketOutgoing, WebSocketUpgrade,
+    HttpResponseMeta, KvOp, KvResult, ObjectStorageOp, ObjectStorageResult, Operation,
+    OperationResult, OperationsHandle, ResponseBody, StorageOp, StorageResult, WebSocketConnection,
+    WebSocketId, WebSocketIncoming, WebSocketOutgoing, WebSocketUpgrade,
 };
 
 pub type CallbackId = u64;
@@ -79,6 +79,8 @@ pub enum SchedulerMessage {
     BindingWorker(CallbackId, String, HttpRequest),
     /// A request to the Durable Object of an id
     BindingDurableObject(CallbackId, String, String, HttpRequest),
+    /// The storage of the Durable Object this context serves
+    ObjectStorage(CallbackId, ObjectStorageOp),
     StreamRead(CallbackId, stream_manager::StreamId),
     StreamCancel(stream_manager::StreamId),
     WebSocketConnect(CallbackId, WebSocketId, String, HashMap<String, String>),
@@ -107,6 +109,7 @@ pub enum CallbackMessage {
     KvResult(CallbackId, KvResult),
     DatabaseResult(CallbackId, DatabaseResult),
     D1Result(CallbackId, D1Result),
+    ObjectStorage(CallbackId, ObjectStorageResult),
     WebSocketConnected(CallbackId, WebSocketId),
     WebSocketConnectError(CallbackId, String),
     WebSocketEvent(WebSocketId, WebSocketIncoming),
@@ -174,6 +177,10 @@ pub async fn run_event_loop(
     // WebSocket state: each WS gets a command channel, the spawned task owns the receiver
     let mut ws_commands: HashMap<WebSocketId, mpsc::UnboundedSender<WebSocketCommand>> =
         HashMap::new();
+
+    // The storage ops of a Durable Object, which run one at a time in the
+    // order the guest made them. Started on the first one.
+    let mut storage: Option<mpsc::UnboundedSender<(CallbackId, ObjectStorageOp)>> = None;
 
     // Pairs the response of the request can still carry. None once it is read.
     let mut pairs: Option<HashSet<WebSocketId>> = Some(HashSet::new());
@@ -403,6 +410,16 @@ pub async fn run_event_loop(
                         ));
                     }
 
+                    SchedulerMessage::ObjectStorage(callback_id, op) => {
+                        let storage = storage.get_or_insert_with(|| {
+                            let (tx, rx) = mpsc::unbounded_channel();
+                            tokio::spawn(run_object_storage(rx, callback_tx.clone(), ops.clone()));
+                            tx
+                        });
+
+                        let _ = storage.send((callback_id, op));
+                    }
+
                     SchedulerMessage::WebSocketConnect(callback_id, ws_id, url, headers) => {
                         // Create command channel BEFORE spawning so we can store the
                         // sender synchronously in the event loop's state.
@@ -545,6 +562,24 @@ pub async fn run_event_loop(
         if shutdown && timers.is_empty() {
             break;
         }
+    }
+}
+
+/// Runs the storage ops of a Durable Object one at a time, in order: a get
+/// after a put the guest did not await reads the put. A write that is under
+/// way when the context goes still ends, so the guest knows what happened.
+async fn run_object_storage(
+    mut ops_rx: mpsc::UnboundedReceiver<(CallbackId, ObjectStorageOp)>,
+    callback_tx: CallbackSender,
+    ops: OperationsHandle,
+) {
+    while let Some((callback_id, op)) = ops_rx.recv().await {
+        let result = match ops.handle(Operation::DurableObjectStorage(op)).await {
+            OperationResult::ObjectStorage(result) => result,
+            _ => ObjectStorageResult::Error("Unexpected result type for object storage".into()),
+        };
+
+        let _ = callback_tx.send(CallbackMessage::ObjectStorage(callback_id, result));
     }
 }
 
@@ -701,6 +736,9 @@ async fn convert_fetch_result_to_stream(
         OperationResult::D1(_) => return Err("Unexpected D1 result for fetch".into()),
         OperationResult::WebSocket(_) => return Err("Unexpected WebSocket result for fetch".into()),
         OperationResult::Images(_) => return Err("Unexpected Images result for fetch".into()),
+        OperationResult::ObjectStorage(_) => {
+            return Err("Unexpected ObjectStorage result for fetch".into());
+        }
     };
 
     let meta = HttpResponseMeta {

@@ -128,7 +128,7 @@ fn register_callback(
 }
 
 /// Register success and error callbacks and return callback ID
-fn register_callbacks_with_error(
+pub(super) fn register_callbacks_with_error(
     state: &FetchState,
     scope: &mut v8::PinScope,
     success_fn: v8::Local<v8::Function>,

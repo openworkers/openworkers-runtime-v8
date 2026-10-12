@@ -74,12 +74,15 @@ struct InFlight {
     disconnected: bool,
 }
 
-/// Whether the object takes events.
+/// What the object lets through.
 enum Gate {
-    Open,
-    /// A blockConcurrencyWhile callback runs
-    Closed,
-    /// A blockConcurrencyWhile callback failed
+    State {
+        /// A blockConcurrencyWhile callback runs: no event goes in
+        blocked: bool,
+        /// A storage write is under way: no response goes out
+        writing: bool,
+    },
+    /// A blockConcurrencyWhile callback or a storage write failed
     Broken(String),
 }
 
@@ -300,7 +303,7 @@ impl ExecutionContext {
                 Gate::Broken(message) => {
                     return Poll::Ready(Err(TerminationReason::Exception(message)));
                 }
-                Gate::Closed => {
+                Gate::State { blocked: true, .. } => {
                     let timer = gate_timer
                         .get_or_insert_with(|| Box::pin(tokio::time::sleep(GATE_TIMEOUT)));
 
@@ -310,7 +313,7 @@ impl ExecutionContext {
                         )));
                     }
                 }
-                Gate::Open => gate_timer = None,
+                Gate::State { blocked: false, .. } => gate_timer = None,
             }
 
             if !inflight.is_empty() || outcome.busy {
@@ -349,7 +352,7 @@ impl ExecutionContext {
         for round in 0..MAX_ROUNDS {
             let mut admitted = 0;
 
-            while matches!(self.gate(), Gate::Open) {
+            while matches!(self.gate(), Gate::State { blocked: false, .. }) {
                 let init = match queue.pop_front() {
                     Some(init) => init,
                     None => match mailbox.poll_recv(cx) {
@@ -367,7 +370,13 @@ impl ExecutionContext {
             }
 
             let count = self.drain_and_process(cx, pending)?;
-            let answered = self.answer(inflight);
+
+            // A failed write also opens the output gate: its response must
+            // not go out before the object stops
+            let answered = match self.gate() {
+                Gate::Broken(_) => break,
+                Gate::State { writing, .. } => !writing && self.answer(inflight),
+            };
 
             if admitted == 0 && count == 0 && !answered {
                 break;
@@ -402,19 +411,20 @@ impl ExecutionContext {
             let function = object
                 .get(scope, key.into())
                 .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
-                .expect("durable_object.js answers blocked and failure");
+                .expect("durable_object.js answers blocked, failure and writing");
 
             function.call(scope, object.into(), &[])
         };
 
         let failure = call("failure").filter(|value| value.is_string());
         let blocked = call("blocked").is_some_and(|value| value.is_true());
+        let writing = call("writing").is_some_and(|value| value.is_true());
 
         if let Some(failure) = failure {
             return Gate::Broken(failure.to_rust_string_lossy(scope));
         }
 
-        if blocked { Gate::Closed } else { Gate::Open }
+        Gate::State { blocked, writing }
     }
 
     /// Hands the request to the object.

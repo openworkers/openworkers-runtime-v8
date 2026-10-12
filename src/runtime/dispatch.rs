@@ -13,6 +13,7 @@ use std::sync::Arc;
 use openworkers_core::D1Result;
 use openworkers_core::DatabaseResult;
 use openworkers_core::KvResult;
+use openworkers_core::ObjectStorageResult;
 use openworkers_core::StorageResult;
 
 use super::CallbackId;
@@ -198,6 +199,44 @@ pub(crate) fn dispatch(
             settle(scope, tables, callback_id, error_msg.as_deref(), value);
         }
 
+        CallbackMessage::ObjectStorage(callback_id, result) => {
+            let value = match result {
+                ObjectStorageResult::Error(message) => {
+                    settle(scope, tables, callback_id, Some(&message), None);
+                    return;
+                }
+                ObjectStorageResult::Values(values) => {
+                    let values: Vec<v8::Local<v8::Value>> = values
+                        .iter()
+                        .map(|bytes| match bytes {
+                            Some(bytes) => stored_value(scope, bytes),
+                            None => v8::undefined(scope).into(),
+                        })
+                        .collect();
+
+                    v8::Array::new_with_elements(scope, &values).into()
+                }
+                ObjectStorageResult::Entries(entries) => {
+                    let entries: Vec<v8::Local<v8::Value>> = entries
+                        .iter()
+                        .map(|(key, bytes)| {
+                            let key = v8::String::new(scope, key).unwrap().into();
+                            let value = stored_value(scope, bytes);
+
+                            v8::Array::new_with_elements(scope, &[key, value]).into()
+                        })
+                        .collect();
+
+                    v8::Array::new_with_elements(scope, &entries).into()
+                }
+                ObjectStorageResult::Written { deleted } => {
+                    v8::Number::new(scope, deleted as f64).into()
+                }
+            };
+
+            settle(scope, tables, callback_id, None, Some(value));
+        }
+
         CallbackMessage::WebSocketConnected(callback_id, ws_id) => {
             let ws_id_val: v8::Local<v8::Value> = v8::Number::new(scope, ws_id as f64).into();
 
@@ -212,6 +251,12 @@ pub(crate) fn dispatch(
             dispatch_ws_event(scope, tables.ws_event, ws_id, incoming);
         }
     }
+}
+
+/// A stored value, or undefined for bytes that do not read back, which only
+/// a store that changed them can give.
+fn stored_value<'s>(scope: &mut v8::PinScope<'s, '_>, bytes: &[u8]) -> v8::Local<'s, v8::Value> {
+    super::bindings::deserialize(scope, bytes).unwrap_or_else(|| v8::undefined(scope).into())
 }
 
 fn settle(
