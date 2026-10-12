@@ -4,6 +4,7 @@ mod macros;
 mod async_context;
 mod compression;
 mod console;
+mod durable_object;
 mod fetch;
 mod native;
 mod state;
@@ -20,6 +21,7 @@ pub use state::{FetchState, LogCallback, ResponseStreamState, StreamState, WebSo
 pub use async_context::{clear_async_context, setup_async_context_natives};
 pub use compression::setup_compression_natives;
 pub use console::{log_callback_from_ops, setup_console};
+pub use durable_object::setup_durable_object_ids;
 pub use fetch::setup_fetch;
 pub use native::register_op;
 pub use native::seal as seal_native_namespace;

@@ -294,6 +294,7 @@ pub(crate) fn setup_env(
                 BindingType::D1 => "d1",
                 BindingType::Worker => "worker",
                 BindingType::Images => "images",
+                BindingType::DurableObject => "durable_object",
             };
 
             serde_json::json!({ "name": binding.name, "type": kind })

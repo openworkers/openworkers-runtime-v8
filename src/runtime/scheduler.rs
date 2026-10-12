@@ -77,6 +77,8 @@ pub enum SchedulerMessage {
     BindingDatabase(CallbackId, String, DatabaseOp),
     BindingD1(CallbackId, String, D1Op),
     BindingWorker(CallbackId, String, HttpRequest),
+    /// A request to the Durable Object of an id
+    BindingDurableObject(CallbackId, String, String, HttpRequest),
     StreamRead(CallbackId, stream_manager::StreamId),
     StreamCancel(stream_manager::StreamId),
     WebSocketConnect(CallbackId, WebSocketId, String, HashMap<String, String>),
@@ -379,74 +381,26 @@ pub async fn run_event_loop(
                         });
                     }
 
-                    SchedulerMessage::BindingWorker(callback_id, binding_name, request) => {
-                        let callback_tx = callback_tx.clone();
-                        let manager = stream_manager.clone();
-                        let ops = ops.clone();
-                        let cancel = request_cancel.clone();
+                    SchedulerMessage::BindingWorker(callback_id, binding, request) => {
+                        tokio::spawn(answer_binding_request(
+                            Operation::BindingWorker { binding, request },
+                            callback_id,
+                            callback_tx.clone(),
+                            stream_manager.clone(),
+                            ops.clone(),
+                            request_cancel.clone(),
+                        ));
+                    }
 
-                        tokio::spawn(async move {
-                            let result = tokio::select! {
-                                biased;
-                                _ = cancel.cancelled() => {
-                                    let _ = callback_tx.send(CallbackMessage::FetchError(callback_id, CANCELLED.into()));
-                                    return;
-                                }
-                                r = ops.handle(Operation::BindingWorker {
-                                    binding: binding_name,
-                                    request,
-                                }) => r,
-                            };
-
-                            match result {
-                                OperationResult::Http(Ok(response)) => {
-                                    let meta = HttpResponseMeta {
-                                        status: response.status,
-                                        status_text: String::new(),
-                                        headers: response.headers.into_iter().collect(),
-                                    };
-
-                                    let stream_id = manager.create_stream("worker_binding".to_string());
-
-                                    match response.body {
-                                        ResponseBody::None => {
-                                            let _ = manager
-                                                .write_chunk(stream_id, stream_manager::StreamChunk::Done)
-                                                .await;
-                                        }
-                                        ResponseBody::Bytes(bytes) => {
-                                            let _ = manager
-                                                .write_chunk(
-                                                    stream_id,
-                                                    stream_manager::StreamChunk::Data(bytes),
-                                                )
-                                                .await;
-                                            let _ = manager
-                                                .write_chunk(stream_id, stream_manager::StreamChunk::Done)
-                                                .await;
-                                        }
-                                        ResponseBody::Stream(rx) => {
-                                            spawn_stream_reader(rx, stream_id, manager.clone(), cancel.clone());
-                                        }
-                                    }
-
-                                    let _ = callback_tx.send(CallbackMessage::FetchStreamingSuccess(
-                                        callback_id,
-                                        meta,
-                                        stream_id,
-                                    ));
-                                }
-                                OperationResult::Http(Err(e)) => {
-                                    let _ = callback_tx.send(CallbackMessage::FetchError(callback_id, e));
-                                }
-                                _ => {
-                                    let _ = callback_tx.send(CallbackMessage::FetchError(
-                                        callback_id,
-                                        "Unexpected result type for worker binding".into(),
-                                    ));
-                                }
-                            }
-                        });
+                    SchedulerMessage::BindingDurableObject(callback_id, binding, id, request) => {
+                        tokio::spawn(answer_binding_request(
+                            Operation::BindingDurableObject { binding, id, request },
+                            callback_id,
+                            callback_tx.clone(),
+                            stream_manager.clone(),
+                            ops.clone(),
+                            request_cancel.clone(),
+                        ));
                     }
 
                     SchedulerMessage::WebSocketConnect(callback_id, ws_id, url, headers) => {
@@ -592,6 +546,74 @@ pub async fn run_event_loop(
             break;
         }
     }
+}
+
+/// Runs a request through a binding that answers a Response, a worker or a
+/// Durable Object, and hands the response to the guest.
+async fn answer_binding_request(
+    op: Operation,
+    callback_id: CallbackId,
+    callback_tx: CallbackSender,
+    manager: Arc<StreamManager>,
+    ops: OperationsHandle,
+    cancel: CancellationToken,
+) {
+    let result = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            let _ = callback_tx.send(CallbackMessage::FetchError(callback_id, CANCELLED.into()));
+            return;
+        }
+        r = ops.handle(op) => r,
+    };
+
+    let response = match result {
+        OperationResult::Http(Ok(response)) => response,
+        OperationResult::Http(Err(e)) => {
+            let _ = callback_tx.send(CallbackMessage::FetchError(callback_id, e));
+            return;
+        }
+        _ => {
+            let _ = callback_tx.send(CallbackMessage::FetchError(
+                callback_id,
+                "Unexpected result type for a binding request".into(),
+            ));
+            return;
+        }
+    };
+
+    let meta = HttpResponseMeta {
+        status: response.status,
+        status_text: String::new(),
+        headers: response.headers.into_iter().collect(),
+    };
+
+    let stream_id = manager.create_stream("binding_request".to_string());
+
+    match response.body {
+        ResponseBody::None => {
+            let _ = manager
+                .write_chunk(stream_id, stream_manager::StreamChunk::Done)
+                .await;
+        }
+        ResponseBody::Bytes(bytes) => {
+            let _ = manager
+                .write_chunk(stream_id, stream_manager::StreamChunk::Data(bytes))
+                .await;
+            let _ = manager
+                .write_chunk(stream_id, stream_manager::StreamChunk::Done)
+                .await;
+        }
+        ResponseBody::Stream(rx) => {
+            spawn_stream_reader(rx, stream_id, manager.clone(), cancel.clone());
+        }
+    }
+
+    let _ = callback_tx.send(CallbackMessage::FetchStreamingSuccess(
+        callback_id,
+        meta,
+        stream_id,
+    ));
 }
 
 /// Spawn a task that reads chunks from a response body stream and writes them

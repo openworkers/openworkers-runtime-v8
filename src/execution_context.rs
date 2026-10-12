@@ -175,6 +175,7 @@ impl ExecutionContext {
             );
             bindings::setup_response_stream_ops(scope, stream_manager.clone());
             bindings::setup_websocket(scope, ws_event_callbacks.clone());
+            bindings::setup_durable_object_ids(scope, ops.clone());
             crypto::setup_crypto(scope);
 
             // Native text encoding (can't be serialized in snapshot)

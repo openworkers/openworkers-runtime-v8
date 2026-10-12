@@ -465,6 +465,53 @@ pub fn setup_fetch(
         SchedulerMessage::BindingWorker(id, name, req)
     });
 
+    // __nativeBindingDurableObject(name, id, request, resolve, reject)
+    let native_binding_durable_object_fn = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope,
+         args: v8::FunctionCallbackArguments,
+         mut _retval: v8::ReturnValue| {
+            let Some(state) = get_state!(scope, FetchState) else {
+                return;
+            };
+
+            let Ok(binding) = serde_v8::from_v8_any::<String>(scope, args.get(0)) else {
+                return throw_type_error(scope, "durable object: the binding name is not a string");
+            };
+
+            let Ok(id) = serde_v8::from_v8_any::<String>(scope, args.get(1)) else {
+                return throw_type_error(scope, "durable object: the id is not a string");
+            };
+
+            let request = match parse_http_request(scope, args.get(2)) {
+                Ok(request) => request,
+                Err(message) => return throw_type_error(scope, &message),
+            };
+
+            let Some((resolve, reject)) = resolve_reject(scope, args.get(3), args.get(4)) else {
+                return;
+            };
+
+            let callback_id = register_callbacks_with_error(&state, scope, resolve, reject);
+
+            let _ = state
+                .scheduler_tx
+                .send(SchedulerMessage::BindingDurableObject(
+                    callback_id,
+                    binding,
+                    id,
+                    request,
+                ));
+        },
+    )
+    .unwrap();
+
+    register_fn!(
+        scope,
+        "__nativeBindingDurableObject",
+        native_binding_durable_object_fn
+    );
+
     // JavaScript fetch implementation using Promises with streaming support
     let code = r#"
         // Serialize FormData to multipart/form-data

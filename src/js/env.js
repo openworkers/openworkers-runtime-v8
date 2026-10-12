@@ -129,6 +129,76 @@
         });
     };
 
+    // Durable Object ids, keyed by the frozen object the guest holds, so get()
+    // reads the namespace and the id the guest cannot change.
+    const objectIds = new WeakMap();
+
+    const objectId = (binding, id, name) => {
+        const value = Object.freeze({
+            name,
+            toString: () => id,
+            equals: (other) => other !== null && typeof other === 'object' && String(other) === id,
+        });
+
+        objectIds.set(value, { binding, id });
+
+        return value;
+    };
+
+    const noJurisdiction = (options) => {
+        if (options?.jurisdiction !== undefined) {
+            throw new TypeError('Durable Objects: jurisdictions are not supported');
+        }
+    };
+
+    const durableObjectNamespace = (binding) => {
+        const idFromName = (name) => {
+            if (typeof name !== 'string') {
+                throw new TypeError('Durable Objects: idFromName() needs a string');
+            }
+
+            return objectId(binding, __nativeDurableObjectId(binding, 'name', name), name);
+        };
+
+        const get = (id) => {
+            const entry = objectIds.get(id);
+
+            if (entry === undefined || entry.binding !== binding) {
+                throw new TypeError('Durable Objects: get() takes an id of this namespace');
+            }
+
+            const send = (name, request, resolve, reject) =>
+                __nativeBindingDurableObject(name, entry.id, request, resolve, reject);
+
+            return Object.freeze({
+                id,
+                name: id.name,
+                fetch: (input, options) => bindingFetch(send, binding, input, options),
+            });
+        };
+
+        return Object.freeze({
+            idFromName,
+            idFromString: (text) => {
+                if (typeof text !== 'string') {
+                    throw new TypeError('Durable Objects: idFromString() needs a string');
+                }
+
+                return objectId(binding, __nativeDurableObjectId(binding, 'text', text));
+            },
+            newUniqueId: (options) => {
+                noJurisdiction(options);
+
+                return objectId(binding, __nativeDurableObjectId(binding, 'unique'));
+            },
+            get: (id) => get(id),
+            getByName: (name) => get(idFromName(name)),
+            jurisdiction: () => {
+                throw new TypeError('Durable Objects: jurisdictions are not supported');
+            },
+        });
+    };
+
     const make = {
         assets: (name) => ({
             fetch: (input, options) => bindingFetch(__nativeBindingFetch, name, input, options),
@@ -180,6 +250,8 @@
         worker: (name) => ({
             fetch: (input, options) => bindingFetch(__nativeBindingWorker, name, input, options),
         }),
+
+        durable_object: (name) => durableObjectNamespace(name),
 
         // No native handler yet, so the binding exists only to say so
         images: () => ({
