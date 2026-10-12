@@ -7,7 +7,8 @@
 //!
 //! - [`array_buffer_allocator`]: Custom V8 ArrayBuffer allocator with memory limits
 //! - [`heap_limit`]: Near-heap-limit callback to prevent V8 OOM crashes
-//! - [`timeout_guard`]: Wall-clock timeout enforcement via watchdog thread
+//! - [`timeout_guard`]: Wall-clock timeout enforcement through one watchdog
+//!   thread per process
 //! - [`cpu_enforcer`]: CPU time limit of one request, counted over its turns;
 //!   Linux also cuts a turn that runs past it, through a POSIX timer
 //! - [`turn`]: which request runs JS on an isolate, so a guard stops only
