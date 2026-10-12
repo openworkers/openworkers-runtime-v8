@@ -38,6 +38,11 @@ const COUNTER: &str = r#"
                     return new Response('slow ' + this.count);
                 case '/spin':
                     while (true) {}
+                case '/tick':
+                    setInterval(() => {}, 10);
+                    return new Response('ticking');
+                case '/forever':
+                    await new Promise(() => {});
                 default:
                     this.count += 1;
                     return new Response(String(this.count));
@@ -231,6 +236,36 @@ async fn an_event_in_flight_keeps_the_object() {
         // Longer than the idle time, but the object has an event in flight
         assert_eq!(text(send(&object, "/slow")).await, "slow 1");
         assert_eq!(text(send(&object, "/")).await, "2");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_timer_does_not_keep_an_idle_object() {
+    run_in_local(|| async {
+        let object = start(spec(COUNTER, Duration::from_millis(100)));
+
+        assert_eq!(text(send(&object, "/")).await, "1");
+        assert_eq!(text(send(&object, "/tick")).await, "ticking");
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        assert_eq!(text(send(&object, "/")).await, "1");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_event_whose_caller_left_does_not_keep_the_object() {
+    run_in_local(|| async {
+        let object = start(spec(COUNTER, Duration::from_millis(100)));
+
+        assert_eq!(text(send(&object, "/")).await, "1");
+        drop(send(&object, "/forever"));
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        assert_eq!(text(send(&object, "/")).await, "1");
     })
     .await;
 }

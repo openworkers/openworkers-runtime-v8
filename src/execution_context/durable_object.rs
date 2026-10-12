@@ -88,7 +88,8 @@ enum Gate {
 
 /// What a turn did.
 struct TurnOutcome {
-    busy: bool,
+    /// It took an event
+    admitted: bool,
     gate: Gate,
 }
 
@@ -280,6 +281,7 @@ impl ExecutionContext {
                 self.limits.max_wall_clock_time_ms,
             );
             let turn = TurnGuard::begin(&pooled.turn, self.request_id, cpu.as_ref(), &memory_hit);
+            let active = !inflight.is_empty();
             let outcome = self.turn(
                 cx,
                 mailbox,
@@ -316,7 +318,17 @@ impl ExecutionContext {
                 Gate::State { blocked: false, .. } => gate_timer = None,
             }
 
-            if !inflight.is_empty() || outcome.busy {
+            // A caller that left takes its event out of the count; the code
+            // of the event may still run, but it keeps the object no longer
+            inflight.retain_mut(|event| {
+                !event
+                    .res_tx
+                    .as_mut()
+                    .is_some_and(|res_tx| res_tx.poll_closed(cx).is_ready())
+            });
+
+            // Timers do not keep the object: only events in flight do
+            if active || outcome.admitted || !inflight.is_empty() {
                 idle_timer.as_mut().reset(Instant::now() + idle);
             }
 
@@ -347,7 +359,7 @@ impl ExecutionContext {
         pending: &mut Vec<crate::runtime::CallbackMessage>,
         closed: &mut bool,
     ) -> Result<TurnOutcome, String> {
-        let mut busy = false;
+        let mut took = false;
 
         for round in 0..MAX_ROUNDS {
             let mut admitted = 0;
@@ -378,11 +390,11 @@ impl ExecutionContext {
                 Gate::State { writing, .. } => !writing && self.answer(inflight),
             };
 
+            took |= admitted > 0;
+
             if admitted == 0 && count == 0 && !answered {
                 break;
             }
-
-            busy = true;
 
             // More work may be waiting, and nothing else wakes the loop for it
             if round == MAX_ROUNDS - 1 {
@@ -391,7 +403,7 @@ impl ExecutionContext {
         }
 
         Ok(TurnOutcome {
-            busy,
+            admitted: took,
             gate: self.gate(),
         })
     }
