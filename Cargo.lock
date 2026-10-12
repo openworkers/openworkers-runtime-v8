@@ -1250,8 +1250,8 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "openworkers-core"
-version = "0.16.1"
-source = "git+https://github.com/openworkers/openworkers-core?tag=v0.16.1#7fea579e658d7b47c0b52d16c77b2e9d62f77bf6"
+version = "0.17.0"
+source = "git+https://github.com/openworkers/openworkers-core?tag=v0.17.0#9e0d99e03c1fcf0394afea51cdf1390bfee607f1"
 dependencies = [
  "base64 0.23.1",
  "bytes",
