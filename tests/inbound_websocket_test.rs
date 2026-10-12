@@ -242,14 +242,25 @@ async fn a_turn_on_the_socket_that_never_yields_is_cut() {
         let event = start(code, limits, init).await;
 
         upgraded(res_rx).await;
-        let peer = Peer::connect(socket_tx);
+        let mut peer = Peer::connect(socket_tx);
         peer.send("spin");
 
-        let (_worker, outcome) = finish(event).await;
+        let (worker, outcome) = finish(event).await;
         assert!(
             matches!(outcome, Err(TerminationReason::WallClockTimeout)),
             "{outcome:?}"
         );
+
+        // The pool drops a context whose event failed, and the client gets an
+        // internal error
+        drop(worker);
+
+        match peer.recv().await {
+            WebSocketOutgoing::Close { code, reason } => {
+                assert_eq!((code, reason.as_str()), (1011, "The worker stopped"));
+            }
+            other => panic!("not a close: {other:?}"),
+        }
     })
     .await;
 }

@@ -30,6 +30,16 @@ pub type CallbackId = u64;
 /// is never settled parks the event loop for the life of the context.
 const CANCELLED: &str = "Operation cancelled";
 
+/// The end of a socket that the guest holds, which sets the close frame of a
+/// cancelled request.
+#[derive(Clone, Copy)]
+enum End {
+    /// An outgoing socket: the guest goes away, 1001.
+    Client,
+    /// The server end of a WebSocketPair: the worker failed, 1011.
+    Server,
+}
+
 /// Wrapper that sends a callback message AND notifies the exec() loop
 #[derive(Clone)]
 pub struct CallbackSender {
@@ -758,7 +768,7 @@ async fn run_websocket(
         }
     };
 
-    pump_websocket(ws_id, conn, false, cmd_rx, callback_tx, cancel).await;
+    pump_websocket(ws_id, conn, End::Client, false, cmd_rx, callback_tx, cancel).await;
 }
 
 /// The server end of a WebSocketPair. Until the runner gives it the socket of
@@ -817,7 +827,16 @@ async fn run_server_websocket(
         let _ = conn.send_tx.send(msg);
     }
 
-    pump_websocket(ws_id, conn, accepted, cmd_rx, callback_tx, cancel).await;
+    pump_websocket(
+        ws_id,
+        conn,
+        End::Server,
+        accepted,
+        cmd_rx,
+        callback_tx,
+        cancel,
+    )
+    .await;
 }
 
 /// Moves the messages of a connected socket: the guest's commands out, and
@@ -825,6 +844,7 @@ async fn run_server_websocket(
 async fn pump_websocket(
     ws_id: WebSocketId,
     conn: WebSocketConnection,
+    end: End,
     mut accepted: bool,
     mut cmd_rx: mpsc::UnboundedReceiver<WebSocketCommand>,
     callback_tx: CallbackSender,
@@ -839,13 +859,18 @@ async fn pump_websocket(
             biased;
 
             // The guest may be awaiting close; the socket is not coming back. The
-            // frame says 1001, since 1006 must never go on the wire; the guest sees
-            // 1006, the code a client treats as a dropped connection.
+            // frame cannot say 1006, which must never go on the wire; the guest
+            // sees 1006, the code a client treats as a dropped connection.
             _ = cancel.cancelled() => {
-                let _ = send_tx.send(WebSocketOutgoing::Close { code: 1001, reason: CANCELLED.into() });
+                let (code, reason) = match end {
+                    End::Client => (1001, CANCELLED),
+                    End::Server => (1011, "The worker stopped"),
+                };
+
+                let _ = send_tx.send(WebSocketOutgoing::Close { code, reason: reason.into() });
                 let _ = callback_tx.send(CallbackMessage::WebSocketEvent(
                     ws_id,
-                    WebSocketIncoming::Closed { code: 1006, reason: CANCELLED.into() },
+                    WebSocketIncoming::Closed { code: 1006, reason: reason.into() },
                 ));
                 break;
             }

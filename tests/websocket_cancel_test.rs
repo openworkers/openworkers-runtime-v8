@@ -97,6 +97,8 @@ async fn cancelling_the_request_closes_the_socket_the_guest_awaits() {
         };
         let (task, rx) = Event::fetch(request);
 
+        let ops = Arc::new(SilentServer::default());
+
         let finished = tokio::time::timeout(
             Duration::from_secs(5),
             execute_pinned(PinnedExecuteRequest {
@@ -104,7 +106,7 @@ async fn cancelling_the_request_closes_the_socket_the_guest_awaits() {
                 worker_id: "ws-cancel-worker".to_string(),
                 version: 1,
                 script: Script::new(SCRIPT),
-                ops: Arc::new(SilentServer::default()),
+                ops: ops.clone(),
                 task,
                 on_warm_hit: None,
                 env_updated_at: None,
@@ -127,6 +129,16 @@ async fn cancelling_the_request_closes_the_socket_the_guest_awaits() {
             String::from_utf8_lossy(&body),
             "closed:1006:Operation cancelled"
         );
+
+        // The guest goes away, so the server gets 1001
+        let (mut from_guest, _to_guest) = ops.ends.lock().unwrap().pop().unwrap();
+
+        match from_guest.try_recv() {
+            Ok(WebSocketOutgoing::Close { code, reason }) => {
+                assert_eq!((code, reason.as_str()), (1001, "Operation cancelled"));
+            }
+            other => panic!("not a close: {other:?}"),
+        }
     })
     .await;
 }
