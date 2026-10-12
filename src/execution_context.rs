@@ -6,7 +6,7 @@
 //!
 //! The context is cheap to create (tens of us) compared to an isolate (few ms without snapshot).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -19,16 +19,16 @@ use crate::LockerManagedIsolate;
 use crate::async_waiter::AsyncWaiter;
 use crate::execution_helpers::{
     AbortConfig, EventLoopExit, ListenerMarks, check_exit_condition, get_completion_state,
-    get_response_stream_id, read_marks, read_response_object, read_task_result,
-    signal_client_disconnect, trigger_fetch_handler, trigger_task_handler,
+    get_response_stream_id, read_marks, read_response_object, read_response_socket,
+    read_task_result, signal_client_disconnect, trigger_fetch_handler, trigger_task_handler,
 };
 use crate::request_context::RequestContext;
 use crate::runtime::stream_manager;
-use crate::runtime::{bindings, crypto, text_encoding};
+use crate::runtime::{SchedulerMessage, bindings, crypto, text_encoding};
 use crate::security::{CpuEnforcer, TimeoutGuard, TurnGuard, next_request_id};
 use openworkers_core::{
     Event, HttpResponse, OperationsHandle, RequestBody, ResponseBody, RuntimeLimits, Script,
-    TerminationReason, WorkerCode,
+    TerminationReason, WebSocketId, WorkerCode,
 };
 
 /// A disposable execution context for running a worker script
@@ -69,6 +69,9 @@ pub struct ExecutionContext {
 
     /// The id of the event exec() ran last, for the isolate's turn.
     request_id: u64,
+
+    /// The server end of the pair the response of the event handed over.
+    socket: Option<WebSocketId>,
 }
 
 /// The wall clock and CPU limits of one event, from its start to the end of
@@ -76,6 +79,24 @@ pub struct ExecutionContext {
 struct Budget {
     wall: TimeoutGuard,
     cpu: Option<CpuEnforcer>,
+}
+
+/// The wall-clock limit of a run of the event loop.
+enum WallClock<'a> {
+    /// The deadline of the event, which also runs while the event waits
+    Event(&'a TimeoutGuard),
+    /// A deadline and a full CPU budget for each turn: an open socket waits
+    /// for its peer for free, and JS that never yields is still cut
+    PerTurn { timeout_ms: u64, hit: Cell<bool> },
+}
+
+impl WallClock<'_> {
+    fn triggered(&self) -> bool {
+        match self {
+            Self::Event(guard) => guard.was_triggered(),
+            Self::PerTurn { hit, .. } => hit.get(),
+        }
+    }
 }
 
 impl ExecutionContext {
@@ -249,6 +270,7 @@ impl ExecutionContext {
             budget: None,
             marks: ListenerMarks::default(),
             request_id: 0,
+            socket: None,
         })
     }
 
@@ -275,6 +297,7 @@ impl ExecutionContext {
             budget: None,
             marks: ListenerMarks::default(),
             request_id: 0,
+            socket: None,
         }
     }
 
@@ -609,6 +632,10 @@ impl ExecutionContext {
     ) -> bool {
         use std::pin::pin;
 
+        if let EventLoopExit::SocketClosed = exit_condition {
+            return !self.socket_open();
+        }
+
         {
             let mut isolate = self.isolate();
             let scope = pin!(v8::HandleScope::new(&mut isolate));
@@ -674,16 +701,21 @@ impl ExecutionContext {
         // The guards stop this event only, not one that shares the isolate
         self.request_id = next_request_id();
         self.memory_hit.store(false, Ordering::SeqCst);
+        self.socket = None;
         let turn = Arc::clone(&self.pooled.turn);
-        let wall_guard = TimeoutGuard::new(
+        let mut wall_guard = TimeoutGuard::new(
             Arc::clone(&turn),
             self.request_id,
             self.limits.max_wall_clock_time_ms,
         );
-        let cpu_guard = CpuEnforcer::new(turn, self.request_id, self.limits.max_cpu_time_ms);
+        let cpu_guard = CpuEnforcer::new(
+            Arc::clone(&turn),
+            self.request_id,
+            self.limits.max_cpu_time_ms,
+        );
 
         // Execute the task
-        let result = match task {
+        let mut result = match task {
             Event::Fetch(ref mut init) => {
                 let fetch_init = init.take().ok_or(TerminationReason::Other(
                     "FetchInit already consumed".to_string(),
@@ -705,6 +737,41 @@ impl ExecutionContext {
             }
         };
 
+        let mut socket_wall_hit = false;
+
+        if result.is_ok() && self.socket_open() {
+            // The deadline of the event stops at the 101, and each turn of the
+            // socket gets one of its own
+            drop(wall_guard);
+            let wall = WallClock::PerTurn {
+                timeout_ms: self.limits.max_wall_clock_time_ms,
+                hit: Cell::new(false),
+            };
+
+            result = self
+                .await_event_loop(&wall, &cpu_guard, EventLoopExit::SocketClosed, None)
+                .await
+                .and(result);
+            socket_wall_hit = wall.triggered();
+
+            // What the waitUntil work has left after the socket closes
+            wall_guard = TimeoutGuard::new(
+                Arc::clone(&turn),
+                self.request_id,
+                self.limits.max_wall_clock_time_ms,
+            );
+        }
+
+        // A socket the guest never accepted has no reader: close it with the event
+        if let Some(ws_id) = self.socket
+            && !self.socket_open()
+        {
+            let _ = self
+                .request
+                .scheduler_tx
+                .send(SchedulerMessage::WebSocketClose(ws_id, 1000, String::new()));
+        }
+
         // Determine termination reason by checking guards (in priority order)
         let outcome = self.check_termination_reason(
             result,
@@ -712,7 +779,7 @@ impl ExecutionContext {
                 .as_ref()
                 .map(|g| g.was_terminated())
                 .unwrap_or(false),
-            wall_guard.was_triggered(),
+            socket_wall_hit || wall_guard.was_triggered(),
         );
 
         // The waitUntil work drain_waituntil runs next spends what is left of
@@ -759,7 +826,12 @@ impl ExecutionContext {
         };
 
         let result = self
-            .await_event_loop(&wall_guard, &cpu_guard, EventLoopExit::FullyComplete, None)
+            .await_event_loop(
+                &WallClock::Event(&wall_guard),
+                &cpu_guard,
+                EventLoopExit::FullyComplete,
+                None,
+            )
             .await;
 
         self.check_termination_reason(
@@ -812,6 +884,16 @@ impl ExecutionContext {
         }
     }
 
+    /// Whether the socket of the upgrade is open and the guest reads it.
+    fn socket_open(&self) -> bool {
+        self.socket.is_some_and(|ws_id| {
+            self.request
+                .ws_event_callbacks
+                .borrow()
+                .contains_key(&ws_id)
+        })
+    }
+
     /// Check if execution should be terminated
     ///
     /// Returns true if any termination condition is met:
@@ -819,15 +901,11 @@ impl ExecutionContext {
     /// - Wall-clock timeout triggered
     /// - CPU time limit exceeded
     #[inline]
-    pub fn is_terminated(
-        &self,
-        wall_guard: &TimeoutGuard,
-        cpu_guard: &Option<CpuEnforcer>,
-    ) -> bool {
+    fn is_terminated(&self, wall: &WallClock, cpu_guard: &Option<CpuEnforcer>) -> bool {
         {
             self.isolate().is_execution_terminating()
                 || self.memory_hit.load(Ordering::SeqCst)
-                || wall_guard.was_triggered()
+                || wall.triggered()
                 || cpu_guard
                     .as_ref()
                     .map(|g| g.was_terminated())
@@ -841,7 +919,7 @@ impl ExecutionContext {
     /// Uses poll_fn for true async polling instead of sleep-based polling.
     async fn await_event_loop(
         &mut self,
-        wall_guard: &TimeoutGuard,
+        wall: &WallClock<'_>,
         cpu_guard: &Option<CpuEnforcer>,
         exit_condition: EventLoopExit,
         abort_config: Option<AbortConfig>,
@@ -857,8 +935,12 @@ impl ExecutionContext {
         let request_id = self.request_id;
         let memory_hit = Arc::clone(&self.memory_hit);
 
-        let mut deadline = wall_guard
-            .deadline()
+        let event_wall = match wall {
+            WallClock::Event(guard) => Some(*guard),
+            WallClock::PerTurn { .. } => None,
+        };
+        let mut deadline = event_wall
+            .and_then(TimeoutGuard::deadline)
             .map(|at| Box::pin(tokio::time::sleep_until(at)));
 
         std::future::poll_fn(|cx| {
@@ -872,8 +954,9 @@ impl ExecutionContext {
             // to read it, so the deadline is polled here as well.
             if let Some(sleep) = deadline.as_mut()
                 && sleep.as_mut().poll(cx).is_ready()
+                && let Some(guard) = event_wall
             {
-                wall_guard.expire();
+                guard.expire();
                 return Poll::Ready(Err("Execution terminated".to_string()));
             }
 
@@ -889,10 +972,26 @@ impl ExecutionContext {
             // The Locker and JsLock drop when this closure returns, Pending
             // included, so the V8 mutex is free for other tasks during I/O waits.
             let _lock_guard = pooled.lock();
+
+            let turn_wall = match wall {
+                WallClock::Event(_) => None,
+                WallClock::PerTurn { timeout_ms, .. } => {
+                    if let Some(cpu) = cpu_guard {
+                        cpu.refill();
+                    }
+
+                    Some(TimeoutGuard::new(
+                        Arc::clone(&pooled.turn),
+                        request_id,
+                        *timeout_ms,
+                    ))
+                }
+            };
+
             let turn = TurnGuard::begin(&pooled.turn, request_id, cpu_guard.as_ref(), &memory_hit);
 
             // 1. Check termination (CPU/wall-clock guards)
-            if self.is_terminated(wall_guard, cpu_guard) {
+            if self.is_terminated(wall, cpu_guard) {
                 if let Some(ref waiter) = async_waiter {
                     waiter.unlock();
                 }
@@ -945,7 +1044,14 @@ impl ExecutionContext {
             // A guard that cut this turn's JS also cut what would wake this
             // loop again, so the request ends here
             drop(turn);
-            let terminated = self.is_terminated(wall_guard, cpu_guard);
+
+            if let WallClock::PerTurn { hit, .. } = wall
+                && turn_wall.is_some_and(|guard| guard.was_triggered())
+            {
+                hit.set(true);
+            }
+
+            let terminated = self.is_terminated(wall, cpu_guard);
 
             // 6. Not done yet — release fair queue and V8 lock.
             //    V8 mutex released, other requests can run on this isolate.
@@ -1045,11 +1151,16 @@ impl ExecutionContext {
         }
 
         // -- Phase 2: Wait for response (lock-per-poll in await_event_loop) --
-        self.await_event_loop(wall_guard, cpu_guard, EventLoopExit::ResponseReady, None)
-            .await?;
+        self.await_event_loop(
+            &WallClock::Event(wall_guard),
+            cpu_guard,
+            EventLoopExit::ResponseReady,
+            None,
+        )
+        .await?;
 
         // -- Phase 3: Read response (fair queue + lock) --
-        let ((status, response), marks) = {
+        let ((status, response), marks, socket) = {
             let pooled = Arc::clone(&self.pooled);
             let async_waiter = self.async_waiter.clone();
             let request_id = self.request_id;
@@ -1080,6 +1191,7 @@ impl ExecutionContext {
                         .map(|handle| v8::Local::new(scope, handle));
 
                     let marks = read_marks(scope, handle);
+                    let socket = read_response_socket(scope, handle);
 
                     read_response_object(
                         scope,
@@ -1087,7 +1199,7 @@ impl ExecutionContext {
                         &self.request.stream_manager,
                         self.limits.stream_buffer_size,
                     )
-                    .map(|answer| (answer, marks))
+                    .map(|answer| (answer, marks, socket))
                 };
 
                 if let Some(ref waiter) = async_waiter {
@@ -1100,11 +1212,38 @@ impl ExecutionContext {
         };
 
         self.marks = marks;
+
+        let (upgrade, refusal) = match (socket, fetch_init.upgrade) {
+            (Some(ws_id), Some(upgrade)) => (Some((ws_id, upgrade)), None),
+            (Some(_), None) => (
+                None,
+                Some(
+                    "The response carries a WebSocket, but the request is not a WebSocket upgrade",
+                ),
+            ),
+            (None, _) if status == 101 => (
+                None,
+                Some("A 101 response must carry the client end of a WebSocketPair"),
+            ),
+            (None, _) => (None, None),
+        };
+
+        // The pairs the response does not carry close here
+        self.socket = upgrade.as_ref().map(|(ws_id, _)| *ws_id);
+        let _ = self
+            .request
+            .scheduler_tx
+            .send(SchedulerMessage::WebSocketUpgrade(upgrade));
+
+        if let Some(refusal) = refusal {
+            return Err(refusal.to_string());
+        }
+
         let _ = fetch_init.res_tx.send(response);
 
         // -- Phase 4: Wait for streams (lock-per-poll) --
         self.await_event_loop(
-            wall_guard,
+            &WallClock::Event(wall_guard),
             cpu_guard,
             EventLoopExit::StreamsComplete,
             Some(AbortConfig::default()),
@@ -1168,8 +1307,19 @@ impl ExecutionContext {
         }
 
         // -- Phase 2: Wait for handler to complete (lock-per-poll) --
-        self.await_event_loop(wall_guard, cpu_guard, EventLoopExit::HandlerComplete, None)
-            .await?;
+        self.await_event_loop(
+            &WallClock::Event(wall_guard),
+            cpu_guard,
+            EventLoopExit::HandlerComplete,
+            None,
+        )
+        .await?;
+
+        // A task has no response to hand a pair over
+        let _ = self
+            .request
+            .scheduler_tx
+            .send(SchedulerMessage::WebSocketUpgrade(None));
 
         // -- Phase 3: Read task result (fair queue + lock) --
         let task_result = {

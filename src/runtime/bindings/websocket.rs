@@ -1,17 +1,18 @@
-//! WebSocket native bindings for outgoing (client) connections.
+//! WebSocket native bindings for outgoing connections and WebSocketPair.
 //!
 //! Provides native functions called by the JS WebSocket class:
-//! - `__nativeWebSocketConnect(url, headers, resolve, reject)` — initiate handshake
-//! - `__nativeWebSocketAccept(wsId, dispatcher)` — start receiving messages
-//! - `__nativeWebSocketSend(wsId, data)` — send a message
-//! - `__nativeWebSocketClose(wsId, code, reason)` — close the connection
+//! - `__nativeWebSocketConnect(url, headers, resolve, reject)`: initiate handshake
+//! - `__nativeWebSocketPair()`: open the server end of a pair, return its wsId
+//! - `__nativeWebSocketAccept(wsId, dispatcher)`: start receiving messages
+//! - `__nativeWebSocketSend(wsId, data)`: send a message
+//! - `__nativeWebSocketClose(wsId, code, reason)`: close the connection
 //!
 //! Connect resolve/reject callbacks reuse FetchState (same CallbackId pattern).
 //! Event dispatchers (message/close/error) use WebSocketEventState (keyed by WebSocketId).
 
 use super::state::{FetchState, WebSocketEventState};
 use openworkers_core::WebSocketOutgoing;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use v8;
@@ -37,6 +38,15 @@ fn string_of(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Option<St
         .map(|s| s.to_rust_string_lossy(scope))
 }
 
+/// A fresh socket id for this context.
+fn next_socket_id(scope: &mut v8::PinScope) -> Option<u64> {
+    let state = get_state!(scope, WebSocketEventState)?;
+    let id = state.next_id.get();
+    state.next_id.set(id + 1);
+
+    Some(id)
+}
+
 /// Register all WebSocket native functions and the JS WebSocket class.
 pub fn setup_websocket(
     scope: &mut v8::ContextScope<v8::HandleScope>,
@@ -45,6 +55,7 @@ pub fn setup_websocket(
     // Store WebSocketEventState in the context slot
     let ws_state = WebSocketEventState {
         callbacks: ws_event_callbacks,
+        next_id: Rc::new(Cell::new(1)),
     };
     store_state!(scope, ws_state);
 
@@ -53,6 +64,11 @@ pub fn setup_websocket(
         scope,
         |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _rv: v8::ReturnValue| {
             let Some(state) = get_state!(scope, FetchState) else {
+                return;
+            };
+            let state = state.clone();
+
+            let Some(ws_id) = next_socket_id(scope) else {
                 return;
             };
 
@@ -98,6 +114,7 @@ pub fn setup_websocket(
 
             let _ = state.scheduler_tx.send(SchedulerMessage::WebSocketConnect(
                 callback_id,
+                ws_id,
                 url,
                 headers,
             ));
@@ -106,6 +123,32 @@ pub fn setup_websocket(
     .unwrap();
 
     register_fn!(scope, "__nativeWebSocketConnect", connect_fn);
+
+    // __nativeWebSocketPair() -> wsId
+    let pair_fn = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope,
+         _args: v8::FunctionCallbackArguments,
+         mut rv: v8::ReturnValue| {
+            let Some(state) = get_state!(scope, FetchState) else {
+                return;
+            };
+            let state = state.clone();
+
+            let Some(ws_id) = next_socket_id(scope) else {
+                return;
+            };
+
+            let _ = state
+                .scheduler_tx
+                .send(SchedulerMessage::WebSocketPair(ws_id));
+
+            rv.set(v8::Number::new(scope, ws_id as f64).into());
+        },
+    )
+    .unwrap();
+
+    register_fn!(scope, "__nativeWebSocketPair", pair_fn);
 
     // __nativeWebSocketAccept(wsId, dispatcher)
     let accept_fn = v8::Function::new(
@@ -403,6 +446,18 @@ pub fn setup_websocket(
         WebSocket.prototype.CLOSED = WS_CLOSED;
 
         globalThis.WebSocket = WebSocket;
+
+        // The client end runs in the client. Here it only names the socket a
+        // 101 response hands over; the server end is a WebSocket of the worker.
+        class WebSocketPair {
+            constructor() {
+                const wsId = __nativeWebSocketPair();
+                this[0] = Object.freeze({ _pairId: wsId });
+                this[1] = WebSocket.__adopt(wsId);
+            }
+        }
+
+        globalThis.WebSocketPair = WebSocketPair;
     "#;
 
     exec_js!(scope, code);

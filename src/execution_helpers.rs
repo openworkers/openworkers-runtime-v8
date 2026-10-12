@@ -4,7 +4,9 @@
 //! ExecutionContext for task execution, event loop management, and response handling.
 
 use crate::runtime::stream_manager::{StreamChunk, StreamManager};
-use openworkers_core::{HttpResponse, RequestBody, ResponseBody, TaskInit, TaskSource};
+use openworkers_core::{
+    HttpResponse, RequestBody, ResponseBody, TaskInit, TaskSource, WebSocketId,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use v8;
@@ -21,6 +23,8 @@ pub enum EventLoopExit {
     StreamsComplete,
     /// `done` and `streamed` are both fulfilled
     FullyComplete,
+    /// The socket of the upgrade is closed
+    SocketClosed,
 }
 
 /// Optional abort handling configuration for event loop.
@@ -96,6 +100,8 @@ pub fn check_exit_condition(
         EventLoopExit::FullyComplete => {
             settled(scope, handle, "done") && settled(scope, handle, "streamed")
         }
+        // No promise of the handle follows the socket
+        EventLoopExit::SocketClosed => true,
     }
 }
 
@@ -145,6 +151,24 @@ impl ListenerMarks {
     pub fn any(&self) -> bool {
         self.late || self.after_settle
     }
+}
+
+/// The pair whose client end the answered Response hands over, from
+/// `new Response(null, { status: 101, webSocket: client })`.
+pub fn read_response_socket(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    handle: Option<v8::Local<v8::Object>>,
+) -> Option<WebSocketId> {
+    let response = answered_response(scope, handle?)?;
+    let key = v8::String::new(scope, "webSocket").unwrap();
+    let client = response.get(scope, key.into())?.to_object(scope)?;
+    let key = v8::String::new(scope, "_pairId").unwrap();
+    let id = client.get(scope, key.into())?;
+
+    id.is_number()
+        .then(|| id.number_value(scope))
+        .flatten()
+        .map(|id| id as WebSocketId)
 }
 
 /// The marks the dispatch left on the handle of an answered fetch.

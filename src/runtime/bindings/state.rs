@@ -1,6 +1,6 @@
 use super::super::{CallbackId, SchedulerMessage, stream_manager};
 use openworkers_core::{LogLevel, WebSocketId};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -57,6 +57,8 @@ pub struct ResponseStreamState {
 #[derive(Clone)]
 pub struct WebSocketEventState {
     pub callbacks: Rc<RefCell<HashMap<WebSocketId, v8::Global<v8::Function>>>>,
+    /// The id of the next socket, outgoing or of a pair
+    pub next_id: Rc<Cell<WebSocketId>>,
 }
 
 /// State for performance.now() timing

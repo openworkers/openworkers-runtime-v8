@@ -24,6 +24,7 @@ use std::time::Duration;
 use super::{Turn, get_thread_cpu_time};
 
 pub struct CpuEnforcer {
+    budget: Duration,
     remaining: Cell<Duration>,
     turn_started: Cell<Option<Duration>>,
     terminated: Arc<AtomicBool>,
@@ -49,8 +50,11 @@ impl CpuEnforcer {
         #[cfg(not(target_os = "linux"))]
         let _ = (turn, request);
 
+        let budget = Duration::from_millis(timeout_ms);
+
         Some(Self {
-            remaining: Cell::new(Duration::from_millis(timeout_ms)),
+            budget,
+            remaining: Cell::new(budget),
             turn_started: Cell::new(None),
             terminated,
             #[cfg(target_os = "linux")]
@@ -83,6 +87,14 @@ impl CpuEnforcer {
 
         if left.is_zero() {
             self.terminated.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Gives the request its whole budget again, for a new turn of an open
+    /// socket. A spent budget stays spent.
+    pub fn refill(&self) {
+        if !self.was_terminated() {
+            self.remaining.set(self.budget);
         }
     }
 

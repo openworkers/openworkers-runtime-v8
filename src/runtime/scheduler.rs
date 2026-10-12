@@ -20,7 +20,8 @@ use super::stream_manager::{self, StreamManager};
 use openworkers_core::{
     D1Error, D1ErrorKind, D1Op, D1Result, DatabaseOp, DatabaseResult, HttpRequest,
     HttpResponseMeta, KvOp, KvResult, Operation, OperationResult, OperationsHandle, ResponseBody,
-    StorageOp, StorageResult, WebSocketId, WebSocketIncoming, WebSocketOutgoing,
+    StorageOp, StorageResult, WebSocketConnection, WebSocketId, WebSocketIncoming,
+    WebSocketOutgoing, WebSocketUpgrade,
 };
 
 pub type CallbackId = u64;
@@ -68,7 +69,13 @@ pub enum SchedulerMessage {
     BindingWorker(CallbackId, String, HttpRequest),
     StreamRead(CallbackId, stream_manager::StreamId),
     StreamCancel(stream_manager::StreamId),
-    WebSocketConnect(CallbackId, String, HashMap<String, String>),
+    WebSocketConnect(CallbackId, WebSocketId, String, HashMap<String, String>),
+    /// The server end of a WebSocketPair, open until the response of its
+    /// event gives it a socket
+    WebSocketPair(WebSocketId),
+    /// The response is read: the pair it carries, if any, gets the socket of
+    /// the upgrade, and the other pairs close
+    WebSocketUpgrade(Option<(WebSocketId, WebSocketUpgrade)>),
     WebSocketAccept(WebSocketId),
     WebSocketSend(WebSocketId, WebSocketOutgoing),
     WebSocketClose(WebSocketId, u16, String),
@@ -153,9 +160,11 @@ pub async fn run_event_loop(
     let mut request_cancel = cancel.child_token();
 
     // WebSocket state: each WS gets a command channel, the spawned task owns the receiver
-    let mut next_ws_id: WebSocketId = 1;
     let mut ws_commands: HashMap<WebSocketId, mpsc::UnboundedSender<WebSocketCommand>> =
         HashMap::new();
+
+    // Pairs the response of the request can still carry. None once it is read.
+    let mut pairs: Option<HashSet<WebSocketId>> = Some(HashSet::new());
 
     loop {
         tokio::select! {
@@ -430,10 +439,7 @@ pub async fn run_event_loop(
                         });
                     }
 
-                    SchedulerMessage::WebSocketConnect(callback_id, url, headers) => {
-                        let ws_id = next_ws_id;
-                        next_ws_id += 1;
-
+                    SchedulerMessage::WebSocketConnect(callback_id, ws_id, url, headers) => {
                         // Create command channel BEFORE spawning so we can store the
                         // sender synchronously in the event loop's state.
                         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
@@ -449,6 +455,40 @@ pub async fn run_event_loop(
                                 cmd_rx, callback_tx, ops, cancel,
                             ).await;
                         });
+                    }
+
+                    SchedulerMessage::WebSocketPair(ws_id) => {
+                        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+
+                        // A pair made after the response never gets a socket, so
+                        // it closes at once: its commands go nowhere.
+                        if let Some(pairs) = pairs.as_mut() {
+                            pairs.insert(ws_id);
+                            ws_commands.insert(ws_id, cmd_tx);
+                        }
+
+                        let callback_tx = callback_tx.clone();
+                        let cancel = request_cancel.clone();
+
+                        tokio::spawn(async move {
+                            run_server_websocket(ws_id, cmd_rx, callback_tx, cancel).await;
+                        });
+                    }
+
+                    SchedulerMessage::WebSocketUpgrade(upgrade) => {
+                        let mut unused = pairs.take().unwrap_or_default();
+
+                        if let Some((ws_id, upgrade)) = upgrade
+                            && unused.remove(&ws_id)
+                            && let Some(tx) = ws_commands.get(&ws_id)
+                        {
+                            let _ = tx.send(WebSocketCommand::Attach(upgrade));
+                        }
+
+                        // Dropping the command channel closes the pair
+                        for ws_id in unused {
+                            ws_commands.remove(&ws_id);
+                        }
                     }
 
                     SchedulerMessage::WebSocketAccept(ws_id) => {
@@ -499,6 +539,7 @@ pub async fn run_event_loop(
                         request_cancel.cancel();
                         request_cancel = cancel.child_token();
                         ws_commands.clear();
+                        pairs = Some(HashSet::new());
 
                         if let Some(abort) = abort {
                             let scope = request_cancel.clone();
@@ -662,6 +703,8 @@ async fn convert_fetch_result_to_stream(
 
 /// Commands sent from the event loop to a WebSocket management task.
 enum WebSocketCommand {
+    /// The socket of the upgrade, for the server end of a pair
+    Attach(WebSocketUpgrade),
     /// Start delivering incoming messages as callbacks
     Accept,
     /// Send a message on the WebSocket
@@ -682,7 +725,7 @@ async fn run_websocket(
     callback_id: CallbackId,
     url: String,
     headers: HashMap<String, String>,
-    mut cmd_rx: mpsc::UnboundedReceiver<WebSocketCommand>,
+    cmd_rx: mpsc::UnboundedReceiver<WebSocketCommand>,
     callback_tx: CallbackSender,
     ops: OperationsHandle,
     cancel: CancellationToken,
@@ -715,9 +758,80 @@ async fn run_websocket(
         }
     };
 
+    pump_websocket(ws_id, conn, false, cmd_rx, callback_tx, cancel).await;
+}
+
+/// The server end of a WebSocketPair. Until the runner gives it the socket of
+/// the upgrade, it keeps what the guest sends, and closes if the response
+/// does not carry it or the upgrade fails.
+async fn run_server_websocket(
+    ws_id: WebSocketId,
+    mut cmd_rx: mpsc::UnboundedReceiver<WebSocketCommand>,
+    callback_tx: CallbackSender,
+    cancel: CancellationToken,
+) {
+    let closed = |reason: &str| {
+        let _ = callback_tx.send(CallbackMessage::WebSocketEvent(
+            ws_id,
+            WebSocketIncoming::Closed {
+                code: 1006,
+                reason: reason.into(),
+            },
+        ));
+    };
+
+    let mut upgrade: Option<WebSocketUpgrade> = None;
+    let mut accepted = false;
+    let mut early = Vec::new();
+
+    let conn = loop {
+        tokio::select! {
+            biased;
+
+            _ = cancel.cancelled() => return closed(CANCELLED),
+
+            conn = async { upgrade.as_mut().unwrap().await }, if upgrade.is_some() => {
+                match conn {
+                    Ok(conn) => break conn,
+                    Err(_) => return closed("The client did not upgrade"),
+                }
+            }
+
+            cmd = cmd_rx.recv() => match cmd {
+                Some(WebSocketCommand::Attach(socket)) => upgrade = Some(socket),
+                Some(WebSocketCommand::Accept) => accepted = true,
+                Some(WebSocketCommand::Send(msg)) => early.push(msg),
+                Some(WebSocketCommand::Close(code, reason)) => {
+                    let _ = callback_tx.send(CallbackMessage::WebSocketEvent(
+                        ws_id,
+                        WebSocketIncoming::Closed { code, reason },
+                    ));
+                    return;
+                }
+                None => return closed("The response did not carry the socket"),
+            },
+        }
+    };
+
+    for msg in early {
+        let _ = conn.send_tx.send(msg);
+    }
+
+    pump_websocket(ws_id, conn, accepted, cmd_rx, callback_tx, cancel).await;
+}
+
+/// Moves the messages of a connected socket: the guest's commands out, and
+/// the peer's messages in once the guest accepts them.
+async fn pump_websocket(
+    ws_id: WebSocketId,
+    conn: WebSocketConnection,
+    mut accepted: bool,
+    mut cmd_rx: mpsc::UnboundedReceiver<WebSocketCommand>,
+    callback_tx: CallbackSender,
+    cancel: CancellationToken,
+) {
     let send_tx = conn.send_tx;
     let mut recv_rx = conn.recv_rx;
-    let mut accepted = false;
 
     // Phase 2: Command loop — handle sends, receives, and accept
     loop {
@@ -740,6 +854,8 @@ async fn run_websocket(
                 let Some(cmd) = cmd else { break };
 
                 match cmd {
+                    // Only the server end of a pair is attached, and only once
+                    WebSocketCommand::Attach(_) => {}
                     WebSocketCommand::Accept => {
                         accepted = true;
                     }
