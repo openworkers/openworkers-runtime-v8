@@ -746,24 +746,27 @@ async fn run_websocket(
                     WebSocketCommand::Send(msg) => {
                         let _ = send_tx.send(msg);
                     }
+                    // The runner answers the peer's close frame, so the
+                    // guest's close event does not wait for it
                     WebSocketCommand::Close(code, reason) => {
-                        let _ = send_tx.send(WebSocketOutgoing::Close { code, reason });
+                        let _ = send_tx.send(WebSocketOutgoing::Close { code, reason: reason.clone() });
+                        let _ = callback_tx.send(CallbackMessage::WebSocketEvent(
+                            ws_id,
+                            WebSocketIncoming::Closed { code, reason },
+                        ));
                         break;
                     }
                 }
             }
 
             msg = recv_rx.recv(), if accepted => {
-                match msg {
-                    Some(incoming) => {
-                        let _ = callback_tx.send(
-                            CallbackMessage::WebSocketEvent(ws_id, incoming),
-                        );
-                    }
-                    None => {
-                        // Runner dropped the sender — connection is done
-                        break;
-                    }
+                let incoming = msg.unwrap_or(WebSocketIncoming::Closed { code: 1006, reason: String::new() });
+                let closed = matches!(incoming, WebSocketIncoming::Closed { .. });
+                let _ = callback_tx.send(CallbackMessage::WebSocketEvent(ws_id, incoming));
+
+                // The guest learns of a dropped connection as of a closed one
+                if closed {
+                    break;
                 }
             }
         }
