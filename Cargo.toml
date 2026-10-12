@@ -80,7 +80,7 @@ criterion = { version = "0.8", features = ["async_tokio"] }
 rand = "0.10"
 
 # ESM -> classic script lowering for the SSR benchmarks
-openworkers-transform = { git = "https://github.com/openworkers/openworkers-transform", tag = "v0.1.0" }
+openworkers-transform = { path = "../openworkers-transform" }
 
 
 [lints.clippy]
