@@ -132,6 +132,7 @@ async fn run(body: &str) -> String {
                         },
                         ops: objects_ops.clone(),
                         idle: Duration::from_secs(60),
+                        drain: Duration::from_secs(30),
                     };
 
                     tokio::task::spawn_local(openworkers_runtime_v8::durable_object::run(spec, rx));

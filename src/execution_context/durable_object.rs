@@ -44,6 +44,8 @@ pub struct ObjectSpec {
     pub ops: OperationsHandle,
     /// The object is dropped after this long with no event in flight
     pub idle: Duration,
+    /// Once the mailbox closes, the events in flight fail after this long
+    pub drain: Duration,
 }
 
 /// Serves the events of one object until the mailbox closes. The object is
@@ -59,7 +61,10 @@ pub async fn run(spec: ObjectSpec, mut mailbox: mpsc::UnboundedReceiver<FetchIni
             }
         };
 
-        if let Err(reason) = object.serve(first, &mut mailbox, spec.idle).await {
+        if let Err(reason) = object
+            .serve(first, &mut mailbox, spec.idle, spec.drain)
+            .await
+        {
             tracing::warn!("durable object {}: stopped: {reason:?}", spec.id);
         }
     }
@@ -133,15 +138,17 @@ impl DurableObject {
     }
 
     /// Answers `first`, then the events of the mailbox, until the object is
-    /// idle for `idle` or the mailbox closes. An error is what stopped the
-    /// object; the events it had taken fail with it.
+    /// idle for `idle` or the mailbox closes. Once it closes, the events in
+    /// flight have `drain` to end. An error is what stopped the object; the
+    /// events it had taken fail with it.
     pub async fn serve(
         mut self,
         first: FetchInit,
         mailbox: &mut mpsc::UnboundedReceiver<FetchInit>,
         idle: Duration,
+        drain: Duration,
     ) -> Result<(), TerminationReason> {
-        self.context().serve(first, mailbox, idle).await
+        self.context().serve(first, mailbox, idle, drain).await
     }
 }
 
@@ -249,6 +256,7 @@ impl ExecutionContext {
         first: FetchInit,
         mailbox: &mut mpsc::UnboundedReceiver<FetchInit>,
         idle: Duration,
+        drain: Duration,
     ) -> Result<(), TerminationReason> {
         let pooled = Arc::clone(&self.pooled);
         let mut foreground = self.pooled.foreground.waiter();
@@ -263,6 +271,7 @@ impl ExecutionContext {
         let mut closed = false;
         let mut idle_timer: std::pin::Pin<Box<Sleep>> = Box::pin(tokio::time::sleep(idle));
         let mut gate_timer: Option<std::pin::Pin<Box<Sleep>>> = None;
+        let mut drain_timer: Option<std::pin::Pin<Box<Sleep>>> = None;
         let memory_hit = Arc::clone(&self.memory_hit);
 
         let result = std::future::poll_fn(|cx| {
@@ -334,6 +343,16 @@ impl ExecutionContext {
 
             if inflight.is_empty() && (closed || idle_timer.as_mut().poll(cx).is_ready()) {
                 return Poll::Ready(Ok(()));
+            }
+
+            if closed {
+                let timer = drain_timer.get_or_insert_with(|| Box::pin(tokio::time::sleep(drain)));
+
+                if timer.as_mut().poll(cx).is_ready() {
+                    return Poll::Ready(Err(TerminationReason::Other(
+                        "events in flight did not end after the object closed".to_string(),
+                    )));
+                }
             }
 
             Poll::Pending

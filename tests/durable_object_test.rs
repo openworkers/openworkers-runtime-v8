@@ -59,6 +59,8 @@ fn module(code: &str) -> String {
 /// A short wall clock, so a turn that never yields stops soon.
 const WALL_CLOCK_MS: u64 = 300;
 
+const DRAIN_MS: u64 = 300;
+
 fn spec(code: &str, idle: Duration) -> ObjectSpec {
     ObjectSpec {
         script: Script::new(module(code)),
@@ -70,6 +72,7 @@ fn spec(code: &str, idle: Duration) -> ObjectSpec {
         },
         ops: Arc::new(openworkers_core::DefaultOps),
         idle,
+        drain: Duration::from_millis(DRAIN_MS),
     }
 }
 
@@ -383,6 +386,29 @@ async fn the_object_ends_when_its_mailbox_closes() {
 
         // The event in flight still gets its answer
         assert_eq!(text(answer).await, "slow 0");
+        timeout(Duration::from_secs(5), run)
+            .await
+            .expect("the object ends")
+            .unwrap();
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_closed_object_ends_its_events_after_the_drain_time() {
+    run_in_local(|| async {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let run = tokio::task::spawn_local(openworkers_runtime_v8::durable_object::run(
+            spec(COUNTER, Duration::from_secs(60)),
+            rx,
+        ));
+
+        let slow = send(&tx, "/slow");
+        let forever = send(&tx, "/forever");
+        drop(tx);
+
+        assert_eq!(text(slow).await, "slow 0");
+        assert!(failed(forever).await);
         timeout(Duration::from_secs(5), run)
             .await
             .expect("the object ends")
