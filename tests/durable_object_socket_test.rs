@@ -239,6 +239,25 @@ const ROOM: &str = r#"
 
             const [client, server] = Object.values(new WebSocketPair());
 
+            if (path === '/stall') {
+                this.state.acceptWebSocket(server);
+                this.state.storage.put('k', 1);
+
+                const mib = 'x'.repeat(1 << 20);
+                let sent = 0;
+
+                try {
+                    for (let i = 0; i < 80; i++) {
+                        server.send(mib);
+                        sent += 1;
+                    }
+                } catch (error) {
+                    return new Response(`${sent} ${error.name}`);
+                }
+
+                return new Response(String(sent));
+            }
+
             if (path === '/block') {
                 this.state.blockConcurrencyWhile(() => new Promise((ok) => setTimeout(ok, 300)));
                 return new Response('blocked');
@@ -511,4 +530,39 @@ async fn a_socket_event_keeps_its_permit_until_the_object_takes_it() {
         assert_eq!(permits.available_permits(), 1);
     })
     .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn frames_behind_a_slow_write_have_a_limit() {
+    run_in_local(|| async {
+        let host = Arc::new(Host::default());
+        let object = object(host.clone(), ROOM);
+
+        // 80 MiB of frames wait for the write before them
+        assert_eq!(fetch(&object, "/stall").await.1, "64 RangeError");
+
+        // Once the write ends, the frames go out and the object sends again
+        event_after_write(&host).await;
+        assert_eq!(fetch(&object, "/stall").await.1, "64 RangeError");
+    })
+    .await;
+}
+
+/// Waits until the host saw the write and the frames behind it.
+async fn event_after_write(host: &Host) {
+    for _ in 0..200 {
+        if host
+            .log()
+            .iter()
+            .filter(|line| line.starts_with("send"))
+            .count()
+            >= 64
+        {
+            return;
+        }
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    panic!("the frames did not go out");
 }

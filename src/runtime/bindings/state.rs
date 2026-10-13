@@ -32,6 +32,8 @@ pub struct FetchState {
     pub callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
     pub error_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
     pub next_id: Rc<RefCell<CallbackId>>,
+    /// The bytes of the frames of a Durable Object that wait in its queue
+    pub frames: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Shared state for stream read callbacks (same pattern as FetchState)

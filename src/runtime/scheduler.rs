@@ -82,7 +82,7 @@ pub enum SchedulerMessage {
     /// The storage of the Durable Object this context serves
     ObjectStorage(CallbackId, ObjectStorageOp),
     /// The WebSockets of the Durable Object this context serves
-    ObjectSocket(ObjectSocketOp),
+    ObjectSocket(ObjectSocketOp, Option<Waiting>),
     /// A response of the Durable Object hands over `socket`: the socket of
     /// the upgrade goes to it
     ObjectUpgrade(WebSocketId, WebSocketUpgrade),
@@ -434,8 +434,8 @@ pub async fn run_event_loop(
                         enqueue(&mut queue, &callback_tx, &ops, Queued::Storage(callback_id, op));
                     }
 
-                    SchedulerMessage::ObjectSocket(op) => {
-                        enqueue(&mut queue, &callback_tx, &ops, Queued::Socket(op));
+                    SchedulerMessage::ObjectSocket(op, waiting) => {
+                        enqueue(&mut queue, &callback_tx, &ops, Queued::Socket(op, waiting));
                     }
 
                     SchedulerMessage::OutputBarrier(open) => match &queue {
@@ -454,7 +454,7 @@ pub async fn run_event_loop(
                             Some(socket) => forward(upgrade, socket),
                             None => {
                                 let op = ObjectSocketOp::Attach { socket: ws_id, upgrade };
-                                enqueue(&mut queue, &callback_tx, &ops, Queued::Socket(op));
+                                enqueue(&mut queue, &callback_tx, &ops, Queued::Socket(op, None));
                             }
                         }
                     }
@@ -615,9 +615,30 @@ const STORAGE_FAILED: &str = "a storage write of the Durable Object failed";
 /// Work of a Durable Object that runs in the order the guest made it.
 enum Queued {
     Storage(CallbackId, ObjectStorageOp),
-    Socket(ObjectSocketOp),
+    Socket(ObjectSocketOp, Option<Waiting>),
     /// An outbound call waits here for the writes made before it (output gate)
     Barrier(oneshot::Sender<()>),
+}
+
+/// Counts the bytes of an op in `counter` while it waits in the queue of
+/// the object.
+pub struct Waiting {
+    counter: Arc<std::sync::atomic::AtomicUsize>,
+    bytes: usize,
+}
+
+impl Waiting {
+    pub fn new(counter: Arc<std::sync::atomic::AtomicUsize>, bytes: usize) -> Self {
+        counter.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+        Self { counter, bytes }
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.counter
+            .fetch_sub(self.bytes, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// The sockets that binding responses handed over, by the id the guest got
@@ -704,8 +725,8 @@ async fn run_object_queue(
 
                 let _ = callback_tx.send(CallbackMessage::ObjectStorage(callback_id, result));
             }
-            Queued::Socket(_) if failed => {}
-            Queued::Socket(op) => {
+            Queued::Socket(..) if failed => {}
+            Queued::Socket(op, _waiting) => {
                 ops.handle(Operation::DurableObjectSocket(op)).await;
             }
             Queued::Barrier(_) if failed => {}

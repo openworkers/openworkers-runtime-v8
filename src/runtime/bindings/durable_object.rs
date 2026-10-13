@@ -10,6 +10,7 @@ use v8::{ValueDeserializerHelper, ValueSerializerHelper};
 use super::fetch::{register_callbacks_with_error, resolve_reject};
 use super::state::FetchState;
 use crate::runtime::SchedulerMessage;
+use crate::runtime::scheduler::Waiting;
 use crate::v8_helpers::throw_type_error;
 
 /// The runner, which knows the namespace of each binding.
@@ -116,9 +117,16 @@ const MAX_ATTACHMENT: usize = 2048;
 /// Sends an op on the sockets of the object to the scheduler.
 fn send_socket_op(scope: &mut v8::PinScope, op: ObjectSocketOp) {
     if let Some(state) = get_state!(scope, FetchState) {
-        let _ = state.scheduler_tx.send(SchedulerMessage::ObjectSocket(op));
+        let _ = state
+            .scheduler_tx
+            .send(SchedulerMessage::ObjectSocket(op, None));
     }
 }
+
+/// The frames of an object that wait in its queue, behind a slow write or a
+/// broadcast, as the queue runs once the guest yields. Past this, a send
+/// throws, or else they grow out of the heap of the object.
+const MAX_WAITING_FRAMES: usize = 64 * 1024 * 1024;
 
 /// The socket id an op was given, or a TypeError thrown in its place.
 fn socket_of(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Option<WebSocketId> {
@@ -187,7 +195,34 @@ fn setup_object_sockets(scope: &mut v8::PinScope) {
                 return;
             };
 
-            send_socket_op(scope, ObjectSocketOp::Send { socket, message });
+            let Some(state) = get_state!(scope, FetchState) else {
+                return;
+            };
+
+            let waiting = state.frames.load(std::sync::atomic::Ordering::Relaxed);
+
+            if waiting >= MAX_WAITING_FRAMES {
+                let message = v8::String::new(
+                    scope,
+                    "WebSocket: 64 MiB of frames wait to go out; send more once they left",
+                )
+                .unwrap();
+                let error = v8::Exception::range_error(scope, message);
+                scope.throw_exception(error);
+                return;
+            }
+
+            let bytes = match &message {
+                WebSocketOutgoing::Text(text) => text.len(),
+                WebSocketOutgoing::Binary(bytes) => bytes.len(),
+                WebSocketOutgoing::Close { .. } => 0,
+            };
+            let waiting = Waiting::new(state.frames.clone(), bytes);
+            let op = ObjectSocketOp::Send { socket, message };
+
+            let _ = state
+                .scheduler_tx
+                .send(SchedulerMessage::ObjectSocket(op, Some(waiting)));
         },
     )
     .unwrap();

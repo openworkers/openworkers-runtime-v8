@@ -201,6 +201,7 @@ pub fn setup_fetch(
         callbacks,
         error_callbacks,
         next_id,
+        frames: std::sync::Arc::default(),
     };
 
     store_state!(scope, state);
