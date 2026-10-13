@@ -1,12 +1,13 @@
-//! The input gate of a Durable Object: while it reads its storage, no other
-//! event reaches it, neither a new request nor a timer or a response of an
-//! earlier event.
+//! The gates of a Durable Object. Input gate: while it reads its storage,
+//! no other event reaches it, neither a new request nor a timer or a response
+//! of an earlier event. Output gate: what leaves it waits for the writes made
+//! before it, and only for those.
 
 mod common;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::run_in_local;
 use openworkers_core::{
@@ -18,12 +19,17 @@ use openworkers_transform::CodeLanguage;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
-/// A read takes this long; a write is at once.
+/// A read takes this long
 const READ_DELAY: Duration = Duration::from_millis(100);
+
+/// A write takes this long
+const WRITE_DELAY: Duration = Duration::from_millis(50);
 
 #[derive(Default)]
 struct Memory {
     entries: Mutex<BTreeMap<String, Vec<u8>>>,
+    /// When each write was committed
+    commits: Mutex<Vec<Instant>>,
 }
 
 impl OperationsHandler for Memory {
@@ -42,7 +48,9 @@ impl OperationsHandler for Memory {
                     )
                 }
                 ObjectStorageOp::Write { puts, .. } => {
+                    tokio::time::sleep(WRITE_DELAY).await;
                     self.entries.lock().unwrap().extend(puts);
+                    self.commits.lock().unwrap().push(Instant::now());
 
                     ObjectStorageResult::Written { deleted: 0 }
                 }
@@ -53,6 +61,10 @@ impl OperationsHandler for Memory {
 }
 
 fn object(class: &str) -> mpsc::UnboundedSender<ObjectEvent> {
+    object_with(class, Arc::new(Memory::default()))
+}
+
+fn object_with(class: &str, memory: Arc<Memory>) -> mpsc::UnboundedSender<ObjectEvent> {
     let code = openworkers_transform::parse_worker_code(class.as_bytes(), CodeLanguage::JavaScript)
         .unwrap();
     let (tx, rx) = mpsc::unbounded_channel();
@@ -61,7 +73,7 @@ fn object(class: &str) -> mpsc::UnboundedSender<ObjectEvent> {
         class_name: "Gated".to_string(),
         id: "object".to_string(),
         limits: RuntimeLimits::default(),
-        ops: Arc::new(Memory::default()),
+        ops: memory,
         idle: Duration::from_secs(60),
         drain: Duration::from_secs(30),
     };
@@ -127,6 +139,26 @@ const GATED: &str = r#"
                     await storage.get('key');
                     this.log.push('read');
                     return new Response('read');
+                case '/flood':
+                    for (let i = 0; i < 40; i++) {
+                        storage.put(`k${i}`, i);
+                        await new Promise((resolve) => setTimeout(resolve, 10));
+                    }
+                    return new Response('flood');
+                case '/quick':
+                    return new Response('quick');
+                case '/stream': {
+                    const { readable, writable } = new TransformStream();
+                    const writer = writable.getWriter();
+                    writer.write(new TextEncoder().encode('a'));
+                    (async () => {
+                        await new Promise((resolve) => setTimeout(resolve, 20));
+                        storage.put('streamed', true);
+                        await writer.write(new TextEncoder().encode('b'));
+                        await writer.close();
+                    })();
+                    return new Response(readable);
+                }
                 case '/log':
                     return new Response(this.log.join(','));
             }
@@ -164,6 +196,64 @@ async fn a_read_holds_back_the_timers_of_other_events() {
         body(read).await;
 
         assert_eq!(body(send(&object, "/log")).await, "read,timer");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_response_waits_only_for_the_writes_before_it() {
+    run_in_local(|| async {
+        let object = object(GATED);
+
+        // 40 writes, one every 10 ms, each 50 ms long: about 2 seconds of them
+        let flood = send(&object, "/flood");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let started = Instant::now();
+        assert_eq!(body(send(&object, "/quick")).await, "quick");
+        let waited = started.elapsed();
+
+        body(flood).await;
+        assert!(
+            waited < Duration::from_secs(1),
+            "the response waited {waited:?}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_streamed_chunk_waits_for_the_writes_before_it() {
+    run_in_local(|| async {
+        let memory = Arc::new(Memory::default());
+        let object = object_with(GATED, memory.clone());
+
+        let response = timeout(Duration::from_secs(5), send(&object, "/stream"))
+            .await
+            .unwrap()
+            .unwrap();
+        let ResponseBody::Stream(mut chunks) = response.body else {
+            panic!("a streamed body");
+        };
+
+        let mut arrivals = Vec::new();
+
+        while let Some(chunk) = timeout(Duration::from_secs(5), chunks.recv())
+            .await
+            .unwrap()
+        {
+            arrivals.push((chunk.unwrap(), Instant::now()));
+        }
+
+        // The write may still be under way when a chunk leaves too early
+        tokio::time::sleep(WRITE_DELAY * 2).await;
+        let committed = memory.commits.lock().unwrap()[0];
+        let (last, arrived) = arrivals.last().unwrap();
+        assert_eq!(last.as_ref(), b"b");
+        assert!(
+            *arrived >= committed,
+            "the chunk left before the write it follows"
+        );
     })
     .await;
 }

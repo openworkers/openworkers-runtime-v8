@@ -380,6 +380,23 @@ async fn a_failed_write_drops_the_object_and_its_response() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn nothing_is_written_after_a_failed_write() {
+    let body = r#"
+        storage.put('fail', 1);
+        storage.put('after', 2);
+        return 'sent';
+    "#;
+    let memory = Arc::new(Memory::default());
+
+    let answers = run(memory.clone(), body, &["/"]).await;
+    assert_eq!(answers[0], Err("the object failed".to_string()));
+
+    // The queue of the object outlives it; give it time to go on
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!memory.entries.lock().unwrap().contains_key("after"));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn a_value_that_cannot_be_cloned_rejects_the_put_only() {
     let body = r#"
         const error = await storage.put('f', () => 1).catch((error) => error.message);

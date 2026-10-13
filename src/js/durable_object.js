@@ -14,8 +14,6 @@
 //   failure()       the error of a blockConcurrencyWhile callback or of a
 //                   storage write that failed, after which the object must
 //                   be dropped
-//   writing()       whether a storage write is under way: the host holds
-//                   the responses back until it is committed (output gate)
 //   reading()       whether a storage read is under way: the host delivers
 //                   nothing to the object but storage results until it ends
 //                   (input gate)
@@ -44,7 +42,6 @@
 
     let blocked = 0;
     let failure = null;
-    let writes = 0;
     let reads = 0;
 
     const message = (error) => (error && error.message) || String(error);
@@ -89,16 +86,9 @@
             return Promise.reject(error);
         }
 
-        writes += 1;
-        done.then(
-            () => {
-                writes -= 1;
-            },
-            (error) => {
-                writes -= 1;
-                failure ??= `a storage write failed: ${message(error)}`;
-            }
-        );
+        done.catch((error) => {
+            failure ??= `a storage write failed: ${message(error)}`;
+        });
 
         return done;
     };
@@ -460,7 +450,6 @@
         fetch: (request) => dispatch.fetch(request, instance),
         blocked: () => blocked > 0,
         failure: () => failure,
-        writing: () => writes > 0,
         reading: () => reads > 0,
         alarm: (retryCount) => {
             const run = { done: false, error: null };

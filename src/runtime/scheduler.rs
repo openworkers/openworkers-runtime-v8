@@ -86,6 +86,9 @@ pub enum SchedulerMessage {
     /// A response of the Durable Object hands over `socket`: the socket of
     /// the upgrade goes to it
     ObjectUpgrade(WebSocketId, WebSocketUpgrade),
+    /// Opens once the writes of the Durable Object made so far are
+    /// committed, and closes if one fails (output gate)
+    OutputBarrier(oneshot::Sender<()>),
     StreamRead(CallbackId, stream_manager::StreamId),
     StreamCancel(stream_manager::StreamId),
     WebSocketConnect(CallbackId, WebSocketId, String, HashMap<String, String>),
@@ -233,7 +236,7 @@ pub async fn run_event_loop(
                                     let _ = callback_tx.send(CallbackMessage::FetchError(promise_id, CANCELLED.into()));
                                     return;
                                 }
-                                r = after(gate, execute_fetch_via_ops(request, manager, ops, cancel.clone())) => r,
+                                r = after(gate, execute_fetch_via_ops(request, manager, ops, cancel.clone())) => r.unwrap_or_else(|| Err(STORAGE_FAILED.into())),
                             };
 
                             match result {
@@ -263,7 +266,7 @@ pub async fn run_event_loop(
                                     let _ = callback_tx.send(CallbackMessage::FetchError(promise_id, CANCELLED.into()));
                                     return;
                                 }
-                                r = after(gate, execute_binding_fetch_via_ops(binding_name, request, manager, ops, cancel.clone())) => r,
+                                r = after(gate, execute_binding_fetch_via_ops(binding_name, request, manager, ops, cancel.clone())) => r.unwrap_or_else(|| Err(STORAGE_FAILED.into())),
                             };
 
                             match result {
@@ -435,6 +438,15 @@ pub async fn run_event_loop(
                         enqueue(&mut queue, &callback_tx, &ops, Queued::Socket(op));
                     }
 
+                    SchedulerMessage::OutputBarrier(open) => match &queue {
+                        Some(queue) => {
+                            let _ = queue.send(Queued::Barrier(open));
+                        }
+                        None => {
+                            let _ = open.send(());
+                        }
+                    },
+
                     SchedulerMessage::ObjectUpgrade(ws_id, upgrade) => {
                         let relay = relays.lock().unwrap().remove(&ws_id);
 
@@ -596,6 +608,10 @@ pub async fn run_event_loop(
     }
 }
 
+/// What an outbound call of a Durable Object fails with once one of its
+/// writes failed: its memory no longer matches its storage.
+const STORAGE_FAILED: &str = "a storage write of the Durable Object failed";
+
 /// Work of a Durable Object that runs in the order the guest made it.
 enum Queued {
     Storage(CallbackId, ObjectStorageOp),
@@ -633,13 +649,14 @@ fn output_gate(queue: &Option<mpsc::UnboundedSender<Queued>>) -> Option<oneshot:
     Some(gate)
 }
 
-/// Runs `work` once `gate` opens.
-async fn after<T>(gate: Option<oneshot::Receiver<()>>, work: impl Future<Output = T>) -> T {
+/// Runs `work` once `gate` opens; None, without running it, if a write
+/// before it failed.
+async fn after<T>(gate: Option<oneshot::Receiver<()>>, work: impl Future<Output = T>) -> Option<T> {
     if let Some(gate) = gate {
-        let _ = gate.await;
+        gate.await.ok()?;
     }
 
-    work.await
+    Some(work.await)
 }
 
 /// Gives the socket of an upgrade to the object that answered the 101. The
@@ -660,9 +677,22 @@ async fn run_object_queue(
     callback_tx: CallbackSender,
     ops: OperationsHandle,
 ) {
+    // After a failed write, nothing more is written and nothing leaves: the
+    // barriers close, and the object stops
+    let mut failed = false;
+
     while let Some(work) = queue.recv().await {
         match work {
+            Queued::Storage(callback_id, _) if failed => {
+                let result = ObjectStorageResult::Error(STORAGE_FAILED.into());
+                let _ = callback_tx.send(CallbackMessage::ObjectStorage(callback_id, result));
+            }
             Queued::Storage(callback_id, op) => {
+                let writes = matches!(
+                    op,
+                    ObjectStorageOp::Write { .. } | ObjectStorageOp::SetAlarm(_)
+                );
+
                 let result = match ops.handle(Operation::DurableObjectStorage(op)).await {
                     OperationResult::ObjectStorage(result) => result,
                     _ => ObjectStorageResult::Error(
@@ -670,11 +700,15 @@ async fn run_object_queue(
                     ),
                 };
 
+                failed = writes && matches!(result, ObjectStorageResult::Error(_));
+
                 let _ = callback_tx.send(CallbackMessage::ObjectStorage(callback_id, result));
             }
+            Queued::Socket(_) if failed => {}
             Queued::Socket(op) => {
                 ops.handle(Operation::DurableObjectSocket(op)).await;
             }
+            Queued::Barrier(_) if failed => {}
             Queued::Barrier(open) => {
                 let _ = open.send(());
             }
@@ -701,7 +735,13 @@ async fn answer_binding_request(
             let _ = callback_tx.send(CallbackMessage::FetchError(callback_id, CANCELLED.into()));
             return;
         }
-        r = after(gate, ops.handle(op)) => r,
+        r = after(gate, ops.handle(op)) => match r {
+            Some(r) => r,
+            None => {
+                let _ = callback_tx.send(CallbackMessage::FetchError(callback_id, STORAGE_FAILED.into()));
+                return;
+            }
+        },
     };
 
     let response = match result {

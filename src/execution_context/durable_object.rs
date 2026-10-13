@@ -106,6 +106,8 @@ struct FetchInFlight {
     res_tx: Option<ResponseSender>,
     /// The socket of the client, for a 101 that hands over a socket
     upgrade: Option<WebSocketUpgrade>,
+    /// The response, until the writes before it are committed
+    held: Option<Held<HttpResponse>>,
     /// Set once the guest knows that the client hung up
     disconnected: bool,
 }
@@ -113,8 +115,76 @@ struct FetchInFlight {
 struct AlarmInFlight {
     /// What durable_object.js answers for the run of the handler
     run: v8::Global<v8::Object>,
-    /// Taken when the handler ends
+    /// Taken when the outcome goes out
     done: Option<oneshot::Sender<Result<(), String>>>,
+    /// The outcome, until the writes before it are committed
+    held: Option<Held<Result<(), String>>>,
+}
+
+/// What leaves the object once the writes made before it are committed
+/// (output gate). Every way out takes one: responses, the chunks of their
+/// bodies, the outcomes of alarms; frames and outbound calls wait in the
+/// same queue.
+struct Held<T> {
+    answer: T,
+    gate: oneshot::Receiver<()>,
+}
+
+impl<T> Held<T> {
+    fn new(answer: T, scheduler_tx: &mpsc::UnboundedSender<SchedulerMessage>) -> Self {
+        Self {
+            answer,
+            gate: barrier(scheduler_tx),
+        }
+    }
+
+    /// The answer once it can go; None for good if a write before it failed,
+    /// as the object then stops.
+    fn poll(&mut self, cx: &mut std::task::Context<'_>) -> Poll<Option<()>> {
+        std::pin::Pin::new(&mut self.gate)
+            .poll(cx)
+            .map(|open| open.ok())
+    }
+}
+
+/// A barrier behind the writes made so far: it opens once they are
+/// committed, and closes if one fails.
+fn barrier(scheduler_tx: &mpsc::UnboundedSender<SchedulerMessage>) -> oneshot::Receiver<()> {
+    let (open, gate) = oneshot::channel();
+    let _ = scheduler_tx.send(SchedulerMessage::OutputBarrier(open));
+
+    gate
+}
+
+/// The body of a response whose chunks each wait for the writes made before
+/// they came.
+fn gated(
+    body: ResponseBody,
+    scheduler_tx: &mpsc::UnboundedSender<SchedulerMessage>,
+    capacity: usize,
+) -> ResponseBody {
+    let ResponseBody::Stream(mut chunks) = body else {
+        return body;
+    };
+
+    let (tx, out) = mpsc::channel(capacity.max(1));
+    let scheduler_tx = scheduler_tx.clone();
+
+    tokio::spawn(async move {
+        while let Some(chunk) = chunks.recv().await {
+            if barrier(&scheduler_tx).await.is_err() {
+                let error = "a storage write of the Durable Object failed".to_string();
+                let _ = tx.send(Err(error)).await;
+                return;
+            }
+
+            if tx.send(chunk).await.is_err() {
+                return;
+            }
+        }
+    });
+
+    ResponseBody::Stream(out)
 }
 
 impl InFlight {
@@ -140,8 +210,6 @@ enum Gate {
     State {
         /// A blockConcurrencyWhile callback runs: no event goes in
         blocked: bool,
-        /// A storage write is under way: no response goes out
-        writing: bool,
         /// A storage read is under way: nothing but storage results goes in
         reading: bool,
     },
@@ -465,11 +533,11 @@ impl ExecutionContext {
 
             let count = self.drain_gated(cx, pending)?;
 
-            // A failed write also opens the output gate: its response must
-            // not go out before the object stops
+            // A failed write closes the barriers after it: what they hold
+            // goes with the object
             let answered = match self.gate() {
                 Gate::Broken(_) => break,
-                Gate::State { writing, .. } => !writing && self.answer(inflight),
+                Gate::State { .. } => self.answer(cx, inflight),
             };
 
             took |= admitted > 0;
@@ -527,25 +595,20 @@ impl ExecutionContext {
             let function = object
                 .get(scope, key.into())
                 .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
-                .expect("durable_object.js answers blocked, failure and writing");
+                .expect("durable_object.js answers blocked, failure and reading");
 
             function.call(scope, object.into(), &[])
         };
 
         let failure = call("failure").filter(|value| value.is_string());
         let blocked = call("blocked").is_some_and(|value| value.is_true());
-        let writing = call("writing").is_some_and(|value| value.is_true());
         let reading = call("reading").is_some_and(|value| value.is_true());
 
         if let Some(failure) = failure {
             return Gate::Broken(failure.to_rust_string_lossy(scope));
         }
 
-        Gate::State {
-            blocked,
-            writing,
-            reading,
-        }
+        Gate::State { blocked, reading }
     }
 
     /// Runs the callbacks that came, in order. While the object reads its
@@ -681,6 +744,7 @@ impl ExecutionContext {
         AlarmInFlight {
             run: v8::Global::new(scope, run),
             done: Some(init.done),
+            held: None,
         }
     }
 
@@ -721,6 +785,7 @@ impl ExecutionContext {
             handle,
             res_tx: Some(res_tx),
             upgrade,
+            held: None,
             disconnected: false,
         })
     }
@@ -728,7 +793,7 @@ impl ExecutionContext {
     /// Sends the responses and the alarm outcomes that are ready, tells the
     /// guest of the clients that hung up, and drops the events that are
     /// over. Answers whether it ran guest code or sent an answer.
-    fn answer(&mut self, inflight: &mut Vec<InFlight>) -> bool {
+    fn answer(&mut self, cx: &mut std::task::Context<'_>, inflight: &mut Vec<InFlight>) -> bool {
         use std::pin::pin;
 
         let stream_manager = Arc::clone(&self.request.stream_manager);
@@ -760,38 +825,52 @@ impl ExecutionContext {
                     return false;
                 }
                 InFlight::Alarm(alarm) => {
-                    let run = v8::Local::new(scope, &alarm.run);
-                    let done = v8::String::new(scope, "done").unwrap();
+                    if alarm.held.is_none() {
+                        let run = v8::Local::new(scope, &alarm.run);
+                        let done = v8::String::new(scope, "done").unwrap();
 
-                    if !run
-                        .get(scope, done.into())
-                        .is_some_and(|done| done.is_true())
-                    {
-                        return true;
+                        if !run
+                            .get(scope, done.into())
+                            .is_some_and(|done| done.is_true())
+                        {
+                            return true;
+                        }
+
+                        let error = v8::String::new(scope, "error").unwrap();
+                        let outcome = match run.get(scope, error.into()) {
+                            Some(error) if error.is_string() => {
+                                Err(error.to_rust_string_lossy(scope))
+                            }
+                            _ => Ok(()),
+                        };
+
+                        alarm.held = Some(Held::new(outcome, &scheduler_tx));
                     }
 
-                    let error = v8::String::new(scope, "error").unwrap();
-                    let outcome = match run.get(scope, error.into()) {
-                        Some(error) if error.is_string() => Err(error.to_rust_string_lossy(scope)),
-                        _ => Ok(()),
+                    let held = alarm.held.as_mut().expect("the outcome is held");
+
+                    return match held.poll(cx) {
+                        Poll::Pending => true,
+                        Poll::Ready(open) => {
+                            let held = alarm.held.take().expect("the outcome is held");
+
+                            // A dropped receiver is a host that stopped waiting
+                            if let (Some(()), Some(done)) = (open, alarm.done.take()) {
+                                done.send(held.answer).ok();
+                            }
+
+                            answered = true;
+                            false
+                        }
                     };
-
-                    // A dropped receiver is a host that stopped waiting
-                    if let Some(done) = alarm.done.take() {
-                        done.send(outcome).ok();
-                    }
-
-                    answered = true;
-
-                    return false;
                 }
             };
             let handle = Some(v8::Local::new(scope, &event.handle));
 
             if event.res_tx.is_some()
+                && event.held.is_none()
                 && check_exit_condition(scope, handle, EventLoopExit::ResponseReady)
             {
-                let res_tx = event.res_tx.take().unwrap();
                 answered = true;
 
                 let socket = read_response_socket(scope, handle);
@@ -813,9 +892,29 @@ impl ExecutionContext {
                             (None, _) => response,
                         };
 
-                        let _ = res_tx.send(response);
+                        let response = HttpResponse {
+                            body: gated(response.body, &scheduler_tx, buffer_size),
+                            ..response
+                        };
+
+                        event.held = Some(Held::new(response, &scheduler_tx));
                     }
-                    Err(error) => tracing::warn!("durable object response: {error}"),
+                    Err(error) => {
+                        tracing::warn!("durable object response: {error}");
+                        event.res_tx = None;
+                    }
+                }
+            }
+
+            if let Some(held) = &mut event.held
+                && let Poll::Ready(open) = held.poll(cx)
+            {
+                let held = event.held.take().expect("the response is held");
+                let res_tx = event.res_tx.take().expect("a held response has a caller");
+                answered = true;
+
+                if open.is_some() {
+                    let _ = res_tx.send(held.answer);
                 }
             }
 
