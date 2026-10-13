@@ -21,7 +21,7 @@ use crate::execution_helpers::{
     EventLoopExit, check_exit_condition, get_completion_state, get_response_stream_id,
     read_response_object, read_response_socket, signal_client_disconnect, trigger_fetch_handler,
 };
-use crate::runtime::SchedulerMessage;
+use crate::runtime::{CallbackMessage, SchedulerMessage};
 use crate::security::{CpuEnforcer, TimeoutGuard, TurnGuard, next_request_id};
 use openworkers_core::{
     FetchInit, HttpResponse, OperationsHandle, RequestBody, ResponseBody, ResponseSender,
@@ -142,6 +142,8 @@ enum Gate {
         blocked: bool,
         /// A storage write is under way: no response goes out
         writing: bool,
+        /// A storage read is under way: nothing but storage results goes in
+        reading: bool,
     },
     /// A blockConcurrencyWhile callback or a storage write failed
     Broken(String),
@@ -325,7 +327,7 @@ impl ExecutionContext {
         );
         let mut queue = VecDeque::from([first]);
         let mut inflight: Vec<InFlight> = Vec::new();
-        let mut pending = Vec::with_capacity(16);
+        let mut pending = VecDeque::with_capacity(16);
         let mut closed = false;
         let mut idle_timer: std::pin::Pin<Box<Sleep>> = Box::pin(tokio::time::sleep(idle));
         let mut gate_timer: Option<std::pin::Pin<Box<Sleep>>> = None;
@@ -429,7 +431,7 @@ impl ExecutionContext {
         mailbox: &mut mpsc::UnboundedReceiver<ObjectEvent>,
         queue: &mut VecDeque<ObjectEvent>,
         inflight: &mut Vec<InFlight>,
-        pending: &mut Vec<crate::runtime::CallbackMessage>,
+        pending: &mut VecDeque<CallbackMessage>,
         closed: &mut bool,
     ) -> Result<TurnOutcome, String> {
         let mut took = false;
@@ -437,7 +439,14 @@ impl ExecutionContext {
         for round in 0..MAX_ROUNDS {
             let mut admitted = 0;
 
-            while matches!(self.gate(), Gate::State { blocked: false, .. }) {
+            while matches!(
+                self.gate(),
+                Gate::State {
+                    blocked: false,
+                    reading: false,
+                    ..
+                }
+            ) {
                 let init = match queue.pop_front() {
                     Some(init) => init,
                     None => match mailbox.poll_recv(cx) {
@@ -454,7 +463,7 @@ impl ExecutionContext {
                 admitted += 1;
             }
 
-            let count = self.drain_and_process(cx, pending)?;
+            let count = self.drain_gated(cx, pending)?;
 
             // A failed write also opens the output gate: its response must
             // not go out before the object stops
@@ -526,12 +535,63 @@ impl ExecutionContext {
         let failure = call("failure").filter(|value| value.is_string());
         let blocked = call("blocked").is_some_and(|value| value.is_true());
         let writing = call("writing").is_some_and(|value| value.is_true());
+        let reading = call("reading").is_some_and(|value| value.is_true());
 
         if let Some(failure) = failure {
             return Gate::Broken(failure.to_rust_string_lossy(scope));
         }
 
-        Gate::State { blocked, writing }
+        Gate::State {
+            blocked,
+            writing,
+            reading,
+        }
+    }
+
+    /// Runs the callbacks that came, in order. While the object reads its
+    /// storage, only storage results run; the others wait in `pending` until
+    /// the reads end (input gate). Answers how many ran.
+    fn drain_gated(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+        pending: &mut VecDeque<CallbackMessage>,
+    ) -> Result<usize, String> {
+        loop {
+            match self.request.callback_rx.poll_recv(cx) {
+                Poll::Ready(Some(message)) => pending.push_back(message),
+                Poll::Ready(None) => return Err("Event loop channel closed".to_string()),
+                Poll::Pending => break,
+            }
+        }
+
+        let mut count = 0;
+
+        loop {
+            let reading = matches!(self.gate(), Gate::State { reading: true, .. });
+            let next = if reading {
+                pending
+                    .iter()
+                    .position(|message| matches!(message, CallbackMessage::ObjectStorage(..)))
+            } else if pending.is_empty() {
+                None
+            } else {
+                Some(0)
+            };
+
+            let Some(index) = next else {
+                break;
+            };
+
+            let message = pending.remove(index).expect("the index is in the queue");
+
+            // The microtasks of each callback run before the gate is read
+            // again: a result can start the next read
+            self.process_single_callback(message);
+            self.pump_and_checkpoint();
+            count += 1;
+        }
+
+        Ok(count)
     }
 
     /// Hands the event to the object.

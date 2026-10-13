@@ -16,6 +16,9 @@
 //                   be dropped
 //   writing()       whether a storage write is under way: the host holds
 //                   the responses back until it is committed (output gate)
+//   reading()       whether a storage read is under way: the host delivers
+//                   nothing to the object but storage results until it ends
+//                   (input gate)
 //   alarm(retries)  runs the alarm() handler, and answers an object whose
 //                   `done` turns true when it ends, with `error` if it threw
 //   socket(id, kind, data, reason)
@@ -42,6 +45,7 @@
     let blocked = 0;
     let failure = null;
     let writes = 0;
+    let reads = 0;
 
     const message = (error) => (error && error.message) || String(error);
 
@@ -54,6 +58,26 @@
         });
 
         __nativeObjectStorage(op, settle.resolve, settle.reject);
+
+        return done;
+    };
+
+    // A read closes the input gate until it ends, unless the caller allows
+    // other events to run meanwhile
+    const read = (op, options) => {
+        const done = call(op);
+
+        if (options?.allowConcurrency === true) {
+            return done;
+        }
+
+        reads += 1;
+
+        const open = () => {
+            reads -= 1;
+        };
+
+        done.then(open, open);
 
         return done;
     };
@@ -96,14 +120,14 @@
     };
 
     const storage = Object.freeze({
-        async get(keys) {
+        async get(keys, options) {
             if (!isKeys(keys)) {
-                const [value] = await call({ kind: 'get', keys: [keyOf(keys)] });
+                const [value] = await read({ kind: 'get', keys: [keyOf(keys)] }, options);
 
                 return value;
             }
 
-            const values = await call({ kind: 'get', keys: keys.map(keyOf) });
+            const values = await read({ kind: 'get', keys: keys.map(keyOf) }, options);
             const found = new Map();
 
             keys.forEach((key, index) => {
@@ -129,7 +153,7 @@
             return write({ deletes: keys.map(keyOf) });
         },
         async list(options = {}) {
-            const entries = await call({
+            const entries = await read({
                 kind: 'list',
                 start: options.start,
                 startAfter: options.startAfter,
@@ -137,7 +161,7 @@
                 prefix: options.prefix,
                 reverse: options.reverse === true,
                 limit: options.limit,
-            });
+            }, options);
 
             return new Map(entries);
         },
@@ -227,8 +251,8 @@
             return call({ kind: 'get', keys: [] }).then(() => undefined);
         },
         // Milliseconds since the Unix epoch, or null
-        getAlarm() {
-            return call({ kind: 'getAlarm' });
+        getAlarm(options) {
+            return read({ kind: 'getAlarm' }, options);
         },
         setAlarm(scheduledTime) {
             if (typeof Class.prototype.alarm !== 'function') {
@@ -441,6 +465,7 @@
         blocked: () => blocked > 0,
         failure: () => failure,
         writing: () => writes > 0,
+        reading: () => reads > 0,
         alarm: (retryCount) => {
             const run = { done: false, error: null };
 
