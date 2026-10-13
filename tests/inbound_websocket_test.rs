@@ -426,3 +426,131 @@ async fn a_101_without_a_pair_is_refused() {
     })
     .await;
 }
+
+/// A Durable Object binding whose object answers every request with a 101
+/// that hands over a socket.
+struct Relay {
+    object_end: std::sync::Mutex<Option<oneshot::Sender<WebSocketConnection>>>,
+}
+
+impl openworkers_core::OperationsHandler for Relay {
+    fn durable_object_id(
+        &self,
+        _binding: &str,
+        _source: openworkers_core::ObjectIdSource,
+    ) -> Result<String, String> {
+        Ok("room".to_string())
+    }
+
+    fn handle_binding_durable_object(
+        &self,
+        _binding: &str,
+        _id: &str,
+        _request: HttpRequest,
+    ) -> openworkers_core::OpFuture<'_, Result<openworkers_core::ObjectResponse, String>> {
+        let socket = self.object_end.lock().unwrap().take();
+
+        Box::pin(async move {
+            Ok(openworkers_core::ObjectResponse {
+                response: HttpResponse {
+                    status: 101,
+                    headers: vec![("sec-websocket-protocol".to_string(), "chat".to_string())],
+                    body: openworkers_core::ResponseBody::None,
+                },
+                socket,
+            })
+        })
+    }
+}
+
+const RELAY: &str = r#"
+    export default {
+        fetch(request, env) {
+            return env.ROOM.get(env.ROOM.idFromName('a')).fetch(request);
+        },
+    };
+"#;
+
+/// Runs RELAY for one request; answers the event and the end of the object
+/// where the socket of the client must arrive.
+async fn relay(init: FetchInit) -> (Running, oneshot::Receiver<WebSocketConnection>) {
+    let (object_end, at_object) = oneshot::channel();
+    let ops = std::sync::Arc::new(Relay {
+        object_end: std::sync::Mutex::new(Some(object_end)),
+    });
+    let code = openworkers_transform::parse_worker_code(
+        RELAY.as_bytes(),
+        openworkers_transform::CodeLanguage::JavaScript,
+    )
+    .unwrap();
+    let script = Script::with_bindings(
+        code,
+        None,
+        vec![openworkers_core::BindingInfo::durable_object("ROOM")],
+    );
+    let mut worker = Worker::new_with_ops(script, Some(limits(5_000)), ops)
+        .await
+        .unwrap();
+
+    let event = tokio::task::spawn_local(async move {
+        let outcome = worker.exec(Event::Fetch(Some(init))).await;
+        (worker, outcome)
+    });
+
+    (event, at_object)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_worker_hands_on_the_socket_of_a_durable_object() {
+    run_in_local(|| async {
+        let (res_tx, res_rx) = oneshot::channel();
+        let (init, socket_tx) = FetchInit::upgradable(request(), res_tx);
+        let (event, at_object) = relay(init).await;
+
+        let response = upgraded(res_rx).await;
+        assert!(
+            response
+                .headers
+                .contains(&("sec-websocket-protocol".to_string(), "chat".to_string()))
+        );
+
+        // The worker does not hold the socket: its event ends at once
+        finish(event).await.1.unwrap();
+
+        let mut peer = Peer::connect(socket_tx);
+        let mut object = timeout(Duration::from_secs(5), at_object)
+            .await
+            .expect("the socket reaches the object")
+            .expect("the worker hands it on");
+
+        peer.send("to the object");
+        assert!(matches!(
+            object.recv_rx.recv().await,
+            Some(WebSocketIncoming::Text(text)) if text == "to the object"
+        ));
+
+        object
+            .send_tx
+            .send(WebSocketOutgoing::Text("from the object".into()))
+            .unwrap();
+        assert_eq!(text(peer.recv().await), "from the object");
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_request_that_is_not_an_upgrade_drops_the_socket_of_the_object() {
+    run_in_local(|| async {
+        let (res_tx, _res_rx) = oneshot::channel();
+        let (event, at_object) = relay(FetchInit::new(request(), res_tx)).await;
+
+        assert!(finish(event).await.1.is_err());
+        assert!(
+            timeout(Duration::from_secs(5), at_object)
+                .await
+                .expect("the socket of the object closes")
+                .is_err()
+        );
+    })
+    .await;
+}

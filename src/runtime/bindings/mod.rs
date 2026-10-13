@@ -32,7 +32,8 @@ pub use web_api::{
     setup_fetch_helpers, setup_global_aliases, setup_navigator_natives, setup_performance,
     setup_security_restrictions, setup_url_natives,
 };
-pub use websocket::setup_websocket;
+pub(crate) use websocket::outgoing;
+pub use websocket::{next_socket_id, setup_websocket};
 
 /// Evaluates the whole shared surface as one script.
 ///

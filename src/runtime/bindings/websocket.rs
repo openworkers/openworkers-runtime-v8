@@ -11,10 +11,11 @@
 //! Event dispatchers (message/close/error) use WebSocketEventState (keyed by WebSocketId).
 
 use super::state::{FetchState, WebSocketEventState};
-use openworkers_core::WebSocketOutgoing;
-use std::cell::{Cell, RefCell};
+use openworkers_core::{WebSocketId, WebSocketOutgoing};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use v8;
 
 use super::super::scheduler::SchedulerMessage;
@@ -38,13 +39,42 @@ fn string_of(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Option<St
         .map(|s| s.to_rust_string_lossy(scope))
 }
 
-/// A fresh socket id for this context.
-fn next_socket_id(scope: &mut v8::PinScope) -> Option<u64> {
-    let state = get_state!(scope, WebSocketEventState)?;
-    let id = state.next_id.get();
-    state.next_id.set(id + 1);
+/// A fresh socket id. Ids are unique in the process, as the socket of a
+/// Durable Object outlives the context that made it.
+pub fn next_socket_id() -> WebSocketId {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
 
-    Some(id)
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The frame `send(data)` makes, or None with a TypeError thrown.
+pub fn outgoing(scope: &mut v8::PinScope, data: v8::Local<v8::Value>) -> Option<WebSocketOutgoing> {
+    if data.is_string() {
+        return string_of(scope, data).map(WebSocketOutgoing::Text);
+    }
+
+    if data.is_array_buffer() {
+        let ab: v8::Local<v8::ArrayBuffer> = data.try_into().unwrap();
+        let store = ab.get_backing_store();
+        let bytes = store.iter().map(|cell| cell.get()).collect::<Vec<u8>>();
+
+        return Some(WebSocketOutgoing::Binary(bytes));
+    }
+
+    if data.is_array_buffer_view() {
+        let view: v8::Local<v8::ArrayBufferView> = data.try_into().unwrap();
+        let mut buf = vec![0u8; view.byte_length()];
+        view.copy_contents(&mut buf);
+
+        return Some(WebSocketOutgoing::Binary(buf));
+    }
+
+    throw_type_error(
+        scope,
+        "WebSocket: send takes a string, an ArrayBuffer or a view",
+    );
+
+    None
 }
 
 /// Register all WebSocket native functions and the JS WebSocket class.
@@ -55,7 +85,6 @@ pub fn setup_websocket(
     // Store WebSocketEventState in the context slot
     let ws_state = WebSocketEventState {
         callbacks: ws_event_callbacks,
-        next_id: Rc::new(Cell::new(1)),
     };
     store_state!(scope, ws_state);
 
@@ -68,9 +97,7 @@ pub fn setup_websocket(
             };
             let state = state.clone();
 
-            let Some(ws_id) = next_socket_id(scope) else {
-                return;
-            };
+            let ws_id = next_socket_id();
 
             let Some(url) = string_of(scope, args.get(0)) else {
                 return;
@@ -135,9 +162,7 @@ pub fn setup_websocket(
             };
             let state = state.clone();
 
-            let Some(ws_id) = next_socket_id(scope) else {
-                return;
-            };
+            let ws_id = next_socket_id();
 
             let _ = state
                 .scheduler_tx
@@ -200,29 +225,8 @@ pub fn setup_websocket(
             let Some(ws_id) = socket_id(scope, args.get(0)) else {
                 return;
             };
-            let data = args.get(1);
-
-            let msg = if data.is_string() {
-                let Some(s) = string_of(scope, data) else {
-                    return;
-                };
-                WebSocketOutgoing::Text(s)
-            } else if data.is_array_buffer() {
-                let ab: v8::Local<v8::ArrayBuffer> = data.try_into().unwrap();
-                let store = ab.get_backing_store();
-                let bytes = store.iter().map(|cell| cell.get()).collect::<Vec<u8>>();
-                WebSocketOutgoing::Binary(bytes)
-            } else if data.is_array_buffer_view() {
-                let view: v8::Local<v8::ArrayBufferView> = data.try_into().unwrap();
-                let len = view.byte_length();
-                let mut buf = vec![0u8; len];
-                view.copy_contents(&mut buf);
-                WebSocketOutgoing::Binary(buf)
-            } else {
-                return throw_type_error(
-                    scope,
-                    "WebSocket: send takes a string, an ArrayBuffer or a view",
-                );
+            let Some(msg) = outgoing(scope, args.get(1)) else {
+                return;
             };
 
             let _ = state
@@ -449,15 +453,19 @@ pub fn setup_websocket(
 
         // The client end runs in the client. Here it only names the socket a
         // 101 response hands over; the server end is a WebSocket of the worker.
-        class WebSocketPair {
-            constructor() {
-                const wsId = __nativeWebSocketPair();
-                this[0] = Object.freeze({ _pairId: wsId });
-                this[1] = WebSocket.__adopt(wsId);
+        // A block keeps the class off the global scope, so a Durable Object
+        // can put its own in globalThis.
+        {
+            class WebSocketPair {
+                constructor() {
+                    const wsId = __nativeWebSocketPair();
+                    this[0] = Object.freeze({ _pairId: wsId });
+                    this[1] = WebSocket.__adopt(wsId);
+                }
             }
-        }
 
-        globalThis.WebSocketPair = WebSocketPair;
+            globalThis.WebSocketPair = WebSocketPair;
+        }
     "#;
 
     exec_js!(scope, code);

@@ -18,6 +18,17 @@
 //                   the responses back until it is committed (output gate)
 //   alarm(retries)  runs the alarm() handler, and answers an object whose
 //                   `done` turns true when it ends, with `error` if it threw
+//   socket(id, kind, data, reason)
+//                   delivers a message, close or error of a socket of the
+//                   object, and answers an object whose `done` turns true
+//                   when its handler ends
+//   pinned()        whether a socket that is not hibernatable is open: its
+//                   listeners live in this instance, so it must stay
+//
+// The runner holds the WebSockets of the object. A socket accepted with
+// state.acceptWebSocket() is hibernatable: its events go to the handlers of
+// the class, and a later instance finds it again. A socket accepted with
+// accept() sends its events to its listeners and keeps this instance.
 
 (function installObject(dispatch, className, id) {
     'use strict';
@@ -240,6 +251,142 @@
         },
     });
 
+    const OPEN = 1;
+    const CLOSED = 3;
+    const MAX_TAGS = 10;
+    const MAX_TAG_LENGTH = 256;
+
+    // The sockets of the object, by id; a socket leaves when it closes
+    const sockets = new Map();
+
+    const closeChecks = (code, reason) => {
+        if (code !== undefined && code !== 1000 && (code < 3000 || code > 4999)) {
+            throw WebSocket.__err('InvalidAccessError', "Failed to execute 'close' on 'WebSocket': The code must be 1000 or in the range 3000-4999.");
+        }
+
+        if (reason !== undefined && new TextEncoder().encode(String(reason)).length > 123) {
+            throw WebSocket.__err('SyntaxError', "Failed to execute 'close' on 'WebSocket': The close reason must not exceed 123 bytes.");
+        }
+    };
+
+    // A WebSocket whose frames go through the runner. `mode` is null until
+    // it is accepted, then 'handlers' (hibernatable) or 'listeners'.
+    const socketMethods = Object.create(WebSocket.prototype, {
+        accept: {
+            value() {
+                if (this._mode !== null) {
+                    throw new TypeError('WebSocket: the socket is accepted already');
+                }
+
+                this._mode = 'listeners';
+                sockets.set(this._wsId, this);
+                __nativeObjectSocketAccept(this._wsId, [], false);
+            },
+        },
+        send: {
+            value(data) {
+                if (this._mode === null) {
+                    throw WebSocket.__err('InvalidStateError', 'WebSocket: accept the socket before sending on it');
+                }
+
+                if (this.readyState !== OPEN) {
+                    return;
+                }
+
+                __nativeObjectSocketSend(this._wsId, data);
+            },
+        },
+        close: {
+            value(code, reason) {
+                closeChecks(code, reason);
+
+                if (this.readyState !== OPEN) {
+                    return;
+                }
+
+                this.readyState = CLOSED;
+                sockets.delete(this._wsId);
+                __nativeObjectSocketClose(this._wsId, code ?? 1000, reason ?? '');
+            },
+        },
+        serializeAttachment: {
+            value(value) {
+                __nativeObjectSocketAttachment(this._wsId, value);
+                this._attachment = value === undefined ? null : structuredClone(value);
+            },
+        },
+        deserializeAttachment: {
+            value() {
+                return structuredClone(this._attachment);
+            },
+        },
+    });
+
+    const objectSocket = (id, mode, tags, attachment) => {
+        const ws = Object.create(socketMethods);
+
+        ws._wsId = id;
+        ws._mode = mode;
+        ws._tags = tags;
+        ws._attachment = attachment;
+        ws._listeners = { message: [], close: [], error: [], open: [] };
+        ws.url = null;
+        ws.binaryType = 'arraybuffer';
+        ws.bufferedAmount = 0;
+        ws.extensions = '';
+        ws.protocol = '';
+        ws.readyState = OPEN;
+
+        return ws;
+    };
+
+    for (const { id, tags, attachment } of __nativeObjectSockets()) {
+        sockets.set(id, objectSocket(id, 'handlers', tags, attachment));
+    }
+
+    // A pair made here gives a socket of the object
+    globalThis.WebSocketPair = class WebSocketPair {
+        constructor() {
+            const id = __nativeObjectSocketId();
+
+            this[0] = Object.freeze({ _pairId: id });
+            this[1] = objectSocket(id, null, [], null);
+        }
+    };
+
+    const ownSocket = (ws) => Object.getPrototypeOf(ws ?? {}) === socketMethods;
+
+    const hibernatable = (ws) => ownSocket(ws) && ws._mode === 'handlers';
+
+    const acceptWebSocket = (ws, tags = []) => {
+        if (!ownSocket(ws)) {
+            throw new TypeError('acceptWebSocket() takes the server end of a WebSocketPair made in this object');
+        }
+
+        if (ws._mode !== null) {
+            throw new TypeError('WebSocket: the socket is accepted already');
+        }
+
+        if (!Array.isArray(tags) || tags.length > MAX_TAGS) {
+            throw new TypeError(`acceptWebSocket() takes at most ${MAX_TAGS} tags`);
+        }
+
+        for (const tag of tags) {
+            if (typeof tag !== 'string' || tag.length > MAX_TAG_LENGTH) {
+                throw new TypeError(`a tag is a string of at most ${MAX_TAG_LENGTH} characters`);
+            }
+        }
+
+        ws._mode = 'handlers';
+        ws._tags = [...new Set(tags)];
+        sockets.set(ws._wsId, ws);
+        __nativeObjectSocketAccept(ws._wsId, ws._tags, true);
+    };
+
+    const unsupported = (name) => () => {
+        throw new Error(`Durable Objects: ${name}() is not supported`);
+    };
+
     const objectId = Object.freeze({
         toString: () => id,
         equals: (other) => other !== null && typeof other === 'object' && String(other) === id,
@@ -250,6 +397,24 @@
         storage,
         // The object lives on after the response, so there is nothing to extend.
         waitUntil() {},
+        acceptWebSocket,
+        getWebSockets(tag) {
+            return [...sockets.values()].filter(
+                (ws) => ws._mode === 'handlers' && (tag === undefined || ws._tags.includes(tag))
+            );
+        },
+        getTags(ws) {
+            if (!hibernatable(ws)) {
+                throw new TypeError('getTags() takes a socket accepted with acceptWebSocket()');
+            }
+
+            return [...ws._tags];
+        },
+        setWebSocketAutoResponse: unsupported('setWebSocketAutoResponse'),
+        getWebSocketAutoResponse: unsupported('getWebSocketAutoResponse'),
+        getWebSocketAutoResponseTimestamp: unsupported('getWebSocketAutoResponseTimestamp'),
+        setHibernatableWebSocketEventTimeout: unsupported('setHibernatableWebSocketEventTimeout'),
+        getHibernatableWebSocketEventTimeout: unsupported('getHibernatableWebSocketEventTimeout'),
         blockConcurrencyWhile(callback) {
             blocked += 1;
 
@@ -299,5 +464,56 @@
 
             return run;
         },
+        socket: (id, kind, data, reason) => {
+            const run = { done: false };
+            const ws = sockets.get(id);
+
+            Promise.resolve()
+                .then(() => {
+                    // A socket this instance closed has no more events
+                    if (ws === undefined) {
+                        return;
+                    }
+
+                    if (kind !== 'message') {
+                        ws.readyState = CLOSED;
+                        sockets.delete(id);
+                    }
+
+                    if (ws._mode === 'listeners') {
+                        if (kind === 'message') {
+                            ws._dispatch('message', { type: 'message', data });
+                        } else if (kind === 'close') {
+                            ws._dispatch('close', { type: 'close', code: data, reason, wasClean: data !== 1006 });
+                        } else {
+                            ws._dispatch('error', { type: 'error', message: data });
+                        }
+
+                        return;
+                    }
+
+                    if (kind === 'message') {
+                        return instance.webSocketMessage?.(ws, data);
+                    }
+
+                    if (kind === 'close') {
+                        return instance.webSocketClose?.(ws, data, reason, data !== 1006);
+                    }
+
+                    return instance.webSocketError?.(ws, new Error(data));
+                })
+                .then(
+                    () => {
+                        run.done = true;
+                    },
+                    (error) => {
+                        console.error(`Durable Object ${className}: the ${kind} handler of a WebSocket threw:`, error);
+                        run.done = true;
+                    }
+                );
+
+            return run;
+        },
+        pinned: () => [...sockets.values()].some((ws) => ws._mode === 'listeners'),
     };
 })

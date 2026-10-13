@@ -131,6 +131,18 @@ pub(crate) fn dispatch(
             }
         }
 
+        CallbackMessage::BindingUpgrade(callback_id, meta, ws_id) => {
+            let callback = tables.fetch.borrow_mut().remove(&callback_id);
+            tables.fetch_error.borrow_mut().remove(&callback_id);
+
+            if let Some(callback) = callback {
+                let meta_obj = v8::Object::new(scope);
+                callback_handlers::populate_upgrade_meta(scope, meta_obj, &meta, ws_id);
+                let callback = v8::Local::new(scope, &callback);
+                call_guest(scope, callback, &[meta_obj.into()]);
+            }
+        }
+
         CallbackMessage::StreamChunk(callback_id, chunk) => {
             let callback = tables.stream.borrow_mut().remove(&callback_id);
 

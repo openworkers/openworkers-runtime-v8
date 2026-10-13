@@ -8,20 +8,20 @@
 
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::stream::{FuturesUnordered, StreamExt};
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::time::Sleep;
 use tokio_util::sync::CancellationToken;
 
 use super::stream_manager::{self, StreamManager};
 use openworkers_core::{
     D1Error, D1ErrorKind, D1Op, D1Result, DatabaseOp, DatabaseResult, HttpRequest,
-    HttpResponseMeta, KvOp, KvResult, ObjectStorageOp, ObjectStorageResult, Operation,
-    OperationResult, OperationsHandle, ResponseBody, StorageOp, StorageResult, WebSocketConnection,
-    WebSocketId, WebSocketIncoming, WebSocketOutgoing, WebSocketUpgrade,
+    HttpResponseMeta, KvOp, KvResult, ObjectSocketOp, ObjectStorageOp, ObjectStorageResult,
+    Operation, OperationResult, OperationsHandle, ResponseBody, StorageOp, StorageResult,
+    WebSocketConnection, WebSocketId, WebSocketIncoming, WebSocketOutgoing, WebSocketUpgrade,
 };
 
 pub type CallbackId = u64;
@@ -81,6 +81,11 @@ pub enum SchedulerMessage {
     BindingDurableObject(CallbackId, String, String, HttpRequest),
     /// The storage of the Durable Object this context serves
     ObjectStorage(CallbackId, ObjectStorageOp),
+    /// The WebSockets of the Durable Object this context serves
+    ObjectSocket(ObjectSocketOp),
+    /// A response of the Durable Object hands over `socket`: the socket of
+    /// the upgrade goes to it
+    ObjectUpgrade(WebSocketId, WebSocketUpgrade),
     StreamRead(CallbackId, stream_manager::StreamId),
     StreamCancel(stream_manager::StreamId),
     WebSocketConnect(CallbackId, WebSocketId, String, HashMap<String, String>),
@@ -104,6 +109,8 @@ pub enum CallbackMessage {
     ExecuteInterval(CallbackId),
     FetchError(CallbackId, String),
     FetchStreamingSuccess(CallbackId, HttpResponseMeta, stream_manager::StreamId),
+    /// A binding answered a 101 that hands over the socket of this id
+    BindingUpgrade(CallbackId, HttpResponseMeta, WebSocketId),
     StreamChunk(CallbackId, stream_manager::StreamChunk),
     StorageResult(CallbackId, StorageResult),
     KvResult(CallbackId, KvResult),
@@ -178,9 +185,13 @@ pub async fn run_event_loop(
     let mut ws_commands: HashMap<WebSocketId, mpsc::UnboundedSender<WebSocketCommand>> =
         HashMap::new();
 
-    // The storage ops of a Durable Object, which run one at a time in the
-    // order the guest made them. Started on the first one.
-    let mut storage: Option<mpsc::UnboundedSender<(CallbackId, ObjectStorageOp)>> = None;
+    // The storage and socket ops of a Durable Object, which run one at a
+    // time in the order the guest made them. Started on the first one.
+    let mut queue: Option<mpsc::UnboundedSender<Queued>> = None;
+
+    // Sockets that binding responses handed over, until a response of this
+    // context carries one of them
+    let relays: Relays = Arc::default();
 
     // Pairs the response of the request can still carry. None once it is read.
     let mut pairs: Option<HashSet<WebSocketId>> = Some(HashSet::new());
@@ -213,6 +224,7 @@ pub async fn run_event_loop(
                         let manager = stream_manager.clone();
                         let ops = ops.clone();
                         let cancel = request_cancel.clone();
+                        let gate = output_gate(&queue);
 
                         tokio::spawn(async move {
                             let result = tokio::select! {
@@ -221,7 +233,7 @@ pub async fn run_event_loop(
                                     let _ = callback_tx.send(CallbackMessage::FetchError(promise_id, CANCELLED.into()));
                                     return;
                                 }
-                                r = execute_fetch_via_ops(request, manager, ops, cancel.clone()) => r,
+                                r = after(gate, execute_fetch_via_ops(request, manager, ops, cancel.clone())) => r,
                             };
 
                             match result {
@@ -242,6 +254,7 @@ pub async fn run_event_loop(
                         let manager = stream_manager.clone();
                         let ops = ops.clone();
                         let cancel = request_cancel.clone();
+                        let gate = output_gate(&queue);
 
                         tokio::spawn(async move {
                             let result = tokio::select! {
@@ -250,7 +263,7 @@ pub async fn run_event_loop(
                                     let _ = callback_tx.send(CallbackMessage::FetchError(promise_id, CANCELLED.into()));
                                     return;
                                 }
-                                r = execute_binding_fetch_via_ops(binding_name, request, manager, ops, cancel.clone()) => r,
+                                r = after(gate, execute_binding_fetch_via_ops(binding_name, request, manager, ops, cancel.clone())) => r,
                             };
 
                             match result {
@@ -392,10 +405,12 @@ pub async fn run_event_loop(
                         tokio::spawn(answer_binding_request(
                             Operation::BindingWorker { binding, request },
                             callback_id,
+                            output_gate(&queue),
                             callback_tx.clone(),
                             stream_manager.clone(),
                             ops.clone(),
                             request_cancel.clone(),
+                            relays.clone(),
                         ));
                     }
 
@@ -403,21 +418,33 @@ pub async fn run_event_loop(
                         tokio::spawn(answer_binding_request(
                             Operation::BindingDurableObject { binding, id, request },
                             callback_id,
+                            output_gate(&queue),
                             callback_tx.clone(),
                             stream_manager.clone(),
                             ops.clone(),
                             request_cancel.clone(),
+                            relays.clone(),
                         ));
                     }
 
                     SchedulerMessage::ObjectStorage(callback_id, op) => {
-                        let storage = storage.get_or_insert_with(|| {
-                            let (tx, rx) = mpsc::unbounded_channel();
-                            tokio::spawn(run_object_storage(rx, callback_tx.clone(), ops.clone()));
-                            tx
-                        });
+                        enqueue(&mut queue, &callback_tx, &ops, Queued::Storage(callback_id, op));
+                    }
 
-                        let _ = storage.send((callback_id, op));
+                    SchedulerMessage::ObjectSocket(op) => {
+                        enqueue(&mut queue, &callback_tx, &ops, Queued::Socket(op));
+                    }
+
+                    SchedulerMessage::ObjectUpgrade(ws_id, upgrade) => {
+                        let relay = relays.lock().unwrap().remove(&ws_id);
+
+                        match relay {
+                            Some(socket) => forward(upgrade, socket),
+                            None => {
+                                let op = ObjectSocketOp::Attach { socket: ws_id, upgrade };
+                                enqueue(&mut queue, &callback_tx, &ops, Queued::Socket(op));
+                            }
+                        }
                     }
 
                     SchedulerMessage::WebSocketConnect(callback_id, ws_id, url, headers) => {
@@ -458,12 +485,16 @@ pub async fn run_event_loop(
 
                     SchedulerMessage::WebSocketUpgrade(upgrade) => {
                         let mut unused = pairs.take().unwrap_or_default();
+                        let mut relays = std::mem::take(&mut *relays.lock().unwrap());
 
-                        if let Some((ws_id, upgrade)) = upgrade
-                            && unused.remove(&ws_id)
-                            && let Some(tx) = ws_commands.get(&ws_id)
-                        {
-                            let _ = tx.send(WebSocketCommand::Attach(upgrade));
+                        if let Some((ws_id, upgrade)) = upgrade {
+                            if unused.remove(&ws_id)
+                                && let Some(tx) = ws_commands.get(&ws_id)
+                            {
+                                let _ = tx.send(WebSocketCommand::Attach(upgrade));
+                            } else if let Some(socket) = relays.remove(&ws_id) {
+                                forward(upgrade, socket);
+                            }
                         }
 
                         // Dropping the command channel closes the pair
@@ -565,33 +596,104 @@ pub async fn run_event_loop(
     }
 }
 
-/// Runs the storage ops of a Durable Object one at a time, in order: a get
+/// Work of a Durable Object that runs in the order the guest made it.
+enum Queued {
+    Storage(CallbackId, ObjectStorageOp),
+    Socket(ObjectSocketOp),
+    /// An outbound call waits here for the writes made before it (output gate)
+    Barrier(oneshot::Sender<()>),
+}
+
+/// The sockets that binding responses handed over, by the id the guest got
+type Relays = Arc<Mutex<HashMap<WebSocketId, oneshot::Sender<WebSocketConnection>>>>;
+
+fn enqueue(
+    queue: &mut Option<mpsc::UnboundedSender<Queued>>,
+    callback_tx: &CallbackSender,
+    ops: &OperationsHandle,
+    work: Queued,
+) {
+    let queue = queue.get_or_insert_with(|| {
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(run_object_queue(rx, callback_tx.clone(), ops.clone()));
+        tx
+    });
+
+    let _ = queue.send(work);
+}
+
+/// What an outbound call of a Durable Object waits for, if it made storage
+/// ops: the end of the writes before it. A context that made none has none.
+fn output_gate(queue: &Option<mpsc::UnboundedSender<Queued>>) -> Option<oneshot::Receiver<()>> {
+    let queue = queue.as_ref()?;
+    let (open, gate) = oneshot::channel();
+
+    queue.send(Queued::Barrier(open)).ok()?;
+
+    Some(gate)
+}
+
+/// Runs `work` once `gate` opens.
+async fn after<T>(gate: Option<oneshot::Receiver<()>>, work: impl Future<Output = T>) -> T {
+    if let Some(gate) = gate {
+        let _ = gate.await;
+    }
+
+    work.await
+}
+
+/// Gives the socket of an upgrade to the object that answered the 101. The
+/// context that relays it may end first, so no request cancels this.
+fn forward(upgrade: WebSocketUpgrade, socket: oneshot::Sender<WebSocketConnection>) {
+    tokio::spawn(async move {
+        if let Ok(conn) = upgrade.await {
+            let _ = socket.send(conn);
+        }
+    });
+}
+
+/// Runs the queued work of a Durable Object one at a time, in order: a get
 /// after a put the guest did not await reads the put. A write that is under
 /// way when the context goes still ends, so the guest knows what happened.
-async fn run_object_storage(
-    mut ops_rx: mpsc::UnboundedReceiver<(CallbackId, ObjectStorageOp)>,
+async fn run_object_queue(
+    mut queue: mpsc::UnboundedReceiver<Queued>,
     callback_tx: CallbackSender,
     ops: OperationsHandle,
 ) {
-    while let Some((callback_id, op)) = ops_rx.recv().await {
-        let result = match ops.handle(Operation::DurableObjectStorage(op)).await {
-            OperationResult::ObjectStorage(result) => result,
-            _ => ObjectStorageResult::Error("Unexpected result type for object storage".into()),
-        };
+    while let Some(work) = queue.recv().await {
+        match work {
+            Queued::Storage(callback_id, op) => {
+                let result = match ops.handle(Operation::DurableObjectStorage(op)).await {
+                    OperationResult::ObjectStorage(result) => result,
+                    _ => ObjectStorageResult::Error(
+                        "Unexpected result type for object storage".into(),
+                    ),
+                };
 
-        let _ = callback_tx.send(CallbackMessage::ObjectStorage(callback_id, result));
+                let _ = callback_tx.send(CallbackMessage::ObjectStorage(callback_id, result));
+            }
+            Queued::Socket(op) => {
+                ops.handle(Operation::DurableObjectSocket(op)).await;
+            }
+            Queued::Barrier(open) => {
+                let _ = open.send(());
+            }
+        }
     }
 }
 
 /// Runs a request through a binding that answers a Response, a worker or a
 /// Durable Object, and hands the response to the guest.
+#[allow(clippy::too_many_arguments)]
 async fn answer_binding_request(
     op: Operation,
     callback_id: CallbackId,
+    gate: Option<oneshot::Receiver<()>>,
     callback_tx: CallbackSender,
     manager: Arc<StreamManager>,
     ops: OperationsHandle,
     cancel: CancellationToken,
+    relays: Relays,
 ) {
     let result = tokio::select! {
         biased;
@@ -599,11 +701,25 @@ async fn answer_binding_request(
             let _ = callback_tx.send(CallbackMessage::FetchError(callback_id, CANCELLED.into()));
             return;
         }
-        r = ops.handle(op) => r,
+        r = after(gate, ops.handle(op)) => r,
     };
 
     let response = match result {
         OperationResult::Http(Ok(response)) => response,
+        // The guest gets a client end to hand on in its own 101
+        OperationResult::Upgrade(response, socket) => {
+            let ws_id = crate::runtime::bindings::next_socket_id();
+            relays.lock().unwrap().insert(ws_id, socket);
+
+            let meta = HttpResponseMeta {
+                status: response.status,
+                status_text: String::new(),
+                headers: response.headers,
+            };
+
+            let _ = callback_tx.send(CallbackMessage::BindingUpgrade(callback_id, meta, ws_id));
+            return;
+        }
         OperationResult::Http(Err(e)) => {
             let _ = callback_tx.send(CallbackMessage::FetchError(callback_id, e));
             return;
@@ -739,6 +855,7 @@ async fn convert_fetch_result_to_stream(
         OperationResult::ObjectStorage(_) => {
             return Err("Unexpected ObjectStorage result for fetch".into());
         }
+        OperationResult::Upgrade(..) => return Err("Unexpected Upgrade result for fetch".into()),
     };
 
     let meta = HttpResponseMeta {

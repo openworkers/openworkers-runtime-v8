@@ -9,7 +9,7 @@
 use super::stream_manager;
 use openworkers_core::{
     D1Error, D1ErrorKind, D1Result, D1StatementResult, DatabaseResult, HttpResponseMeta, KvResult,
-    SqlPrimitive, StorageResult,
+    SqlPrimitive, StorageResult, WebSocketId,
 };
 
 /// Populate metadata object for FetchStreamingSuccess callback.
@@ -50,6 +50,26 @@ pub fn populate_fetch_meta(
     let stream_id_key = v8::String::new(scope, "streamId").unwrap();
     let stream_id_val = v8::Number::new(scope, stream_id as f64);
     meta_obj.set(scope, stream_id_key.into(), stream_id_val.into());
+}
+
+/// Populate metadata object for a binding 101 that hands over a socket.
+///
+/// Sets: { status, statusText, headers, socketId }
+pub fn populate_upgrade_meta(
+    scope: &mut v8::PinScope,
+    meta_obj: v8::Local<v8::Object>,
+    meta: &HttpResponseMeta,
+    ws_id: WebSocketId,
+) {
+    populate_fetch_meta(scope, meta_obj, meta, 0);
+
+    let stream_key = v8::String::new(scope, "streamId").unwrap();
+    let null = v8::null(scope);
+    meta_obj.set(scope, stream_key.into(), null.into());
+
+    let socket_key = v8::String::new(scope, "socketId").unwrap();
+    let socket = v8::Number::new(scope, ws_id as f64);
+    meta_obj.set(scope, socket_key.into(), socket.into());
 }
 
 /// Populate result object for StreamChunk callback.

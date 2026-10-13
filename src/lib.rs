@@ -57,7 +57,7 @@ mod pool;
 pub use async_waiter::AsyncWaiter;
 pub use execution_context::ExecutionContext;
 pub use execution_context::durable_object::{
-    self, AlarmInit, DurableObject, ObjectEvent, ObjectSpec,
+    self, AlarmInit, DurableObject, ObjectEvent, ObjectSpec, SocketEvent,
 };
 pub use execution_helpers::ListenerMarks;
 pub use gc::{ExternalMemoryGuard, GcTraceable, JsLock, JsLockRef, Tracked, tracked_guard};

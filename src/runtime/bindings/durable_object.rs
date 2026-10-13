@@ -1,7 +1,10 @@
 //! The natives of Durable Objects: the ids of a namespace binding, which the
 //! runner makes, and the storage of the object a context serves.
 
-use openworkers_core::{ObjectIdSource, ObjectStorageOp, OperationsHandle};
+use openworkers_core::{
+    ObjectIdSource, ObjectSocketOp, ObjectStorageOp, OperationsHandle, WebSocketId,
+    WebSocketOutgoing,
+};
 use v8::{ValueDeserializerHelper, ValueSerializerHelper};
 
 use super::fetch::{register_callbacks_with_error, resolve_reject};
@@ -83,6 +86,197 @@ pub fn setup_durable_object_ids(scope: &mut v8::PinScope, ops: OperationsHandle)
     .unwrap();
 
     register_fn!(scope, "__nativeObjectStorage", function);
+
+    setup_object_sockets(scope);
+}
+
+/// The largest attachment of a socket, serialized, as on Cloudflare
+const MAX_ATTACHMENT: usize = 2048;
+
+/// Sends an op on the sockets of the object to the scheduler.
+fn send_socket_op(scope: &mut v8::PinScope, op: ObjectSocketOp) {
+    if let Some(state) = get_state!(scope, FetchState) {
+        let _ = state.scheduler_tx.send(SchedulerMessage::ObjectSocket(op));
+    }
+}
+
+/// The socket id an op was given, or a TypeError thrown in its place.
+fn socket_of(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Option<WebSocketId> {
+    if !value.is_number() {
+        throw_type_error(scope, "WebSocket: the socket id is not a number");
+        return None;
+    }
+
+    value.number_value(scope).map(|id| id as WebSocketId)
+}
+
+/// Installs the natives of the WebSockets of the object, which the runner
+/// holds:
+///
+///   __nativeObjectSocketId()                    a new socket id
+///   __nativeObjectSocketAccept(id, tags, hib)   the object takes the socket
+///   __nativeObjectSocketSend(id, data)          a frame to the client
+///   __nativeObjectSocketClose(id, code, reason) closes the socket
+///   __nativeObjectSocketAttachment(id, value)   sets the attachment
+///   __nativeObjectSockets()                     the hibernatable sockets, as
+///                                               [{ id, tags, attachment }]
+fn setup_object_sockets(scope: &mut v8::PinScope) {
+    let function = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope, _: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue| {
+            let id = super::next_socket_id();
+            rv.set(v8::Number::new(scope, id as f64).into());
+        },
+    )
+    .unwrap();
+
+    register_fn!(scope, "__nativeObjectSocketId", function);
+
+    let function = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _: v8::ReturnValue| {
+            let Some(socket) = socket_of(scope, args.get(0)) else {
+                return;
+            };
+
+            let tags = strings(scope, Some(args.get(1)));
+            let hibernatable = args.get(2).is_true();
+
+            send_socket_op(
+                scope,
+                ObjectSocketOp::Accept {
+                    socket,
+                    tags,
+                    hibernatable,
+                },
+            );
+        },
+    )
+    .unwrap();
+
+    register_fn!(scope, "__nativeObjectSocketAccept", function);
+
+    let function = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _: v8::ReturnValue| {
+            let Some(socket) = socket_of(scope, args.get(0)) else {
+                return;
+            };
+
+            let Some(message) = super::outgoing(scope, args.get(1)) else {
+                return;
+            };
+
+            send_socket_op(scope, ObjectSocketOp::Send { socket, message });
+        },
+    )
+    .unwrap();
+
+    register_fn!(scope, "__nativeObjectSocketSend", function);
+
+    let function = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _: v8::ReturnValue| {
+            let Some(socket) = socket_of(scope, args.get(0)) else {
+                return;
+            };
+
+            let code = args
+                .get(1)
+                .number_value(scope)
+                .map(|code| code as u16)
+                .unwrap_or(1000);
+            let reason = args.get(2).to_rust_string_lossy(scope);
+            let message = WebSocketOutgoing::Close { code, reason };
+
+            send_socket_op(scope, ObjectSocketOp::Send { socket, message });
+        },
+    )
+    .unwrap();
+
+    register_fn!(scope, "__nativeObjectSocketClose", function);
+
+    let function = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _: v8::ReturnValue| {
+            let Some(socket) = socket_of(scope, args.get(0)) else {
+                return;
+            };
+
+            let value = args.get(1);
+
+            let value = if value.is_null_or_undefined() {
+                None
+            } else {
+                // None: a DataCloneError is thrown
+                let Some(bytes) = serialize(scope, value) else {
+                    return;
+                };
+
+                if bytes.len() > MAX_ATTACHMENT {
+                    let message = format!(
+                        "serializeAttachment: the attachment is {} bytes, more than {MAX_ATTACHMENT}",
+                        bytes.len()
+                    );
+
+                    return throw_type_error(scope, &message);
+                }
+
+                Some(bytes)
+            };
+
+            send_socket_op(scope, ObjectSocketOp::Attachment { socket, value });
+        },
+    )
+    .unwrap();
+
+    register_fn!(scope, "__nativeObjectSocketAttachment", function);
+
+    let function = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope, _: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue| {
+            let Some(ids) = get_state!(scope, Ids) else {
+                return;
+            };
+
+            let sockets = ids.0.durable_object_sockets();
+            let list = v8::Array::new(scope, sockets.len() as i32);
+
+            for (index, socket) in sockets.into_iter().enumerate() {
+                let entry = v8::Object::new(scope);
+
+                let key = v8::String::new(scope, "id").unwrap();
+                let id = v8::Number::new(scope, socket.id as f64);
+                entry.set(scope, key.into(), id.into());
+
+                let tags: Vec<v8::Local<v8::Value>> = socket
+                    .tags
+                    .iter()
+                    .map(|tag| v8::String::new(scope, tag).unwrap().into())
+                    .collect();
+                let key = v8::String::new(scope, "tags").unwrap();
+                let tags = v8::Array::new_with_elements(scope, &tags);
+                entry.set(scope, key.into(), tags.into());
+
+                let attachment = match socket.attachment {
+                    Some(bytes) => match deserialize(scope, &bytes) {
+                        Some(value) => value,
+                        None => v8::null(scope).into(),
+                    },
+                    None => v8::null(scope).into(),
+                };
+                let key = v8::String::new(scope, "attachment").unwrap();
+                entry.set(scope, key.into(), attachment);
+
+                list.set_index(scope, index as u32, entry.into());
+            }
+
+            rv.set(list.into());
+        },
+    )
+    .unwrap();
+
+    register_fn!(scope, "__nativeObjectSockets", function);
 }
 
 struct Serializer;

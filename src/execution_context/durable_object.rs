@@ -21,10 +21,11 @@ use crate::execution_helpers::{
     EventLoopExit, check_exit_condition, get_completion_state, get_response_stream_id,
     read_response_object, read_response_socket, signal_client_disconnect, trigger_fetch_handler,
 };
+use crate::runtime::SchedulerMessage;
 use crate::security::{CpuEnforcer, TimeoutGuard, TurnGuard, next_request_id};
 use openworkers_core::{
-    FetchInit, OperationsHandle, RequestBody, ResponseSender, RuntimeLimits, Script,
-    TerminationReason,
+    FetchInit, HttpResponse, OperationsHandle, RequestBody, ResponseBody, ResponseSender,
+    RuntimeLimits, Script, TerminationReason, WebSocketId, WebSocketIncoming, WebSocketUpgrade,
 };
 
 /// How long a blockConcurrencyWhile callback may hold the events back.
@@ -74,6 +75,13 @@ pub async fn run(spec: ObjectSpec, mut mailbox: mpsc::UnboundedReceiver<ObjectEv
 pub enum ObjectEvent {
     Fetch(FetchInit),
     Alarm(AlarmInit),
+    Socket(SocketEvent),
+}
+
+/// What came on a WebSocket of the object, which the runner holds.
+pub struct SocketEvent {
+    pub socket: WebSocketId,
+    pub incoming: WebSocketIncoming,
 }
 
 /// The alarm of the object is due: its alarm() handler runs, and `done`
@@ -88,12 +96,16 @@ pub struct AlarmInit {
 enum InFlight {
     Fetch(FetchInFlight),
     Alarm(AlarmInFlight),
+    /// What durable_object.js answers for the handler of a socket event
+    Socket(v8::Global<v8::Object>),
 }
 
 struct FetchInFlight {
     handle: v8::Global<v8::Object>,
     /// Taken when the response goes out
     res_tx: Option<ResponseSender>,
+    /// The socket of the client, for a 101 that hands over a socket
+    upgrade: Option<WebSocketUpgrade>,
     /// Set once the guest knows that the client hung up
     disconnected: bool,
 }
@@ -118,6 +130,7 @@ impl InFlight {
                 .done
                 .as_mut()
                 .is_some_and(|done| done.poll_closed(cx).is_ready()),
+            InFlight::Socket(_) => false,
         }
     }
 }
@@ -139,6 +152,8 @@ struct TurnOutcome {
     /// It took an event
     admitted: bool,
     gate: Gate,
+    /// A socket that is not hibernatable is open, and keeps the object
+    pinned: bool,
 }
 
 pub struct DurableObject {
@@ -374,8 +389,9 @@ impl ExecutionContext {
             // of the event may still run, but it keeps the object no longer
             inflight.retain_mut(|event| !event.caller_left(cx));
 
-            // Timers do not keep the object: only events in flight do
-            if active || outcome.admitted || !inflight.is_empty() {
+            // Timers do not keep the object: only events in flight and the
+            // sockets whose listeners live in it do
+            if active || outcome.admitted || outcome.pinned || !inflight.is_empty() {
                 idle_timer.as_mut().reset(Instant::now() + idle);
             }
 
@@ -462,7 +478,29 @@ impl ExecutionContext {
         Ok(TurnOutcome {
             admitted: took,
             gate: self.gate(),
+            pinned: self.pinned(),
         })
+    }
+
+    fn pinned(&mut self) -> bool {
+        use std::pin::pin;
+
+        let mut isolate = self.isolate();
+        let scope = pin!(v8::HandleScope::new(&mut isolate));
+        let mut scope = scope.init();
+        let context = v8::Local::new(&scope, &self.request.context);
+        let scope = &mut v8::ContextScope::new(&mut scope, context);
+        let object = v8::Local::new(scope, &self.request.dispatch);
+
+        let key = v8::String::new(scope, "pinned").unwrap();
+        let pinned = object
+            .get(scope, key.into())
+            .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
+            .expect("durable_object.js answers pinned");
+
+        pinned
+            .call(scope, object.into(), &[])
+            .is_some_and(|value| value.is_true())
     }
 
     fn gate(&mut self) -> Gate {
@@ -501,7 +539,62 @@ impl ExecutionContext {
         match event {
             ObjectEvent::Fetch(init) => self.admit_fetch(init).map(InFlight::Fetch),
             ObjectEvent::Alarm(init) => Ok(InFlight::Alarm(self.admit_alarm(init))),
+            ObjectEvent::Socket(event) => Ok(InFlight::Socket(self.admit_socket(event))),
         }
+    }
+
+    fn admit_socket(&mut self, event: SocketEvent) -> v8::Global<v8::Object> {
+        use std::pin::pin;
+
+        let mut isolate = self.isolate();
+        let scope = pin!(v8::HandleScope::new(&mut isolate));
+        let mut scope = scope.init();
+        let context = v8::Local::new(&scope, &self.request.context);
+        let scope = &mut v8::ContextScope::new(&mut scope, context);
+        let object = v8::Local::new(scope, &self.request.dispatch);
+
+        let key = v8::String::new(scope, "socket").unwrap();
+        let socket = object
+            .get(scope, key.into())
+            .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
+            .expect("durable_object.js answers socket");
+
+        let (kind, data, reason): (&str, v8::Local<v8::Value>, v8::Local<v8::Value>) =
+            match event.incoming {
+                WebSocketIncoming::Text(text) => (
+                    "message",
+                    v8::String::new(scope, &text).unwrap().into(),
+                    v8::undefined(scope).into(),
+                ),
+                WebSocketIncoming::Binary(bytes) => (
+                    "message",
+                    crate::v8_helpers::create_array_buffer_from_vec(scope, bytes).into(),
+                    v8::undefined(scope).into(),
+                ),
+                WebSocketIncoming::Closed { code, reason } => (
+                    "close",
+                    v8::Number::new(scope, code as f64).into(),
+                    v8::String::new(scope, &reason).unwrap().into(),
+                ),
+                WebSocketIncoming::Error(error) => (
+                    "error",
+                    v8::String::new(scope, &error).unwrap().into(),
+                    v8::undefined(scope).into(),
+                ),
+            };
+
+        let id = v8::Number::new(scope, event.socket as f64);
+        let kind = v8::String::new(scope, kind).unwrap();
+        let run = socket
+            .call(
+                scope,
+                object.into(),
+                &[id.into(), kind.into(), data, reason],
+            )
+            .and_then(|run| run.to_object(scope))
+            .expect("socket() answers an object and does not throw");
+
+        v8::Global::new(scope, run)
     }
 
     fn admit_alarm(&mut self, init: AlarmInit) -> AlarmInFlight {
@@ -535,7 +628,9 @@ impl ExecutionContext {
         use std::pin::pin;
 
         let FetchInit {
-            mut req, res_tx, ..
+            mut req,
+            res_tx,
+            upgrade,
         } = init;
 
         let body_stream_id = match std::mem::take(&mut req.body) {
@@ -565,6 +660,7 @@ impl ExecutionContext {
         Ok(FetchInFlight {
             handle,
             res_tx: Some(res_tx),
+            upgrade,
             disconnected: false,
         })
     }
@@ -576,6 +672,7 @@ impl ExecutionContext {
         use std::pin::pin;
 
         let stream_manager = Arc::clone(&self.request.stream_manager);
+        let scheduler_tx = self.request.scheduler_tx.clone();
         let buffer_size = self.limits.stream_buffer_size;
         let mut isolate = self.isolate();
         let scope = pin!(v8::HandleScope::new(&mut isolate));
@@ -587,6 +684,21 @@ impl ExecutionContext {
         inflight.retain_mut(|event| {
             let event = match event {
                 InFlight::Fetch(event) => event,
+                InFlight::Socket(run) => {
+                    let run = v8::Local::new(scope, &*run);
+                    let done = v8::String::new(scope, "done").unwrap();
+
+                    if !run
+                        .get(scope, done.into())
+                        .is_some_and(|done| done.is_true())
+                    {
+                        return true;
+                    }
+
+                    answered = true;
+
+                    return false;
+                }
                 InFlight::Alarm(alarm) => {
                     let run = v8::Local::new(scope, &alarm.run);
                     let done = v8::String::new(scope, "done").unwrap();
@@ -622,16 +734,28 @@ impl ExecutionContext {
                 let res_tx = event.res_tx.take().unwrap();
                 answered = true;
 
-                if read_response_socket(scope, handle).is_some() {
-                    tracing::warn!("a Durable Object cannot answer with a WebSocket yet");
-                } else {
-                    match read_response_object(scope, handle, &stream_manager, buffer_size) {
-                        Ok((status, response)) if status != 101 => {
-                            let _ = res_tx.send(response);
-                        }
-                        Ok(_) => tracing::warn!("a Durable Object cannot answer 101 yet"),
-                        Err(error) => tracing::warn!("durable object response: {error}"),
+                let socket = read_response_socket(scope, handle);
+
+                match read_response_object(scope, handle, &stream_manager, buffer_size) {
+                    Ok((status, response)) => {
+                        let response = match (socket, event.upgrade.take()) {
+                            (Some(ws_id), Some(upgrade)) => {
+                                let _ = scheduler_tx
+                                    .send(SchedulerMessage::ObjectUpgrade(ws_id, upgrade));
+                                response
+                            }
+                            (Some(_), None) => refused(
+                                "The response carries a WebSocket, but the request is not a WebSocket upgrade",
+                            ),
+                            (None, _) if status == 101 => {
+                                refused("A 101 response must carry the client end of a WebSocketPair")
+                            }
+                            (None, _) => response,
+                        };
+
+                        let _ = res_tx.send(response);
                     }
+                    Err(error) => tracing::warn!("durable object response: {error}"),
                 }
             }
 
@@ -653,5 +777,14 @@ impl ExecutionContext {
         });
 
         answered
+    }
+}
+
+/// The answer to a response the object cannot give: the caller sees why.
+fn refused(message: &str) -> HttpResponse {
+    HttpResponse {
+        status: 500,
+        headers: vec![("content-type".to_string(), "text/plain".to_string())],
+        body: ResponseBody::Bytes(message.to_string().into()),
     }
 }

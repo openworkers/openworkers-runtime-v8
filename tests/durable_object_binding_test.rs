@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use common::run_in_local;
 use openworkers_core::{
-    BindingInfo, Event, FetchInit, HttpMethod, HttpRequest, HttpResponse, ObjectIdSource, OpFuture,
-    OperationsHandle, OperationsHandler, RequestBody, RuntimeLimits, Script,
+    BindingInfo, Event, FetchInit, HttpMethod, HttpRequest, ObjectIdSource, ObjectResponse,
+    OpFuture, OperationsHandle, OperationsHandler, RequestBody, RuntimeLimits, Script,
 };
 use openworkers_runtime_v8::{ObjectEvent, ObjectSpec, Worker};
 use tokio::sync::{mpsc, oneshot};
@@ -46,13 +46,20 @@ impl OperationsHandler for Host {
         _binding: &str,
         id: &str,
         request: HttpRequest,
-    ) -> OpFuture<'_, Result<HttpResponse, String>> {
+    ) -> OpFuture<'_, Result<ObjectResponse, String>> {
         let (res_tx, res_rx) = oneshot::channel();
         let _ = self
             .router
             .send((id.to_string(), FetchInit::new(request, res_tx)));
 
-        Box::pin(async move { res_rx.await.map_err(|_| "the object failed".to_string()) })
+        Box::pin(async move {
+            let response = res_rx.await.map_err(|_| "the object failed".to_string())?;
+
+            Ok(ObjectResponse {
+                response,
+                socket: None,
+            })
+        })
     }
 }
 

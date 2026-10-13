@@ -125,10 +125,17 @@ pub fn setup_stream_ops(
                 body = meta.body;
             }
 
+            // A 101 of a binding hands over a socket, which this context can
+            // only pass on in its own 101
+            const webSocket = meta.socketId === undefined || meta.socketId === null
+                ? null
+                : Object.freeze({ _pairId: meta.socketId });
+
             return new Response(body, {
                 status: meta.status,
                 statusText: meta.statusText,
-                headers: meta.headers
+                headers: meta.headers,
+                webSocket
             });
         };
     "#
