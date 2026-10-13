@@ -18,10 +18,10 @@ sandbox = ["v8/v8_enable_sandbox", "serde_v8/v8_enable_sandbox"]
 gc-derive = { package = "openworkers-runtime-v8-gc-derive", path = "gc-derive" }
 
 # Common types
-openworkers-core = { path = "../openworkers-core" }
+openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.18.0" }
 
 # The shared web surface
-openworkers-wintertc = { path = "../openworkers-wintertc" }
+openworkers-wintertc = { git = "https://github.com/openworkers/openworkers-wintertc", tag = "v0.1.11" }
 
 # The URLPattern grammar, so the surface does not carry a parser of its own.
 urlpattern = "0.6"
@@ -80,7 +80,7 @@ criterion = { version = "0.8", features = ["async_tokio"] }
 rand = "0.10"
 
 # ESM -> classic script lowering for the SSR benchmarks
-openworkers-transform = { path = "../openworkers-transform" }
+openworkers-transform = { git = "https://github.com/openworkers/openworkers-transform", tag = "v0.1.3" }
 
 
 [lints.clippy]
