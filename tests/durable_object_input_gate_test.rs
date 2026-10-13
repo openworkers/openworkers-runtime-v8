@@ -127,10 +127,6 @@ const GATED: &str = r#"
                     await storage.get('key');
                     this.log.push('read');
                     return new Response('read');
-                case '/concurrent-read':
-                    await storage.get('key', { allowConcurrency: true });
-                    this.log.push('read');
-                    return new Response('read');
                 case '/log':
                     return new Response(this.log.join(','));
             }
@@ -168,23 +164,6 @@ async fn a_read_holds_back_the_timers_of_other_events() {
         body(read).await;
 
         assert_eq!(body(send(&object, "/log")).await, "read,timer");
-    })
-    .await;
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn a_read_that_allows_concurrency_holds_nothing_back() {
-    run_in_local(|| async {
-        let object = object(GATED);
-
-        let timer = send(&object, "/timer");
-        tokio::time::sleep(Duration::from_millis(5)).await;
-        let read = send(&object, "/concurrent-read");
-
-        body(timer).await;
-        body(read).await;
-
-        assert_eq!(body(send(&object, "/log")).await, "timer,read");
     })
     .await;
 }

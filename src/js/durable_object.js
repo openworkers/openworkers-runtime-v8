@@ -62,14 +62,10 @@
         return done;
     };
 
-    // A read closes the input gate until it ends, unless the caller allows
-    // other events to run meanwhile
-    const read = (op, options) => {
+    // A read closes the input gate until it ends. The allowConcurrency
+    // option of Cloudflare is ignored: a closed gate is never wrong.
+    const read = (op) => {
         const done = call(op);
-
-        if (options?.allowConcurrency === true) {
-            return done;
-        }
 
         reads += 1;
 
@@ -120,14 +116,14 @@
     };
 
     const storage = Object.freeze({
-        async get(keys, options) {
+        async get(keys) {
             if (!isKeys(keys)) {
-                const [value] = await read({ kind: 'get', keys: [keyOf(keys)] }, options);
+                const [value] = await read({ kind: 'get', keys: [keyOf(keys)] });
 
                 return value;
             }
 
-            const values = await read({ kind: 'get', keys: keys.map(keyOf) }, options);
+            const values = await read({ kind: 'get', keys: keys.map(keyOf) });
             const found = new Map();
 
             keys.forEach((key, index) => {
@@ -161,7 +157,7 @@
                 prefix: options.prefix,
                 reverse: options.reverse === true,
                 limit: options.limit,
-            }, options);
+            });
 
             return new Map(entries);
         },
@@ -251,8 +247,8 @@
             return call({ kind: 'get', keys: [] }).then(() => undefined);
         },
         // Milliseconds since the Unix epoch, or null
-        getAlarm(options) {
-            return read({ kind: 'getAlarm' }, options);
+        getAlarm() {
+            return read({ kind: 'getAlarm' });
         },
         setAlarm(scheduledTime) {
             if (typeof Class.prototype.alarm !== 'function') {
