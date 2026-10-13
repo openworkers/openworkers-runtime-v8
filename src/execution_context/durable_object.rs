@@ -82,6 +82,9 @@ pub enum ObjectEvent {
 pub struct SocketEvent {
     pub socket: WebSocketId,
     pub incoming: WebSocketIncoming,
+    /// Dropped once the object takes the event, so the host can bound what
+    /// waits for it
+    pub permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 /// The alarm of the object is due: its alarm() handler runs, and `done`
@@ -682,8 +685,15 @@ impl ExecutionContext {
             .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
             .expect("durable_object.js answers socket");
 
+        let SocketEvent {
+            socket: socket_id,
+            incoming,
+            permit,
+        } = event;
+        drop(permit);
+
         let (kind, data, reason): (&str, v8::Local<v8::Value>, v8::Local<v8::Value>) =
-            match event.incoming {
+            match incoming {
                 WebSocketIncoming::Text(text) => (
                     "message",
                     v8::String::new(scope, &text).unwrap().into(),
@@ -706,7 +716,7 @@ impl ExecutionContext {
                 ),
             };
 
-        let id = v8::Number::new(scope, event.socket as f64);
+        let id = v8::Number::new(scope, socket_id as f64);
         let kind = v8::String::new(scope, kind).unwrap();
         let run = socket
             .call(

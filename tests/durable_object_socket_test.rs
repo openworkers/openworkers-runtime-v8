@@ -202,7 +202,11 @@ async fn fetch(object: &mpsc::UnboundedSender<ObjectEvent>, path: &str) -> (u16,
 
 fn event(object: &mpsc::UnboundedSender<ObjectEvent>, socket: u64, incoming: WebSocketIncoming) {
     object
-        .send(ObjectEvent::Socket(SocketEvent { socket, incoming }))
+        .send(ObjectEvent::Socket(SocketEvent {
+            socket,
+            incoming,
+            permit: None,
+        }))
         .unwrap();
 }
 
@@ -234,6 +238,11 @@ const ROOM: &str = r#"
             }
 
             const [client, server] = Object.values(new WebSocketPair());
+
+            if (path === '/block') {
+                this.state.blockConcurrencyWhile(() => new Promise((ok) => setTimeout(ok, 300)));
+                return new Response('blocked');
+            }
 
             if (path === '/early') {
                 return new Response(String(await Promise.resolve().then(() => server.send('x')).catch((e) => e.name)));
@@ -469,6 +478,37 @@ async fn outbound_calls_and_frames_wait_for_the_writes_before_them() {
                 "attach #1",
             ]
         );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_socket_event_keeps_its_permit_until_the_object_takes_it() {
+    run_in_local(|| async {
+        let host = Arc::new(Host::default());
+        let object = object(host.clone(), ROOM);
+
+        upgrade(&object, "/").await;
+        settled(&host, 4).await;
+        let socket = host.id(1);
+
+        assert_eq!(fetch(&object, "/block").await.1, "blocked");
+
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        object
+            .send(ObjectEvent::Socket(SocketEvent {
+                socket,
+                incoming: WebSocketIncoming::Text("hi".to_string()),
+                permit: Some(permits.clone().try_acquire_owned().unwrap()),
+            }))
+            .unwrap();
+
+        // The object holds its events while blockConcurrencyWhile runs
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(permits.available_permits(), 0);
+
+        settled(&host, 5).await;
+        assert_eq!(permits.available_permits(), 1);
     })
     .await;
 }
