@@ -43,18 +43,33 @@
     let blocked = 0;
     let failure = null;
     let reads = 0;
+    // The bytes of the storage ops that did not end yet, which the host
+    // holds out of the heap of the object
+    let backlog = 0;
+    const MAX_BACKLOG = 32 * 1024 * 1024;
 
     const message = (error) => (error && error.message) || String(error);
 
     // The host runs the storage ops of the object one at a time, in the
-    // order they are made. A value that cannot be cloned throws here.
+    // order they are made. A value that cannot be cloned throws here, and so
+    // does an op with keys or values past the backlog limit; sync() still runs.
     const call = (op) => {
+        if (backlog >= MAX_BACKLOG && (op.kind === 'write' || op.keys?.length > 0)) {
+            throw new RangeError('Durable Object storage: 32 MiB of storage ops wait to end; await some of them first');
+        }
+
         let settle;
         const done = new Promise((resolve, reject) => {
             settle = { resolve, reject };
         });
 
-        __nativeObjectStorage(op, settle.resolve, settle.reject);
+        const bytes = __nativeObjectStorage(op, settle.resolve, settle.reject);
+        const ended = () => {
+            backlog -= bytes;
+        };
+
+        backlog += bytes;
+        done.then(ended, ended);
 
         return done;
     };

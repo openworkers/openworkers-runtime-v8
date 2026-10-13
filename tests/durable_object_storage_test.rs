@@ -410,3 +410,27 @@ async fn a_value_that_cannot_be_cloned_rejects_the_put_only() {
         ["true 1"]
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn ops_past_the_backlog_limit_reject_and_the_object_goes_on() {
+    // 40 MiB of puts that nobody awaits
+    let body = r#"
+        const value = 'x'.repeat(100 * 1024);
+        const puts = [];
+
+        for (let i = 0; i < 400; i++) {
+            puts.push(storage.put(`k${i % 10}`, value).then(() => 'ok', (error) => error.message));
+        }
+
+        const synced = storage.sync().then(() => 'synced');
+        const refused = (await Promise.all(puts)).filter((answer) => answer !== 'ok');
+        await storage.put('after', 1);
+
+        return `${refused.length > 0} ${refused[0]?.includes('MiB')} ${await synced} ${await storage.get('after')}`;
+    "#;
+
+    assert_eq!(
+        ok(run(Arc::new(Memory::default()), body, &["/"]).await),
+        ["true true synced 1"]
+    );
+}

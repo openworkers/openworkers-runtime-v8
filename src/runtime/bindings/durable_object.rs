@@ -62,7 +62,7 @@ pub fn setup_durable_object_ids(scope: &mut v8::PinScope, ops: OperationsHandle)
 
     let function = v8::Function::new(
         scope,
-        |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, _: v8::ReturnValue| {
+        |scope: &mut v8::PinScope, args: v8::FunctionCallbackArguments, mut rv: v8::ReturnValue| {
             let Some(state) = get_state!(scope, FetchState) else {
                 return;
             };
@@ -71,6 +71,10 @@ pub fn setup_durable_object_ids(scope: &mut v8::PinScope, ops: OperationsHandle)
             let Some(op) = parse_storage_op(scope, args.get(0)) else {
                 return;
             };
+
+            // The bytes the op holds until it ends, so durable_object.js can
+            // bound what waits
+            rv.set_double(op_bytes(&op) as f64);
 
             let Some((resolve, reject)) = resolve_reject(scope, args.get(1), args.get(2)) else {
                 return;
@@ -88,6 +92,22 @@ pub fn setup_durable_object_ids(scope: &mut v8::PinScope, ops: OperationsHandle)
     register_fn!(scope, "__nativeObjectStorage", function);
 
     setup_object_sockets(scope);
+}
+
+fn op_bytes(op: &ObjectStorageOp) -> usize {
+    match op {
+        ObjectStorageOp::Get { keys } => keys.iter().map(String::len).sum(),
+        ObjectStorageOp::Write { puts, deletes, .. } => {
+            let puts: usize = puts
+                .iter()
+                .map(|(key, value)| key.len() + value.len())
+                .sum();
+            puts + deletes.iter().map(String::len).sum::<usize>()
+        }
+        ObjectStorageOp::List { .. } | ObjectStorageOp::GetAlarm | ObjectStorageOp::SetAlarm(_) => {
+            0
+        }
+    }
 }
 
 /// The largest attachment of a socket, serialized, as on Cloudflare
