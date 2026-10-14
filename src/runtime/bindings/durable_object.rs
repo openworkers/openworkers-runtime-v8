@@ -93,6 +93,24 @@ pub fn setup_durable_object_ids(scope: &mut v8::PinScope, ops: OperationsHandle)
     register_fn!(scope, "__nativeObjectStorage", function);
 
     setup_object_sockets(scope);
+
+    // A block keeps the class off the global scope, so a worker can declare
+    // its own DurableObject
+    exec_js!(
+        scope,
+        r#"
+        {
+            class DurableObject {
+                constructor(ctx, env) {
+                    this.ctx = ctx;
+                    this.env = env;
+                }
+            }
+
+            globalThis.DurableObject = DurableObject;
+        }
+        "#
+    );
 }
 
 fn op_bytes(op: &ObjectStorageOp) -> usize {

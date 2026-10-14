@@ -421,3 +421,59 @@ async fn a_closed_object_ends_its_events_after_the_drain_time() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_class_that_extends_durable_object_gets_ctx_and_env() {
+    run_in_local(|| async {
+        let code = r#"
+            export class Counter extends DurableObject {
+                constructor(ctx, env) {
+                    super(ctx, env);
+                    this.count = 0;
+                }
+
+                async fetch() {
+                    this.count += 1;
+
+                    return Response.json({
+                        id: this.ctx.id.toString(),
+                        storage: typeof this.ctx.storage.get,
+                        env: this.env === globalThis.env,
+                        count: this.count,
+                        base: this instanceof DurableObject,
+                    });
+                }
+            }
+        "#;
+        let object = start(spec(code, Duration::from_secs(60)));
+
+        assert_eq!(
+            text(send(&object, "/")).await,
+            r#"{"id":"0123abcd","storage":"function","env":true,"count":1,"base":true}"#
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_worker_can_declare_its_own_durable_object() {
+    run_in_local(|| async {
+        let code = r#"
+            class DurableObject {
+                constructor(state) {
+                    this.mine = state.id.toString();
+                }
+            }
+
+            export class Counter extends DurableObject {
+                fetch() {
+                    return new Response(this.mine);
+                }
+            }
+        "#;
+        let object = start(spec(code, Duration::from_secs(60)));
+
+        assert_eq!(text(send(&object, "/")).await, "0123abcd");
+    })
+    .await;
+}
