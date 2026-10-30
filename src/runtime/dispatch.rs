@@ -1,6 +1,6 @@
 //! One answer per callback message, whoever owns the tables.
 //!
-//! Three event loops answer the same ten messages: the runtime drains its
+//! Three event loops answer the same messages: the runtime drains its
 //! channel, the runtime steps one message, and a pooled request does the same
 //! per context. What differed was only where the tables live.
 
@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 use openworkers_core::D1Result;
 use openworkers_core::DatabaseResult;
+#[cfg(feature = "invoke")]
+use openworkers_core::InvokeResult;
 use openworkers_core::KvResult;
 use openworkers_core::ObjectStorageResult;
 use openworkers_core::StorageResult;
@@ -197,6 +199,19 @@ pub(crate) fn dispatch(
 
             settle(scope, tables, callback_id, error_msg, value);
         }
+
+        #[cfg(feature = "invoke")]
+        CallbackMessage::InvokeResult(callback_id, result) => match result {
+            InvokeResult::Error(message) => {
+                settle(scope, tables, callback_id, Some(&message), None);
+            }
+            InvokeResult::Value(value) => {
+                let json = v8::String::new(scope, &value.to_string()).unwrap();
+                let parsed = v8::json::parse(scope, json).unwrap_or_else(|| v8::null(scope).into());
+
+                settle(scope, tables, callback_id, None, Some(parsed));
+            }
+        },
 
         CallbackMessage::D1Result(callback_id, result) => {
             let (error_msg, value) = if let D1Result::Error(err) = &result {

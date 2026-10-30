@@ -17,6 +17,8 @@ use tokio::time::Sleep;
 use tokio_util::sync::CancellationToken;
 
 use super::stream_manager::{self, StreamManager};
+#[cfg(feature = "invoke")]
+use openworkers_core::InvokeResult;
 use openworkers_core::{
     D1Error, D1ErrorKind, D1Op, D1Result, DatabaseOp, DatabaseResult, HttpRequest,
     HttpResponseMeta, KvOp, KvResult, ObjectSocketOp, ObjectStorageOp, ObjectStorageResult,
@@ -77,6 +79,9 @@ pub enum SchedulerMessage {
     BindingDatabase(CallbackId, String, DatabaseOp),
     BindingD1(CallbackId, String, D1Op),
     BindingWorker(CallbackId, String, HttpRequest),
+    /// A call to a function of the host: binding, command, arguments
+    #[cfg(feature = "invoke")]
+    BindingInvoke(CallbackId, String, String, serde_json::Value),
     /// A request to the Durable Object of an id
     BindingDurableObject(CallbackId, String, String, HttpRequest),
     /// The storage of the Durable Object this context serves
@@ -119,6 +124,8 @@ pub enum CallbackMessage {
     KvResult(CallbackId, KvResult),
     DatabaseResult(CallbackId, DatabaseResult),
     D1Result(CallbackId, D1Result),
+    #[cfg(feature = "invoke")]
+    InvokeResult(CallbackId, InvokeResult),
     ObjectStorage(CallbackId, ObjectStorageResult),
     WebSocketConnected(CallbackId, WebSocketId),
     WebSocketConnectError(CallbackId, String),
@@ -364,6 +371,35 @@ pub async fn run_event_loop(
                                 callback_id,
                                 database_result,
                             ));
+                        });
+                    }
+
+                    #[cfg(feature = "invoke")]
+                    SchedulerMessage::BindingInvoke(callback_id, binding_name, command, args) => {
+                        let callback_tx = callback_tx.clone();
+                        let ops = ops.clone();
+                        let cancel = request_cancel.clone();
+
+                        tokio::spawn(async move {
+                            let result = tokio::select! {
+                                biased;
+                                _ = cancel.cancelled() => {
+                                    let _ = callback_tx.send(CallbackMessage::InvokeResult(callback_id, InvokeResult::Error(CANCELLED.into())));
+                                    return;
+                                }
+                                r = ops.handle(Operation::BindingInvoke {
+                                    binding: binding_name,
+                                    name: command,
+                                    args,
+                                }) => r,
+                            };
+
+                            let invoke_result = match result {
+                                OperationResult::Invoke(r) => r,
+                                _ => InvokeResult::Error("Unexpected result type".into()),
+                            };
+
+                            let _ = callback_tx.send(CallbackMessage::InvokeResult(callback_id, invoke_result));
                         });
                     }
 
@@ -913,6 +949,8 @@ async fn convert_fetch_result_to_stream(
         OperationResult::D1(_) => return Err("Unexpected D1 result for fetch".into()),
         OperationResult::WebSocket(_) => return Err("Unexpected WebSocket result for fetch".into()),
         OperationResult::Images(_) => return Err("Unexpected Images result for fetch".into()),
+        #[cfg(feature = "invoke")]
+        OperationResult::Invoke(_) => return Err("Unexpected Invoke result for fetch".into()),
         OperationResult::ObjectStorage(_) => {
             return Err("Unexpected ObjectStorage result for fetch".into());
         }

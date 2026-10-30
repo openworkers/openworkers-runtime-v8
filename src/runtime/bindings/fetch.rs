@@ -461,6 +461,9 @@ pub fn setup_fetch(
 
     register_fn!(scope, "__nativeBindingD1", native_binding_d1_fn);
 
+    #[cfg(feature = "invoke")]
+    setup_invoke(scope);
+
     // Create __nativeBindingWorker for worker-to-worker calls
     setup_binding_fetch_helper(scope, "__nativeBindingWorker", |id, name, req| {
         SchedulerMessage::BindingWorker(id, name, req)
@@ -637,4 +640,50 @@ pub fn setup_fetch(
     "#;
 
     exec_js!(scope, code);
+}
+
+/// `__nativeBindingInvoke(binding, command, args, resolve, reject)`: a call to
+/// a function of the host. The arguments are JSON data.
+#[cfg(feature = "invoke")]
+fn setup_invoke(scope: &mut v8::PinScope) {
+    let native_binding_invoke_fn = v8::Function::new(
+        scope,
+        |scope: &mut v8::PinScope,
+         args: v8::FunctionCallbackArguments,
+         mut _retval: v8::ReturnValue| {
+            let Some(state) = get_state!(scope, FetchState) else {
+                return;
+            };
+
+            let Ok(binding) = serde_v8::from_v8_any::<String>(scope, args.get(0)) else {
+                return throw_type_error(scope, "invoke: the binding name is not a string");
+            };
+
+            let Ok(command) = serde_v8::from_v8_any::<String>(scope, args.get(1)) else {
+                return throw_type_error(scope, "invoke: the command is not a string");
+            };
+
+            let call_args = match serde_v8::from_v8_any::<serde_json::Value>(scope, args.get(2)) {
+                Ok(call_args) => call_args,
+                Err(e) => return throw_type_error(scope, &format!("invoke: bad arguments: {e}")),
+            };
+
+            let Some((resolve_fn, reject_fn)) = resolve_reject(scope, args.get(3), args.get(4))
+            else {
+                return;
+            };
+
+            let callback_id = register_callbacks_with_error(&state, scope, resolve_fn, reject_fn);
+
+            let _ = state.scheduler_tx.send(SchedulerMessage::BindingInvoke(
+                callback_id,
+                binding,
+                command,
+                call_args,
+            ));
+        },
+    )
+    .unwrap();
+
+    register_fn!(scope, "__nativeBindingInvoke", native_binding_invoke_fn);
 }

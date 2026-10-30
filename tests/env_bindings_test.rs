@@ -204,6 +204,16 @@ async fn kv_keeps_json_values() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn kv_refuses_a_value_that_holds_itself() {
+    let (body, calls) = run("const a = {}; a.self = a;
+         try { await env.KV.put('k', a); return 'sent'; } catch (error) { return error.name; }")
+    .await;
+
+    assert_eq!(body, "TypeError");
+    assert!(calls.is_empty(), "{calls:?}");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn storage_keeps_bytes_and_reads_them_as_text() {
     let (body, calls) = run("await env.STORAGE.put('a.txt', 'hello');
          const text = await env.STORAGE.get('a.txt');

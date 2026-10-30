@@ -295,6 +295,8 @@ pub(crate) fn setup_env(
                 BindingType::Worker => "worker",
                 BindingType::Images => "images",
                 BindingType::DurableObject => "durable_object",
+                #[cfg(feature = "invoke")]
+                BindingType::Invoke => "invoke",
             };
 
             serde_json::json!({ "name": binding.name, "type": kind })

@@ -11,6 +11,8 @@ license = "MIT"
 default = []
 ptrcomp = ["v8/v8_enable_pointer_compression"]
 sandbox = ["v8/v8_enable_sandbox", "serde_v8/v8_enable_sandbox"]
+# env.<NAME>.invoke(command, args) for a BindingType::Invoke binding
+invoke = ["openworkers-core/invoke"]
 
 [dependencies]
 
@@ -18,7 +20,7 @@ sandbox = ["v8/v8_enable_sandbox", "serde_v8/v8_enable_sandbox"]
 gc-derive = { package = "openworkers-runtime-v8-gc-derive", path = "gc-derive" }
 
 # Common types
-openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.18.0" }
+openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.18.1" }
 
 # The shared web surface
 openworkers-wintertc = { git = "https://github.com/openworkers/openworkers-wintertc", tag = "v0.1.11" }
@@ -44,7 +46,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # V8 serialization (for automatic Rust <-> JS type conversion)
-serde_v8 = { package = "openworkers-serde-v8", version = "152" }
+serde_v8 = { package = "openworkers-serde-v8", version = "152.2.2" }
 
 # V8 Glue - binding macros
 glue_v8 = { package = "openworkers-glue-v8", version = "152" }

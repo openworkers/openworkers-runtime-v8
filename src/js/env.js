@@ -253,6 +253,17 @@
 
         durable_object: (name) => durableObjectNamespace(name),
 
+        // A function of the host program, called by name; the answer is JSON
+        invoke: (name) => Object.freeze({
+            invoke: (command, args) => new Promise((resolve, reject) => {
+                if (typeof command !== 'string') {
+                    throw new TypeError('invoke: the command is not a string');
+                }
+
+                __nativeBindingInvoke(name, command, args === undefined ? null : args, resolve, reject);
+            }),
+        }),
+
         // No native handler yet, so the binding exists only to say so
         images: () => ({
             input() {
