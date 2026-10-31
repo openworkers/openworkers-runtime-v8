@@ -34,6 +34,9 @@ pub struct FetchState {
     pub next_id: Rc<RefCell<CallbackId>>,
     /// The bytes of the frames of a Durable Object that wait in its queue
     pub frames: Arc<std::sync::atomic::AtomicUsize>,
+    /// The host, which `__nativeBindingInvoke` calls at once
+    #[cfg(feature = "invoke")]
+    pub ops: openworkers_core::OperationsHandle,
 }
 
 /// Shared state for stream read callbacks (same pattern as FetchState)

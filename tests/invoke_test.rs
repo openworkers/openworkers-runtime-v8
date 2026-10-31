@@ -36,6 +36,25 @@ impl OperationsHandler for Host {
             .unwrap()
             .push((binding.to_string(), name.to_string(), args.clone()));
 
+        // These two answer after a wait, through the event loop
+        match name {
+            "later" => {
+                return Box::pin(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+                    InvokeResult::Value(json!("waited"))
+                });
+            }
+            "later_fail" => {
+                return Box::pin(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+                    InvokeResult::Error("too late".to_string())
+                });
+            }
+            _ => {}
+        }
+
         let answer = match name {
             "add" => {
                 let sum = args["a"].as_i64().unwrap_or(0) + args["b"].as_i64().unwrap_or(0);
@@ -104,6 +123,35 @@ async fn an_error_rejects_with_its_message() {
         run("try { await env.RUST.invoke('fail'); } catch (error) { return error.message; }").await;
 
     assert_eq!(body, "the disk is full");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_host_that_waits_settles_the_promise_later() {
+    let (body, _) = run("
+        const value = await env.RUST.invoke('later');
+        let message;
+        try { await env.RUST.invoke('later_fail'); } catch (error) { message = error.message; }
+        return value + ' ' + message;
+    ")
+    .await;
+
+    assert_eq!(body, "waited too late");
+}
+
+// A host that answers at once settles the promise inside invoke(), but the
+// code after the await still runs after the code that follows the call
+#[tokio::test(flavor = "current_thread")]
+async fn an_answer_at_once_still_resolves_after_the_caller_goes_on() {
+    let (body, _) = run("
+        const order = [];
+        const call = env.RUST.invoke('add', { a: 1, b: 1 }).then(() => order.push('then'));
+        order.push('after the call');
+        await call;
+        return order.join(', ');
+    ")
+    .await;
+
+    assert_eq!(body, "after the call, then");
 }
 
 #[tokio::test(flavor = "current_thread")]

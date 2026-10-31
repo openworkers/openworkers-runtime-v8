@@ -166,6 +166,8 @@ impl ExecutionContext {
                 fetch_callbacks.clone(),
                 fetch_error_callbacks.clone(),
                 next_callback_id.clone(),
+                #[cfg(feature = "invoke")]
+                ops.clone(),
             );
             bindings::setup_stream_ops(
                 scope,

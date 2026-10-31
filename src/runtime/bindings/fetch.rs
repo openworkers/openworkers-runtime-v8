@@ -1,9 +1,13 @@
+#[cfg(feature = "invoke")]
+use super::super::scheduler::InvokeCall;
 use super::super::{CallbackId, SchedulerMessage};
 use super::state::FetchState;
 use crate::v8_helpers::throw_type_error;
 use openworkers_core::{
     D1Op, DatabaseOp, HttpMethod, HttpRequest, KvOp, RequestBody, SqlParam, StorageOp,
 };
+#[cfg(feature = "invoke")]
+use openworkers_core::{InvokeResult, Operation, OperationResult};
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -195,6 +199,7 @@ pub fn setup_fetch(
     callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
     error_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
     next_id: Rc<RefCell<CallbackId>>,
+    #[cfg(feature = "invoke")] ops: openworkers_core::OperationsHandle,
 ) {
     let state = FetchState {
         scheduler_tx,
@@ -202,6 +207,8 @@ pub fn setup_fetch(
         error_callbacks,
         next_id,
         frames: std::sync::Arc::default(),
+        #[cfg(feature = "invoke")]
+        ops,
     };
 
     store_state!(scope, state);
@@ -673,17 +680,67 @@ fn setup_invoke(scope: &mut v8::PinScope) {
                 return;
             };
 
-            let callback_id = register_callbacks_with_error(&state, scope, resolve_fn, reject_fn);
+            // A command that answers at once settles its promise here, in
+            // this turn: no message to the event loop, no task and no turn
+            // more. One that waits goes on in the event loop.
+            let ops = state.ops.clone();
+            let mut call: InvokeCall = Box::pin(async move {
+                let operation = Operation::BindingInvoke {
+                    binding,
+                    name: command,
+                    args: call_args,
+                };
 
-            let _ = state.scheduler_tx.send(SchedulerMessage::BindingInvoke(
-                callback_id,
-                binding,
-                command,
-                call_args,
-            ));
+                match ops.handle(operation).await {
+                    OperationResult::Invoke(result) => result,
+                    _ => InvokeResult::Error("Unexpected result type".into()),
+                }
+            });
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+
+            match call.as_mut().poll(&mut context) {
+                std::task::Poll::Ready(result) => {
+                    settle_invoke(scope, resolve_fn, reject_fn, result)
+                }
+                std::task::Poll::Pending => {
+                    let callback_id =
+                        register_callbacks_with_error(&state, scope, resolve_fn, reject_fn);
+
+                    let _ = state
+                        .scheduler_tx
+                        .send(SchedulerMessage::BindingInvoke(callback_id, call));
+                }
+            }
         },
     )
     .unwrap();
 
     register_fn!(scope, "__nativeBindingInvoke", native_binding_invoke_fn);
+}
+
+/// Settles the promise of a call that answered at once, the way the event
+/// loop settles one that waited: the value as JSON, the error as an Error.
+#[cfg(feature = "invoke")]
+fn settle_invoke(
+    scope: &mut v8::PinScope,
+    resolve: v8::Local<v8::Function>,
+    reject: v8::Local<v8::Function>,
+    result: InvokeResult,
+) {
+    let undefined = v8::undefined(scope).into();
+
+    match result {
+        InvokeResult::Value(value) => {
+            let json = v8::String::new(scope, &value.to_string()).unwrap();
+            let parsed = v8::json::parse(scope, json).unwrap_or_else(|| v8::null(scope).into());
+
+            resolve.call(scope, undefined, &[parsed]);
+        }
+        InvokeResult::Error(message) => {
+            let message = v8::String::new(scope, &message).unwrap();
+            let error = v8::Exception::error(scope, message);
+
+            reject.call(scope, undefined, &[error]);
+        }
+    }
 }

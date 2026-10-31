@@ -17,14 +17,14 @@ use tokio::time::Sleep;
 use tokio_util::sync::CancellationToken;
 
 use super::stream_manager::{self, StreamManager};
-#[cfg(feature = "invoke")]
-use openworkers_core::InvokeResult;
 use openworkers_core::{
     D1Error, D1ErrorKind, D1Op, D1Result, DatabaseOp, DatabaseResult, HttpRequest,
     HttpResponseMeta, KvOp, KvResult, ObjectSocketOp, ObjectStorageOp, ObjectStorageResult,
     Operation, OperationResult, OperationsHandle, ResponseBody, StorageOp, StorageResult,
     WebSocketConnection, WebSocketId, WebSocketIncoming, WebSocketOutgoing, WebSocketUpgrade,
 };
+#[cfg(feature = "invoke")]
+use openworkers_core::{InvokeResult, OpFuture};
 
 pub type CallbackId = u64;
 
@@ -68,6 +68,10 @@ impl CallbackSender {
     }
 }
 
+/// A call to a host command, as `__nativeBindingInvoke` started it.
+#[cfg(feature = "invoke")]
+pub type InvokeCall = OpFuture<'static, InvokeResult>;
+
 pub enum SchedulerMessage {
     ScheduleTimeout(CallbackId, u64),
     ScheduleInterval(CallbackId, u64),
@@ -79,9 +83,10 @@ pub enum SchedulerMessage {
     BindingDatabase(CallbackId, String, DatabaseOp),
     BindingD1(CallbackId, String, D1Op),
     BindingWorker(CallbackId, String, HttpRequest),
-    /// A call to a function of the host: binding, command, arguments
+    /// A call to a function of the host that did not answer at once. It
+    /// was polled once already, in `__nativeBindingInvoke`.
     #[cfg(feature = "invoke")]
-    BindingInvoke(CallbackId, String, String, serde_json::Value),
+    BindingInvoke(CallbackId, InvokeCall),
     /// A request to the Durable Object of an id
     BindingDurableObject(CallbackId, String, String, HttpRequest),
     /// The storage of the Durable Object this context serves
@@ -375,28 +380,15 @@ pub async fn run_event_loop(
                     }
 
                     #[cfg(feature = "invoke")]
-                    SchedulerMessage::BindingInvoke(callback_id, binding_name, command, args) => {
+                    SchedulerMessage::BindingInvoke(callback_id, call) => {
                         let callback_tx = callback_tx.clone();
-                        let ops = ops.clone();
                         let cancel = request_cancel.clone();
 
                         tokio::spawn(async move {
-                            let result = tokio::select! {
+                            let invoke_result = tokio::select! {
                                 biased;
-                                _ = cancel.cancelled() => {
-                                    let _ = callback_tx.send(CallbackMessage::InvokeResult(callback_id, InvokeResult::Error(CANCELLED.into())));
-                                    return;
-                                }
-                                r = ops.handle(Operation::BindingInvoke {
-                                    binding: binding_name,
-                                    name: command,
-                                    args,
-                                }) => r,
-                            };
-
-                            let invoke_result = match result {
-                                OperationResult::Invoke(r) => r,
-                                _ => InvokeResult::Error("Unexpected result type".into()),
+                                _ = cancel.cancelled() => InvokeResult::Error(CANCELLED.into()),
+                                r = call => r,
                             };
 
                             let _ = callback_tx.send(CallbackMessage::InvokeResult(callback_id, invoke_result));
