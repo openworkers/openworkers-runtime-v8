@@ -53,6 +53,9 @@ pub struct RequestContext {
     /// Fetch promise callbacks (reject side)
     pub fetch_error_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
 
+    /// Clears the timers and the async context of the guest at each reset
+    pub clear_guest_state: v8::Global<v8::Function>,
+
     /// Stream read callbacks
     pub stream_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
 
@@ -86,6 +89,7 @@ impl RequestContext {
         context: v8::Global<v8::Context>,
         slots: Rc<crate::context_slots::ContextSlots>,
         dispatch: v8::Global<v8::Object>,
+        clear_guest_state: v8::Global<v8::Function>,
         scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
         callback_rx: mpsc::UnboundedReceiver<CallbackMessage>,
         callback_notify: Arc<Notify>,
@@ -109,6 +113,7 @@ impl RequestContext {
             callback_notify,
             fetch_callbacks,
             fetch_error_callbacks,
+            clear_guest_state,
             stream_callbacks,
             ws_event_callbacks,
             next_callback_id,

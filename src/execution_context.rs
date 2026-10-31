@@ -33,6 +33,10 @@ use openworkers_core::{
     TerminationReason, WebSocketId, WorkerCode,
 };
 
+/// The CPU floor of the top level of a script: a large bundle needs more to
+/// parse and start than a request gets
+const LOAD_CPU_TIME_MS: u64 = 400;
+
 /// A disposable execution context for running a worker script
 ///
 /// This includes:
@@ -207,12 +211,46 @@ impl ExecutionContext {
         // Setup environment variables and bindings (placeholder)
         Self::setup_env(isolate, &context, &script.env, &script.bindings)?;
 
-        // Evaluate user script (placeholder)
-        let evaluated = Self::evaluate_script(isolate, &context, &script.code);
+        // Made before guest code runs, so a guest cannot replace what it calls
+        let clear_guest_state = Self::make_clear(isolate, &context)?;
 
-        // No turn holds the isolate here: a memory limit hit while the script
-        // loads belongs to the event that loads it
-        if pooled.memory_limit_hit.swap(false, Ordering::SeqCst) {
+        // The top level is guest code: run it as a turn under the load limits
+        let load = next_request_id();
+        let wall = TimeoutGuard::new(
+            Arc::clone(&pooled.turn),
+            load,
+            limits.max_wall_clock_time_ms,
+        );
+        let load_cpu_ms = match limits.max_cpu_time_ms {
+            0 => 0,
+            request_ms => request_ms.max(LOAD_CPU_TIME_MS),
+        };
+        let cpu = CpuEnforcer::new(Arc::clone(&pooled.turn), load, load_cpu_ms);
+
+        if cpu.as_ref().is_some_and(CpuEnforcer::was_terminated) {
+            return Err(TerminationReason::CpuTimeLimit);
+        }
+
+        let memory_hit = AtomicBool::new(false);
+        let evaluated = {
+            let _turn = TurnGuard::begin(&pooled.turn, load, cpu.as_ref(), &memory_hit);
+
+            Self::evaluate_script(isolate, &context, &script.code)
+        };
+
+        if cpu.as_ref().is_some_and(CpuEnforcer::was_terminated) {
+            return Err(TerminationReason::CpuTimeLimit);
+        }
+
+        if wall.was_triggered() {
+            return Err(TerminationReason::WallClockTimeout);
+        }
+
+        // A memory limit hit while the script loads belongs to the event that
+        // loads it
+        if memory_hit.load(Ordering::SeqCst)
+            || pooled.memory_limit_hit.swap(false, Ordering::SeqCst)
+        {
             return Err(TerminationReason::MemoryLimit);
         }
 
@@ -248,6 +286,7 @@ impl ExecutionContext {
             context,
             slots,
             dispatch,
+            clear_guest_state,
             scheduler_tx,
             callback_rx,
             callback_notify,
@@ -1371,6 +1410,101 @@ impl ExecutionContext {
         Ok(())
     }
 
+    /// Builds the function that clears the timers and the async context of
+    /// the guest, from the maps and builtins as they are before guest code.
+    fn make_clear(
+        isolate: &mut v8::Isolate,
+        context: &v8::Global<v8::Context>,
+    ) -> Result<v8::Global<v8::Function>, TerminationReason> {
+        use std::pin::pin;
+
+        const MAKE_CLEAR: &str = "(() => {
+            'use strict';
+            const timers = globalThis.__timerCallbacks;
+            const intervals = globalThis.__intervalIds;
+            const apply = Reflect.apply;
+            const clearMap = Map.prototype.clear;
+            const clearSet = Set.prototype.clear;
+            const setContext = globalThis.__ow.asyncContextSet;
+
+            for (const name of ['__timerCallbacks', '__intervalIds']) {
+                Object.defineProperty(globalThis, name, { writable: false, configurable: false });
+            }
+
+            return function clearGuestState() {
+                apply(clearMap, timers, []);
+                apply(clearSet, intervals, []);
+                apply(setContext, undefined, [undefined]);
+            };
+        })()";
+
+        let scope = pin!(v8::HandleScope::new(isolate));
+        let mut scope = scope.init();
+        let context = v8::Local::new(&scope, context);
+        let scope = &mut v8::ContextScope::new(&mut scope, context);
+        let failed = || TerminationReason::InitializationError("the reset function".to_string());
+        let code = v8::String::new(scope, MAKE_CLEAR).ok_or_else(failed)?;
+        let function = v8::Script::compile(scope, code, None)
+            .and_then(|script| script.run(scope))
+            .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
+            .ok_or_else(failed)?;
+
+        Ok(v8::Global::new(scope, function))
+    }
+
+    /// Runs the function of `make_clear` as a turn under the request limits,
+    /// so a gap in it fails closed.
+    fn run_clear_guest_state(&mut self) -> Result<(), String> {
+        use std::pin::pin;
+
+        let clear = self.request.clear_guest_state.clone();
+
+        let pooled = Arc::clone(&self.pooled);
+        let id = next_request_id();
+        let wall = TimeoutGuard::new(
+            Arc::clone(&pooled.turn),
+            id,
+            self.limits.max_wall_clock_time_ms,
+        );
+        let cpu = CpuEnforcer::new(Arc::clone(&pooled.turn), id, self.limits.max_cpu_time_ms);
+
+        if cpu.as_ref().is_some_and(CpuEnforcer::was_terminated) {
+            return Err("reset: the CPU time limit".to_string());
+        }
+
+        let memory_hit = AtomicBool::new(false);
+        let called = {
+            let _turn = TurnGuard::begin(&pooled.turn, id, cpu.as_ref(), &memory_hit);
+            let mut isolate = self.isolate();
+            let scope = pin!(v8::HandleScope::new(&mut isolate));
+            let mut scope = scope.init();
+            let context = v8::Local::new(&scope, &self.request.context);
+            let scope = &mut v8::ContextScope::new(&mut scope, context);
+            let tc_scope = pin!(v8::TryCatch::new(scope));
+            let tc_scope = tc_scope.init();
+            let clear = v8::Local::new(&tc_scope, &clear);
+            let receiver = v8::undefined(&tc_scope).into();
+
+            match clear.call(&tc_scope, receiver, &[]) {
+                Some(_) => Ok(()),
+                None => Err(tc_scope
+                    .exception()
+                    .map(|exception| exception.to_rust_string_lossy(&tc_scope))
+                    .unwrap_or_else(|| "the execution was terminated".to_string())),
+            }
+        };
+
+        if cpu.as_ref().is_some_and(CpuEnforcer::was_terminated) {
+            return Err("reset: the CPU time limit".to_string());
+        }
+
+        if wall.was_triggered() {
+            return Err("reset: the wall clock limit".to_string());
+        }
+
+        called.map_err(|message| format!("reset: {message}"))
+    }
+
     /// Reset per-request JS and Rust state for context reuse.
     ///
     /// Must be called between requests (warm isolate path). Clears the previous
@@ -1385,7 +1519,7 @@ impl ExecutionContext {
         let _lock_guard = pooled.lock();
 
         // 0. Cancel any lingering terminate_execution flag from a previous timeout/abort.
-        // Without this, evaluate() below would fail immediately if the flag is still set.
+        // Without this, the clear below would fail at once if the flag is still set.
         {
             self.isolate().cancel_terminate_execution();
         }
@@ -1395,14 +1529,7 @@ impl ExecutionContext {
         self.request.pending = None;
         self.budget = None;
 
-        self.evaluate(&WorkerCode::JavaScript(
-            r#"
-            globalThis.__timerCallbacks.clear();
-            globalThis.__intervalIds.clear();
-            globalThis.__ow.asyncContextSet(undefined);
-            "#
-            .to_string(),
-        ))?;
+        self.run_clear_guest_state()?;
 
         // 2. Reset Rust-side abort flag
         self.request.aborted.store(false, Ordering::SeqCst);
