@@ -24,6 +24,13 @@ fn native_schedule_interval(state: &Rc<TimerState>, id: u64, interval: u64) {
 }
 
 #[glue_v8::method(fast, state = Rc<TimerState>)]
+fn native_schedule_writable(state: &Rc<TimerState>, id: u64, stream_id: u64) {
+    let _ = state
+        .scheduler_tx
+        .send(SchedulerMessage::ScheduleWritable(id, stream_id));
+}
+
+#[glue_v8::method(fast, state = Rc<TimerState>)]
 fn native_clear_timer(state: &Rc<TimerState>, id: u64) {
     let _ = state.scheduler_tx.send(SchedulerMessage::ClearTimer(id));
 }
@@ -50,10 +57,14 @@ pub fn setup_timers(
     let clear_timer_fn = native_clear_timer_v8_template(scope, &state)
         .get_function(scope)
         .unwrap();
+    let schedule_writable_fn = native_schedule_writable_v8_template(scope, &state)
+        .get_function(scope)
+        .unwrap();
 
     register_fn!(scope, "__nativeScheduleTimeout", schedule_timeout_fn);
     register_fn!(scope, "__nativeScheduleInterval", schedule_interval_fn);
     register_fn!(scope, "__nativeClearTimer", clear_timer_fn);
+    register_fn!(scope, "__nativeScheduleWritable", schedule_writable_fn);
 
     // JavaScript timer wrappers
     exec_js!(

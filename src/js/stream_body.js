@@ -1,14 +1,25 @@
 // How a response body reaches the host on V8: the engine part of the shared
 // dispatch (openworkers-wintertc's DISPATCH). The script evaluates to a
 // function of the dispatch options; install_dispatch passes what it answers
-// to the dispatch. TextEncoder and setTimeout are read before the guest
-// script runs, so a guest that replaces them changes nothing here.
+// to the dispatch. TextEncoder and __nativeScheduleWritable are read before
+// the guest script runs, so a guest that replaces them changes nothing here.
+// The wait for room uses the timer maps as setTimeout does, so a guest that
+// changes them breaks only its own timers and its own pump.
 
 (function streamEngine(options) {
     'use strict';
 
     const TextEncoder = globalThis.TextEncoder;
-    const setTimeout = globalThis.setTimeout;
+    const scheduleWritable = globalThis.__nativeScheduleWritable;
+
+    // A timer that the scheduler fires when the stream has room or is closed
+    const writable = (streamId) =>
+        new Promise((resolve) => {
+            const id = globalThis.__nextTimerId++;
+
+            globalThis.__timerCallbacks.set(id, resolve);
+            scheduleWritable(id, streamId);
+        });
 
     const errorMessage = (error) => (error && error.message) || String(error);
 
@@ -90,14 +101,14 @@
 
                     const chunk = toBytes(value, encoder);
 
-                    // A full channel takes nothing: wait and try again
+                    // A full channel takes nothing: wait for room and try again
                     while (!__responseStreamWrite(streamId, chunk)) {
                         if (__responseStreamIsClosed(streamId)) {
                             cancelled = true;
                             break;
                         }
 
-                        await new Promise((resolve) => setTimeout(resolve, 1));
+                        await writable(streamId);
                     }
 
                     if (cancelled) {

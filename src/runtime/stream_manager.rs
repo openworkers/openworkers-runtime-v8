@@ -215,6 +215,11 @@ impl StreamManager {
         self.senders.lock().unwrap().len()
     }
 
+    /// The sender of a stream, to wait for room in it.
+    pub fn sender(&self, stream_id: StreamId) -> Option<mpsc::Sender<StreamChunk>> {
+        self.senders.lock().unwrap().get(&stream_id).cloned()
+    }
+
     /// Check if a stream has an active sender (not closed)
     pub fn has_sender(&self, stream_id: StreamId) -> bool {
         self.senders.lock().unwrap().contains_key(&stream_id)

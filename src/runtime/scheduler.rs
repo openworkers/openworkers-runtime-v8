@@ -80,6 +80,9 @@ impl CallbackSender {
 
 pub enum SchedulerMessage {
     ScheduleTimeout(CallbackId, u64),
+    /// A timer that fires when the response stream of this id has room for a
+    /// piece, or is closed (see `stream_body.js`)
+    ScheduleWritable(CallbackId, stream_manager::StreamId),
     ScheduleInterval(CallbackId, u64),
     ClearTimer(CallbackId),
     FetchStreaming(CallbackId, HttpRequest),
@@ -233,6 +236,29 @@ pub async fn run_event_loop(
                     SchedulerMessage::ScheduleInterval(id, interval_ms) => {
                         cancelled.remove(&id);
                         timers.push(create_timer(id, interval_ms, true));
+                    }
+
+                    SchedulerMessage::ScheduleWritable(id, stream_id) => {
+                        let callback_tx = callback_tx.clone();
+                        let cancel = request_cancel.clone();
+                        let sender = stream_manager.sender(stream_id);
+                        let manager = stream_manager.clone();
+
+                        tokio::spawn(async move {
+                            if let Some(sender) = sender {
+                                // Room for a piece and the end slot. The permits
+                                // drop at once: the pump is the only writer, so
+                                // the room stays free. A cancel closes the
+                                // stream, or the pump finds it full again.
+                                tokio::select! {
+                                    biased;
+                                    _ = cancel.cancelled() => manager.close_stream(stream_id),
+                                    _ = sender.reserve_many(2) => {}
+                                }
+                            }
+
+                            let _ = callback_tx.send(CallbackMessage::ExecuteTimeout(id));
+                        });
                     }
 
                     SchedulerMessage::ClearTimer(id) => {
