@@ -1397,14 +1397,7 @@ impl ExecutionContext {
         self.request.pending = None;
         self.budget = None;
 
-        self.evaluate(&WorkerCode::JavaScript(
-            r#"
-            globalThis.__timerCallbacks.clear();
-            globalThis.__intervalIds.clear();
-            globalThis.__ow.asyncContextSet(undefined);
-            "#
-            .to_string(),
-        ))?;
+        self.reset_js()?;
 
         // 2. Reset Rust-side abort flag
         self.request.aborted.store(false, Ordering::SeqCst);
@@ -1425,6 +1418,57 @@ impl ExecutionContext {
         self.request.ws_event_callbacks.borrow_mut().clear();
         // The id counter keeps counting: an answer to the previous request that
         // lands late must find no callback, not the next request's.
+
+        Ok(())
+    }
+
+    /// Clears the timers and the async context of the last request. The
+    /// function is compiled once per context and called on each reset, as
+    /// evaluating a script on each request costs a compile and a cache
+    /// lookup. It still reads the globals when it runs.
+    fn reset_js(&mut self) -> Result<(), String> {
+        use std::pin::pin;
+
+        let created = {
+            let mut isolate = self.isolate();
+            let scope = pin!(v8::HandleScope::new(&mut isolate));
+            let mut scope = scope.init();
+            let context = v8::Local::new(&scope, &self.request.context);
+            let scope = &mut v8::ContextScope::new(&mut scope, context);
+
+            let (function, created) = match &self.request.reset {
+                Some(function) => (v8::Local::new(scope, function), None),
+                None => {
+                    let source = v8::String::new(
+                        scope,
+                        r#"(function () {
+                            globalThis.__timerCallbacks.clear();
+                            globalThis.__intervalIds.clear();
+                            globalThis.__ow.asyncContextSet(undefined);
+                        })"#,
+                    )
+                    .ok_or("Failed to create V8 string")?;
+                    let function = v8::Script::compile(scope, source, None)
+                        .and_then(|script| script.run(scope))
+                        .and_then(|value| v8::Local::<v8::Function>::try_from(value).ok())
+                        .ok_or("Failed to compile the reset")?;
+
+                    (function, Some(v8::Global::new(scope, function)))
+                }
+            };
+
+            let undefined = v8::undefined(scope).into();
+
+            function
+                .call(scope, undefined, &[])
+                .ok_or("Script execution failed")?;
+
+            created
+        };
+
+        if created.is_some() {
+            self.request.reset = created;
+        }
 
         Ok(())
     }

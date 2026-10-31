@@ -38,6 +38,9 @@ pub struct RequestContext {
     /// The handle `dispatch` answered for the event in flight.
     pub pending: Option<v8::Global<v8::Object>>,
 
+    /// The JS part of `ExecutionContext::reset`, compiled on the first reset.
+    pub reset: Option<v8::Global<v8::Function>>,
+
     /// Channel to send messages to this request's event loop
     pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
 
@@ -104,6 +107,7 @@ impl RequestContext {
             _slots: slots,
             dispatch,
             pending: None,
+            reset: None,
             scheduler_tx,
             callback_rx,
             callback_notify,
