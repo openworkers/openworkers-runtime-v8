@@ -13,6 +13,11 @@
 //! SIGALRM, and a signal thread terminates execution through the turn.
 //! Elsewhere such a turn runs until the wall clock stops it.
 //!
+//! On Linux the timer also counts: disarming it answers the time it had
+//! left, which is what is left of the budget. A turn then costs two
+//! syscalls, not four: a syscall is slow in a VM, and a request takes
+//! several turns.
+//!
 //! Wall-clock time alone does not catch a worker that computes without
 //! waiting on I/O: crypto mining, an expensive regex, a tight loop.
 
@@ -21,11 +26,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use super::{Turn, get_thread_cpu_time};
+use super::Turn;
+#[cfg(not(target_os = "linux"))]
+use super::get_thread_cpu_time;
 
 pub struct CpuEnforcer {
     budget: Duration,
     remaining: Cell<Duration>,
+    #[cfg(not(target_os = "linux"))]
     turn_started: Cell<Option<Duration>>,
     terminated: Arc<AtomicBool>,
     #[cfg(target_os = "linux")]
@@ -40,6 +48,7 @@ impl CpuEnforcer {
             return None;
         }
 
+        #[cfg(not(target_os = "linux"))]
         get_thread_cpu_time()?;
 
         let terminated = Arc::new(AtomicBool::new(false));
@@ -55,6 +64,7 @@ impl CpuEnforcer {
         Some(Self {
             budget,
             remaining: Cell::new(budget),
+            #[cfg(not(target_os = "linux"))]
             turn_started: Cell::new(None),
             terminated,
             #[cfg(target_os = "linux")]
@@ -64,25 +74,32 @@ impl CpuEnforcer {
 
     /// Starts counting a turn of the request, on the thread that runs it.
     pub fn begin_turn(&self) {
-        self.turn_started.set(get_thread_cpu_time());
-
         #[cfg(target_os = "linux")]
         self.timer.arm(self.remaining.get());
+
+        #[cfg(not(target_os = "linux"))]
+        self.turn_started.set(get_thread_cpu_time());
     }
 
     /// Takes the CPU time of the turn from the budget.
     pub fn end_turn(&self) {
         #[cfg(target_os = "linux")]
-        self.timer.disarm();
-
-        let (Some(started), Some(now)) = (self.turn_started.take(), get_thread_cpu_time()) else {
+        let Some(left) = self.timer.disarm() else {
             return;
         };
 
-        let left = self
-            .remaining
-            .get()
-            .saturating_sub(now.saturating_sub(started));
+        #[cfg(not(target_os = "linux"))]
+        let left = {
+            let (Some(started), Some(now)) = (self.turn_started.take(), get_thread_cpu_time())
+            else {
+                return;
+            };
+
+            self.remaining
+                .get()
+                .saturating_sub(now.saturating_sub(started))
+        };
+
         self.remaining.set(left);
 
         if left.is_zero() {
@@ -158,23 +175,34 @@ mod linux {
             self.set(after.max(Duration::from_micros(1)));
         }
 
-        pub fn disarm(&self) {
-            self.set(Duration::ZERO);
+        /// Stops the timer and answers the CPU time it had left: zero once
+        /// it has fired. None if the timer could not be read.
+        pub fn disarm(&self) -> Option<Duration> {
+            self.set(Duration::ZERO)
         }
 
-        fn set(&self, after: Duration) {
+        /// Sets the timer and answers what the previous setting had left.
+        fn set(&self, after: Duration) -> Option<Duration> {
             let mut spec: libc::itimerspec = unsafe { std::mem::zeroed() };
             spec.it_value.tv_sec = after.as_secs() as libc::time_t;
             spec.it_value.tv_nsec = after.subsec_nanos() as libc::c_long;
+            let mut old: libc::itimerspec = unsafe { std::mem::zeroed() };
 
-            let set = unsafe { libc::timer_settime(self.id, 0, &spec, std::ptr::null_mut()) };
+            let set = unsafe { libc::timer_settime(self.id, 0, &spec, &mut old) };
 
             if set != 0 {
                 tracing::error!(
                     "Failed to set CPU timer: {}",
                     std::io::Error::last_os_error()
                 );
+
+                return None;
             }
+
+            Some(Duration::new(
+                old.it_value.tv_sec as u64,
+                old.it_value.tv_nsec as u32,
+            ))
         }
     }
 
