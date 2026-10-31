@@ -64,6 +64,14 @@ impl OperationsHandler for Host {
             "panic in poll" => {
                 return Box::pin(async { panic!("the host function panics when polled") });
             }
+            // Works 30 ms in Rust
+            "spin 30 ms" => {
+                let end = std::time::Instant::now() + std::time::Duration::from_millis(30);
+
+                while std::time::Instant::now() < end {}
+
+                InvokeResult::Value(Value::Null)
+            }
             // Works 100 ms in Rust, past the CPU limit of 50 ms
             "spin" => {
                 let end = std::time::Instant::now() + std::time::Duration::from_millis(100);
@@ -391,4 +399,17 @@ async fn a_host_function_past_the_cpu_limit_ends_the_request() {
     let (first, _) = run_twice("await env.RUST.invoke('spin'); return 'spun';").await;
 
     assert_eq!(first.unwrap_err(), "CpuTimeLimit");
+}
+
+// The calls stay inline, in one turn, so only a cut while the turn runs ends
+// the loop before 16 x 30 ms
+#[tokio::test(flavor = "current_thread")]
+async fn a_loop_of_slow_host_functions_is_cut() {
+    let start = std::time::Instant::now();
+    let (first, _) = run_twice("while (true) { await env.RUST.invoke('spin 30 ms'); }").await;
+    let took = start.elapsed();
+
+    eprintln!("a loop of 30 ms host functions was cut after {took:?}");
+    assert_eq!(first.unwrap_err(), "CpuTimeLimit");
+    assert!(took < std::time::Duration::from_millis(200), "{took:?}");
 }

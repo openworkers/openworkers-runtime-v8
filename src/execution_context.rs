@@ -771,6 +771,11 @@ impl ExecutionContext {
             self.limits.max_cpu_time_ms,
         );
 
+        // A guard that starts spent (no CPU watchdog) runs no JavaScript
+        if cpu_guard.as_ref().is_some_and(CpuEnforcer::was_terminated) {
+            return Err(TerminationReason::CpuTimeLimit);
+        }
+
         // Execute the task
         let mut result = match task {
             Event::Fetch(ref mut init) => {

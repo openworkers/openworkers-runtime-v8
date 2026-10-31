@@ -310,6 +310,11 @@ impl ExecutionContext {
             self.request_id,
             self.limits.max_cpu_time_ms,
         );
+
+        // A guard that starts spent (no CPU watchdog) runs no JavaScript
+        if cpu.as_ref().is_some_and(CpuEnforcer::was_terminated) {
+            return Err(TerminationReason::CpuTimeLimit);
+        }
         let turn = TurnGuard::begin(
             &pooled.turn,
             self.request_id,
@@ -396,6 +401,11 @@ impl ExecutionContext {
             self.request_id,
             self.limits.max_cpu_time_ms,
         );
+
+        // A guard that starts spent (no CPU watchdog) runs no JavaScript
+        if cpu.as_ref().is_some_and(CpuEnforcer::was_terminated) {
+            return Err(TerminationReason::CpuTimeLimit);
+        }
         let mut queue = VecDeque::from([first]);
         let mut inflight: Vec<InFlight> = Vec::new();
         let mut pending = VecDeque::with_capacity(16);

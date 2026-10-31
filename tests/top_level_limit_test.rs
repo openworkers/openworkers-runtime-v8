@@ -4,7 +4,7 @@
 mod common;
 
 use std::sync::Arc;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::time::Duration;
 
 use common::run_in_local;
@@ -38,8 +38,9 @@ async fn a_top_level_past_the_cpu_limit_makes_no_worker() {
     );
 }
 
-// A top level that never ends: on Linux the CPU timer cuts it while it runs
-#[cfg(target_os = "linux")]
+// A top level that never ends: the CPU timer (Linux) or the watchdog (macOS)
+// cuts it while it runs
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test(flavor = "current_thread")]
 async fn a_top_level_that_never_ends_is_cut() {
     let start = std::time::Instant::now();
