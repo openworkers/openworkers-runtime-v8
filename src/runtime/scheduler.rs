@@ -11,6 +11,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(feature = "invoke")]
+use futures::FutureExt;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio::time::Sleep;
@@ -28,9 +30,17 @@ use openworkers_core::{
 
 pub type CallbackId = u64;
 
+/// A call of a host function through an invoke binding, with its own handle.
+#[cfg(feature = "invoke")]
+pub type InvokeFuture = std::pin::Pin<Box<dyn std::future::Future<Output = InvokeResult> + Send>>;
+
 /// Settled in place of a real result when a request is cancelled: a promise that
 /// is never settled parks the event loop for the life of the context.
 const CANCELLED: &str = "Operation cancelled";
+
+/// Settled in place of a result when a host function of an invoke binding panics.
+#[cfg(feature = "invoke")]
+pub(crate) const PANICKED: &str = "invoke: the host function panicked";
 
 /// The end of a socket that the guest holds, which sets the close frame of a
 /// cancelled request.
@@ -79,9 +89,9 @@ pub enum SchedulerMessage {
     BindingDatabase(CallbackId, String, DatabaseOp),
     BindingD1(CallbackId, String, D1Op),
     BindingWorker(CallbackId, String, HttpRequest),
-    /// A call to a function of the host: binding, command, arguments
+    /// A call of a host function that the scheduler drives to its end
     #[cfg(feature = "invoke")]
-    BindingInvoke(CallbackId, String, String, serde_json::Value),
+    BindingInvoke(CallbackId, InvokeFuture),
     /// A request to the Durable Object of an id
     BindingDurableObject(CallbackId, String, String, HttpRequest),
     /// The storage of the Durable Object this context serves
@@ -375,28 +385,18 @@ pub async fn run_event_loop(
                     }
 
                     #[cfg(feature = "invoke")]
-                    SchedulerMessage::BindingInvoke(callback_id, binding_name, command, args) => {
+                    SchedulerMessage::BindingInvoke(callback_id, call) => {
                         let callback_tx = callback_tx.clone();
-                        let ops = ops.clone();
                         let cancel = request_cancel.clone();
 
+                        // This poll gives the future the waker of its task
                         tokio::spawn(async move {
-                            let result = tokio::select! {
+                            let invoke_result = tokio::select! {
                                 biased;
-                                _ = cancel.cancelled() => {
-                                    let _ = callback_tx.send(CallbackMessage::InvokeResult(callback_id, InvokeResult::Error(CANCELLED.into())));
-                                    return;
+                                _ = cancel.cancelled() => InvokeResult::Error(CANCELLED.into()),
+                                r = std::panic::AssertUnwindSafe(call).catch_unwind() => {
+                                    r.unwrap_or_else(|_| InvokeResult::Error(PANICKED.into()))
                                 }
-                                r = ops.handle(Operation::BindingInvoke {
-                                    binding: binding_name,
-                                    name: command,
-                                    args,
-                                }) => r,
-                            };
-
-                            let invoke_result = match result {
-                                OperationResult::Invoke(r) => r,
-                                _ => InvokeResult::Error("Unexpected result type".into()),
                             };
 
                             let _ = callback_tx.send(CallbackMessage::InvokeResult(callback_id, invoke_result));

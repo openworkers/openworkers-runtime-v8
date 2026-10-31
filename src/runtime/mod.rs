@@ -55,6 +55,41 @@ pub(crate) fn dispatch_binding_callbacks(
     }
 }
 
+/// Settle the promise of an invoke call with its result: a value through
+/// JSON.parse, an error through reject. A value too large for a V8 string
+/// rejects.
+#[cfg(feature = "invoke")]
+pub(crate) fn settle_invoke(
+    scope: &mut v8::PinScope,
+    callback_id: CallbackId,
+    resolve_callbacks: &Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    reject_callbacks: &Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
+    result: openworkers_core::InvokeResult,
+) {
+    use openworkers_core::InvokeResult;
+
+    let (error, value) = match result {
+        InvokeResult::Error(message) => (Some(message), None),
+        InvokeResult::Value(value) => match v8::String::new(scope, &value.to_string()) {
+            Some(json) => {
+                let parsed = v8::json::parse(scope, json).unwrap_or_else(|| v8::null(scope).into());
+
+                (None, Some(parsed))
+            }
+            None => (Some("invoke: the answer is too large".to_string()), None),
+        },
+    };
+
+    dispatch_binding_callbacks(
+        scope,
+        callback_id,
+        resolve_callbacks,
+        reject_callbacks,
+        error.as_deref(),
+        value,
+    );
+}
+
 /// Dispatch a WebSocket event to the JS dispatcher function.
 ///
 /// The dispatcher is a JS callback registered during `ws.accept()`.

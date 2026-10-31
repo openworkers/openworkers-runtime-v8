@@ -137,6 +137,8 @@ impl ExecutionContext {
         let stream_callbacks = Rc::new(RefCell::new(HashMap::new()));
         let ws_event_callbacks = Rc::new(RefCell::new(HashMap::new()));
         let next_callback_id = Rc::new(RefCell::new(1));
+        #[cfg(feature = "invoke")]
+        let inline_calls = Rc::new(std::cell::Cell::new(0));
         let fetch_response_tx = Rc::new(RefCell::new(None));
         let stream_manager = Arc::new(stream_manager::StreamManager::new());
 
@@ -170,6 +172,9 @@ impl ExecutionContext {
                 fetch_callbacks.clone(),
                 fetch_error_callbacks.clone(),
                 next_callback_id.clone(),
+                ops.clone(),
+                #[cfg(feature = "invoke")]
+                inline_calls.clone(),
             );
             bindings::setup_stream_ops(
                 scope,
@@ -299,6 +304,8 @@ impl ExecutionContext {
             stream_manager,
             event_loop_handle,
             cancel,
+            #[cfg(feature = "invoke")]
+            inline_calls,
         );
 
         Ok(Self {
@@ -564,6 +571,10 @@ impl ExecutionContext {
         cx: &mut std::task::Context<'_>,
         pending_callbacks: &mut Vec<crate::runtime::CallbackMessage>,
     ) -> Result<usize, String> {
+        // Each round of the event loop gets a whole inline budget
+        #[cfg(feature = "invoke")]
+        self.request.inline_calls.set(0);
+
         loop {
             match self.request.callback_rx.poll_recv(cx) {
                 std::task::Poll::Ready(Some(msg)) => pending_callbacks.push(msg),
@@ -734,6 +745,10 @@ impl ExecutionContext {
     /// Execute a task in this context
     pub async fn exec(&mut self, mut task: Event) -> Result<(), TerminationReason> {
         self.marks = ListenerMarks::default();
+
+        // A reused context starts each request with a whole inline budget
+        #[cfg(feature = "invoke")]
+        self.request.inline_calls.set(0);
 
         // Check if aborted before starting
         if self.request.aborted.load(Ordering::SeqCst) {

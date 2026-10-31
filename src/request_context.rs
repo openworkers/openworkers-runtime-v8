@@ -53,6 +53,11 @@ pub struct RequestContext {
     /// Fetch promise callbacks (reject side)
     pub fetch_error_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
 
+    /// Calls of invoke bindings settled inline since the event loop last
+    /// polled (see `setup_invoke`)
+    #[cfg(feature = "invoke")]
+    pub inline_calls: Rc<std::cell::Cell<u32>>,
+
     /// Clears the timers and the async context of the guest at each reset
     pub clear_guest_state: v8::Global<v8::Function>,
 
@@ -102,6 +107,7 @@ impl RequestContext {
         stream_manager: Arc<StreamManager>,
         event_loop_handle: tokio::task::JoinHandle<()>,
         cancel: CancellationToken,
+        #[cfg(feature = "invoke")] inline_calls: Rc<std::cell::Cell<u32>>,
     ) -> Self {
         Self {
             context,
@@ -113,6 +119,8 @@ impl RequestContext {
             callback_notify,
             fetch_callbacks,
             fetch_error_callbacks,
+            #[cfg(feature = "invoke")]
+            inline_calls,
             clear_guest_state,
             stream_callbacks,
             ws_event_callbacks,

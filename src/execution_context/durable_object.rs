@@ -507,6 +507,10 @@ impl ExecutionContext {
     ) -> Result<TurnOutcome, String> {
         let mut took = false;
 
+        // Each turn gets a whole inline budget
+        #[cfg(feature = "invoke")]
+        self.request.inline_calls.set(0);
+
         for round in 0..MAX_ROUNDS {
             let mut admitted = 0;
 

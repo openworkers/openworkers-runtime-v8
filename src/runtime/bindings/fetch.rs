@@ -1,9 +1,14 @@
+#[cfg(feature = "invoke")]
+use super::super::scheduler::{InvokeFuture, PANICKED};
 use super::super::{CallbackId, SchedulerMessage};
 use super::state::FetchState;
 use crate::v8_helpers::throw_type_error;
 use openworkers_core::{
-    D1Op, DatabaseOp, HttpMethod, HttpRequest, KvOp, RequestBody, SqlParam, StorageOp,
+    D1Op, DatabaseOp, HttpMethod, HttpRequest, KvOp, OperationsHandle, RequestBody, SqlParam,
+    StorageOp,
 };
+#[cfg(feature = "invoke")]
+use openworkers_core::{InvokeResult, Operation, OperationResult};
 use serde::Deserialize;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -195,6 +200,8 @@ pub fn setup_fetch(
     callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
     error_callbacks: Rc<RefCell<HashMap<CallbackId, v8::Global<v8::Function>>>>,
     next_id: Rc<RefCell<CallbackId>>,
+    #[cfg_attr(not(feature = "invoke"), allow(unused_variables))] ops: OperationsHandle,
+    #[cfg(feature = "invoke")] inline_calls: Rc<std::cell::Cell<u32>>,
 ) {
     let state = FetchState {
         scheduler_tx,
@@ -202,6 +209,10 @@ pub fn setup_fetch(
         error_callbacks,
         next_id,
         frames: std::sync::Arc::default(),
+        #[cfg(feature = "invoke")]
+        ops,
+        #[cfg(feature = "invoke")]
+        inline_calls,
     };
 
     store_state!(scope, state);
@@ -642,8 +653,17 @@ pub fn setup_fetch(
     exec_js!(scope, code);
 }
 
-/// `__nativeBindingInvoke(binding, command, args, resolve, reject)`: a call to
-/// a function of the host. The arguments are JSON data.
+/// Calls settled inline, panics included, in one round of the event loop or
+/// one turn of a Durable Object. Past this, the calls go through the
+/// scheduler. One poll runs up to MAX_COALESCE_ROUNDS (4) rounds, so it may
+/// settle up to 4 x 16 calls inline before it gives the thread back.
+#[cfg(feature = "invoke")]
+const MAX_INLINE_CALLS: u32 = 16;
+
+/// Calls a host function inline, and settles its promise at once when it is ready.
+///
+/// No re-entry: the inline poll runs Rust code of the host only. It must not run
+/// JavaScript and must not enter the isolate.
 #[cfg(feature = "invoke")]
 fn setup_invoke(scope: &mut v8::PinScope) {
     let native_binding_invoke_fn = v8::Function::new(
@@ -674,13 +694,62 @@ fn setup_invoke(scope: &mut v8::PinScope) {
             };
 
             let callback_id = register_callbacks_with_error(&state, scope, resolve_fn, reject_fn);
+            let ops = state.ops.clone();
+            let mut call: InvokeFuture = Box::pin(async move {
+                let operation = Operation::BindingInvoke {
+                    binding,
+                    name: command,
+                    args: call_args,
+                };
 
-            let _ = state.scheduler_tx.send(SchedulerMessage::BindingInvoke(
+                match ops.handle(operation).await {
+                    OperationResult::Invoke(result) => result,
+                    _ => InvokeResult::Error("Unexpected result type".into()),
+                }
+            });
+
+            // Past the budget, the scheduler settles the call, so the turn ends
+            if state.inline_calls.get() >= MAX_INLINE_CALLS {
+                let _ = state
+                    .scheduler_tx
+                    .send(SchedulerMessage::BindingInvoke(callback_id, call));
+
+                return;
+            }
+
+            let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+            let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                call.as_mut().poll(&mut context)
+            }));
+
+            let result = match polled {
+                Ok(std::task::Poll::Ready(result)) => {
+                    state.inline_calls.set(state.inline_calls.get() + 1);
+
+                    result
+                }
+                Ok(std::task::Poll::Pending) => {
+                    let _ = state
+                        .scheduler_tx
+                        .send(SchedulerMessage::BindingInvoke(callback_id, call));
+
+                    return;
+                }
+                Err(_) => {
+                    drop(call);
+                    state.inline_calls.set(state.inline_calls.get() + 1);
+
+                    InvokeResult::Error(PANICKED.into())
+                }
+            };
+
+            crate::runtime::settle_invoke(
+                scope,
                 callback_id,
-                binding,
-                command,
-                call_args,
-            ));
+                &state.callbacks,
+                &state.error_callbacks,
+                result,
+            );
         },
     )
     .unwrap();
